@@ -25,7 +25,7 @@
 
 **Canonical coordinate frame** — every obstacle point, floor estimate, voxel, and swept path MUST live in ONE frame:
 - **Agent-local ground frame**: origin at the agent's base footprint center on the floor; **+z = forward, +x = right, +y = up**; units = meters.
-- Habitat camera (`render`) returns depth in a camera frame. `pointcloud.backproject` produces camera-frame points; `pointcloud.to_agent_ground(pts, camera_height=1.5, pitch=0)` converts them into the agent-local ground frame above (translate down by camera height, apply camera→agent rotation; demo cameras are level so pitch=0). **All downstream code (floor removal, VoxelField, sweep) consumes only agent-ground-frame points.** `VoxelField` and `swept_path` operate on the 2D `(x, z)` ground projection; the obstacle band filter uses `y` (height above floor).
+- Habitat camera (`render`) returns depth in a camera frame. `pointcloud.backproject` produces camera-frame points (x=right, y=up, z=forward); `pointcloud.to_agent_ground(pts, camera_height=1.5, pitch=0)` converts them into the agent-local ground frame above. The camera sits `camera_height` ABOVE the floor and is level, so the transform is `y_ground = y_cam + camera_height` (x,z unchanged for a level camera): a floor point (camera-frame y≈−1.5) maps to y≈0; a point at the camera's own height (camera-frame y≈0) maps to y≈1.5. **All downstream code (floor removal, VoxelField, sweep) consumes only agent-ground-frame points.** `VoxelField` and `swept_path` operate on the 2D `(x, z)` ground projection; the obstacle band filter uses `y` (height above floor).
 - Floor height is estimated in this frame (≈ y=0); `OBSTACLE_BAND_M = (0.05, 1.5)` is height-above-floor in `y`.
 
 **Resolution shape**: `config.RESOLUTION = (640, 480)` is `(W, H)`. Habitat `CameraSensorSpec.resolution` wants `[H, W]`. Use the helper `config.hw()` → `[480, 640]` when configuring sensors and when building intrinsics. NEVER pass `RESOLUTION` straight into Habitat (silent transpose → rotated FOV + wrong intrinsics).
@@ -370,7 +370,7 @@ def test_floor_removed_keeps_wall():
 - [ ] **Step 2: Run** → FAIL
 - [ ] **Step 3: Implement** (in the canonical frame from Conventions):
   - `backproject(depth, K) -> (N,3)` camera-frame points.
-  - `to_agent_ground(pts_cam, camera_height=config.CAMERA_HEIGHT_M, pitch=0.0) -> (N,3)` agent-local ground frame (+z fwd, +x right, +y up): apply camera→agent rotation (level cam ⇒ identity up to axis relabel) then translate `y -= camera_height`. **Add a test** asserting a camera point straight ahead at depth d maps to agent-ground `(x≈0, z≈d, y≈0)` (floor level) for a level camera.
+  - `to_agent_ground(pts_cam, camera_height=config.CAMERA_HEIGHT_M, pitch=0.0) -> (N,3)` agent-local ground frame (+z fwd, +x right, +y up): for a level camera, `y_ground = y_cam + camera_height` (x,z unchanged). **Add tests**: a straight-ahead camera point `(0,0,d)` maps to `(x≈0, z≈d, y≈camera_height)`; a floor point `(0,-camera_height,d)` maps to `(x≈0, z≈d, y≈0)`.
   - `estimate_floor_height(pts)` = robust low-percentile / histogram mode of `y`.
   - `remove_floor(pts, floor_y, band)` keeps points with `band[0] ≤ (y-floor_y) ≤ band[1]` (default band = `config.OBSTACLE_BAND_M`).
 - [ ] **Step 4: Run** → PASS
