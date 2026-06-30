@@ -90,6 +90,11 @@ class EgoConseqSim:
     # ------------------------------------------------------------------
 
     @property
+    def sim(self) -> habitat_sim.Simulator:
+        """The underlying habitat_sim.Simulator (needed by navmesh utils)."""
+        return self._sim
+
+    @property
     def pathfinder(self) -> habitat_sim.PathFinder:
         return self._sim.pathfinder
 
