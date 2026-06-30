@@ -24,8 +24,8 @@ H_BODYWIDTHS = (1, 2, 4, 6)      # O1/O3 horizon unit
 D_MAX_M = 5.0                    # cap for "no contact within visible local space"
 
 # --- voxel oracle (tuned in P1.5; placeholders) ---
-VOXEL_SIZE_M = 0.05
-VOXEL_DILATION = 1               # voxels
+VOXEL_SIZE_M = 0.03
+VOXEL_DILATION = 0               # voxels
 MIN_SUPPORT_VOXELS = 3
 
 # --- gates (design §5) ---
