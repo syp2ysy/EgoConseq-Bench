@@ -1,0 +1,1 @@
+EgoConseq-Bench — single-image ego-action physical-consequence VQA benchmark generated with Habitat-Sim. See docs/2026-06-30-egoconseq-bench-v1-design.md (frozen design) and docs/plans/2026-06-30-egoconseq-demo-pipeline.md (implementation plan).
