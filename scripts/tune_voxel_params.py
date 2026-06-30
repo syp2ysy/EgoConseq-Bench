@@ -47,6 +47,7 @@ from egoconseq.oracle.pointcloud import (
 )
 from egoconseq.oracle.voxel import VoxelField
 from egoconseq.oracle.sweep import d_safe_visible
+from egoconseq.geometry import swept_path, project_contact
 from egoconseq.gates.sanity import step_size_stable
 
 # ---------------------------------------------------------------------------
@@ -69,6 +70,19 @@ NAVMESH_OPEN_THRESH = 0.50   # metres
 
 # False-contact proxy: depth-oracle d_safe < this is "suspiciously small"
 FALSE_CONTACT_SMALL_DSAFE = 0.15  # metres
+
+# --- False-SAFE (cardinal metric) proxy ---
+# A pose has a navmesh contact within horizon if d_nav < d_max - tol.
+NAVMESH_CONTACT_TOL = 0.10        # metres; d_nav < D_MAX - tol => navmesh saw a contact
+# A MISS = oracle d_safe exceeds navmesh d_safe by more than this margin
+# (oracle failed to see an obstacle that navmesh caught) -> false-safe.
+MISS_MARGIN_M = 0.30             # metres
+# Representative obstacle-surface height (mid obstacle band) for visibility test.
+CONTACT_DISPLAY_HEIGHT_M = 0.50  # metres above floor
+
+# Selection gates
+MIN_STABILITY = 0.95
+MAX_FALSE_CONTACT_RATE = 0.10
 
 # Step-size comparison
 STEP_A = 0.02   # coarse (current config.MARCH_STEP_M)
@@ -110,6 +124,36 @@ def dsafe_for_params(
         min_support=min_support,
     )
     return result.d_safe
+
+
+def navmesh_contact_visible(
+    d_nav: float,
+    floor_y: float,
+    K: np.ndarray,
+    img_hw: Tuple[int, int],
+    turn_deg: float = TURN_DEG,
+    height_above_floor: float = CONTACT_DISPLAY_HEIGHT_M,
+) -> bool:
+    """Is the navmesh contact point at arc-length d_nav plausibly in-frame?
+
+    Reconstructs the contact (x, z) on the swept centerline at d_nav, raises it
+    to a representative obstacle-surface height (floor_y + 0.5 m), projects it
+    into the current camera, and checks the pixel is inside the image and in
+    front of the camera.
+
+    Returns False if the point is behind the camera or outside the frame.
+    """
+    samples = swept_path(turn_deg, forward_m=d_nav, step=config.MARCH_STEP_M)
+    # last sample is at arc-length ~= d_nav
+    x, z, _h = samples[-1]
+    y = floor_y + height_above_floor
+    try:
+        u, v = project_contact((x, y, z), K, camera_height=config.CAMERA_HEIGHT_M)
+    except ValueError:
+        # z_cam <= 0 -> behind camera
+        return False
+    H, W = img_hw
+    return (0.0 <= u < W) and (0.0 <= v < H)
 
 
 def collect_poses(sim: EgoConseqSim, n: int, seed: int) -> list:
@@ -170,15 +214,25 @@ def main() -> None:
         poses = collect_poses(sim, N_POSES, seed=SEED)
         n_poses = len(poses)
 
-        # Precompute obstacle clouds and floor heights for all poses
-        obs_data: List[Tuple[np.ndarray, float, np.ndarray, np.ndarray, float]] = []
+        # Precompute obstacle clouds and floor heights for all poses.
+        # Each entry: dict with pts_obs, floor_y, pos, K, dnav, nav_contact, vis.
+        #   nav_contact = navmesh saw a contact within horizon (d_nav < D_MAX - tol)
+        #   vis         = that contact point is plausibly in-frame
+        obs_data: List[Dict] = []
         for pos, yaw, depth, K in poses:
             pts_obs, floor_y = build_obs(depth, K)
             # navmesh d_safe for reference (MARCH_STEP_A, r=0.25)
             dnav = d_safe_navmesh(sim.pathfinder, pos, yaw, turn_deg=TURN_DEG,
                                    step=STEP_A, d_max=config.D_MAX_M)
-            obs_data.append((pts_obs, floor_y, pos, K, dnav))
-            print(f"  pts_obs={pts_obs.shape[0]:5d}  floor_y={floor_y:.3f}  d_nav={dnav:.3f}")
+            nav_contact = dnav < (config.D_MAX_M - NAVMESH_CONTACT_TOL)
+            img_hw = (depth.shape[0], depth.shape[1])
+            vis = nav_contact and navmesh_contact_visible(dnav, floor_y, K, img_hw)
+            obs_data.append(dict(
+                pts_obs=pts_obs, floor_y=floor_y, pos=pos, K=K, dnav=dnav,
+                nav_contact=nav_contact, vis=vis,
+            ))
+            print(f"  pts_obs={pts_obs.shape[0]:5d}  floor_y={floor_y:.3f}  "
+                  f"d_nav={dnav:.3f}  nav_contact={nav_contact}  visible={vis}")
 
         # ------------------------------------------------------------------
         # 2. Step-size stability for default params (VOXEL_SIZE_M=0.05 / DILATION=1 / MIN_SUPPORT=3)
@@ -186,9 +240,9 @@ def main() -> None:
         print("\n[2] Step-size stability (default params 0.05/1/3, 0.02 vs 0.01)...")
         stab_labels_a: List[str] = []
         stab_labels_b: List[str] = []
-        for (pts_obs, floor_y, pos, K, dnav) in obs_data:
-            da = dsafe_for_params(pts_obs, 0.05, 1, 3, step=STEP_A)
-            db = dsafe_for_params(pts_obs, 0.05, 1, 3, step=STEP_B)
+        for d in obs_data:
+            da = dsafe_for_params(d["pts_obs"], 0.05, 1, 3, step=STEP_A)
+            db = dsafe_for_params(d["pts_obs"], 0.05, 1, 3, step=STEP_B)
             # Discretise to bin
             stab_labels_a.append(str(bin_dsafe(da)))
             stab_labels_b.append(str(bin_dsafe(db)))
@@ -208,36 +262,52 @@ def main() -> None:
             labels_b: List[str] = []
             false_contact_count = 0
             total_open = 0
+            miss_count = 0          # false-safe: oracle missed a visible navmesh contact
+            total_vis_contact = 0   # poses with a visible navmesh contact
 
-            for (pts_obs, floor_y, pos, K, dnav) in obs_data:
+            for d in obs_data:
+                pts_obs = d["pts_obs"]
+                dnav = d["dnav"]
                 # d_safe at coarse and fine step
                 da = dsafe_for_params(pts_obs, voxel, dil, ms, step=STEP_A)
                 db = dsafe_for_params(pts_obs, voxel, dil, ms, step=STEP_B)
                 labels_a.append(str(bin_dsafe(da)))
                 labels_b.append(str(bin_dsafe(db)))
 
-                # False-contact proxy: navmesh says open ahead, but oracle tiny
+                # False-contact (false-positive) proxy: navmesh open ahead, oracle tiny
                 if dnav > NAVMESH_OPEN_THRESH:
                     total_open += 1
                     if da < FALSE_CONTACT_SMALL_DSAFE:
                         false_contact_count += 1
 
-            stab = step_size_stable(labels_a, labels_b, thresh=0.0)  # compute fraction
+                # False-SAFE (cardinal) proxy: navmesh saw a VISIBLE contact, but the
+                # oracle's d_safe overshoots it by > MISS_MARGIN_M (oracle missed it).
+                if d["vis"]:
+                    total_vis_contact += 1
+                    if da > dnav + MISS_MARGIN_M:
+                        miss_count += 1
+
             n_pairs = len(list(zip(labels_a, labels_b)))
             agree = sum(1 for a, b in zip(labels_a, labels_b) if a == b)
             stab_frac = agree / max(n_pairs, 1)
             fc_rate = false_contact_count / max(total_open, 1)
+            missed_rate = miss_count / max(total_vis_contact, 1)
 
             results[(voxel, dil, ms)] = {
                 "stab": stab_frac,
                 "fc_rate": fc_rate,
                 "n_open": total_open,
                 "n_fc": false_contact_count,
+                "missed_rate": missed_rate,
+                "n_miss": miss_count,
+                "n_vis": total_vis_contact,
                 "labels_a": labels_a,
                 "labels_b": labels_b,
             }
-            tag = "STABLE" if stab_frac >= 0.95 else "UNSTABLE"
-            print(f"  ({voxel:.2f}, {dil}, {ms:2d})  stab={stab_frac:.3f}[{tag}]  fc={false_contact_count}/{total_open}({fc_rate:.3f})")
+            tag = "STABLE" if stab_frac >= MIN_STABILITY else "UNSTABLE"
+            print(f"  ({voxel:.2f}, {dil}, {ms:2d})  stab={stab_frac:.3f}[{tag}]  "
+                  f"fc={false_contact_count}/{total_open}({fc_rate:.3f})  "
+                  f"miss={miss_count}/{total_vis_contact}({missed_rate:.3f})")
 
         # ------------------------------------------------------------------
         # 4. Floor over-estimation check
@@ -250,10 +320,10 @@ def main() -> None:
         total_poses = 0
         over_margin_sum = 0.0
 
-        for i, (pts_obs, floor_y, pos, K, dnav) in enumerate(obs_data):
+        for i, d in enumerate(obs_data):
             total_poses += 1
-            d_oracle = dsafe_for_params(pts_obs, 0.05, 1, 3, step=STEP_A)
-            d_nav = dnav
+            d_oracle = dsafe_for_params(d["pts_obs"], 0.05, 1, 3, step=STEP_A)
+            d_nav = d["dnav"]
             diff = d_oracle - d_nav
             is_over = diff > 0.15   # oracle > navmesh by >15cm → potential false-safe
             if is_over:
@@ -275,41 +345,59 @@ def main() -> None:
         # ------------------------------------------------------------------
         print("\n[5] Picking best combo...")
 
-        # Primary: minimize false-contact rate among stable combos (stab >= 0.95)
-        # Secondary: prefer lower voxel_size (finer), then lower dilation, then lower min_support
-        stable_combos = [(k, v) for k, v in results.items() if v["stab"] >= 0.95]
-        if not stable_combos:
-            # No fully stable combo — pick least unstable
-            stable_combos = sorted(results.items(), key=lambda x: -x[1]["stab"])
+        # Cardinal metric of this benchmark is FALSE-SAFE rate (missed obstacles),
+        # NOT false-positives. So:
+        #   Gate:    step_size_stability >= 0.95  AND  false_contact_rate <= 0.10
+        #   Primary: MINIMIZE missed_visible_obstacle_rate (false-safe proxy)
+        #   Tie-break toward the MORE CONSERVATIVE field (prefer catching obstacles):
+        #            larger dilation, then larger voxel, then smaller min_support.
+        # Sort keys are NEGATED for the "larger is preferred" axes.
+        eligible = [
+            (k, v) for k, v in results.items()
+            if v["stab"] >= MIN_STABILITY and v["fc_rate"] <= MAX_FALSE_CONTACT_RATE
+        ]
+        if not eligible:
+            print("  WARNING: no combo passes stability+false-contact gate; "
+                  "relaxing to stability-only.")
+            eligible = [(k, v) for k, v in results.items() if v["stab"] >= MIN_STABILITY]
+        if not eligible:
             print("  WARNING: no combo reaches 0.95 stability; picking least unstable.")
+            eligible = sorted(results.items(), key=lambda x: -x[1]["stab"])[:1]
 
         best_key, best_val = min(
-            stable_combos,
-            key=lambda kv: (kv[1]["fc_rate"], kv[0][0], kv[0][1], kv[0][2])
+            eligible,
+            key=lambda kv: (
+                kv[1]["missed_rate"],   # 1. minimize false-safe
+                -kv[0][1],              # 2. prefer LARGER dilation (more conservative)
+                -kv[0][0],              # 3. prefer LARGER voxel (more conservative)
+                kv[0][2],               # 4. prefer SMALLER min_support (more conservative)
+            ),
         )
         best_voxel, best_dil, best_ms = best_key
         print(f"  Best combo: voxel={best_voxel}  dilation={best_dil}  min_support={best_ms}")
-        print(f"    stability={best_val['stab']:.3f}  fc_rate={best_val['fc_rate']:.3f}")
+        print(f"    stability={best_val['stab']:.3f}  fc_rate={best_val['fc_rate']:.3f}  "
+              f"missed_rate={best_val['missed_rate']:.3f}")
 
         # ------------------------------------------------------------------
         # 6. Print full comparison table
         # ------------------------------------------------------------------
         header = (
             f"{'voxel':>7} {'dil':>4} {'ms':>4} | "
-            f"{'stab':>7} {'fc/open':>8} {'fc_rate':>8}"
+            f"{'stab':>7} {'fc/open':>8} {'fc_rate':>8} {'miss/vis':>9} {'miss_rate':>10}"
         )
-        print("\n" + "=" * 60)
+        print("\n" + "=" * 80)
         print("Full comparison table:")
         print(header)
-        print("-" * 60)
+        print("-" * 80)
         for (voxel, dil, ms), v in sorted(results.items()):
             row = (
                 f"{voxel:>7.2f} {dil:>4d} {ms:>4d} | "
-                f"{v['stab']:>7.3f} {v['n_fc']:>3d}/{v['n_open']:<4d} {v['fc_rate']:>7.3f}"
+                f"{v['stab']:>7.3f} {v['n_fc']:>3d}/{v['n_open']:<4d} {v['fc_rate']:>7.3f} "
+                f"{v['n_miss']:>3d}/{v['n_vis']:<5d} {v['missed_rate']:>9.3f}"
             )
             star = " <-- BEST" if (voxel, dil, ms) == best_key else ""
             print(row + star)
-        print("=" * 60)
+        print("=" * 80)
 
         # ------------------------------------------------------------------
         # 7. Write chosen values into config.py
@@ -381,7 +469,25 @@ Generated by `scripts/tune_voxel_params.py`
 - Radius: {RADIUS} m  |  TURN_DEG: {TURN_DEG}
 - Step A: {STEP_A} m (coarse, current MARCH_STEP_M)
 - Step B: {STEP_B} m (fine, 2× resolution)
-- Stability target: ≥ 0.95
+- Stability target: ≥ {MIN_STABILITY}
+- False-contact gate: ≤ {MAX_FALSE_CONTACT_RATE}
+
+## Selection Criterion (cardinal metric = FALSE-SAFE rate)
+
+The benchmark's cardinal metric is the **False-Safe Rate** — ground-truth
+contacts the oracle MISSES — not false positives. Selection is therefore
+lexicographic:
+
+1. **Gate**: `step_size_stability ≥ {MIN_STABILITY}` AND `false_contact_rate ≤ {MAX_FALSE_CONTACT_RATE}`.
+2. **Primary**: minimize `missed_visible_obstacle_rate` (false-safe proxy):
+   among poses where the navmesh oracle reports a contact within the horizon
+   (`d_nav < D_MAX − {NAVMESH_CONTACT_TOL}`) AND that contact projects in-frame,
+   a MISS = the depth-oracle `d_safe` overshoots `d_nav` by > {MISS_MARGIN_M} m.
+3. **Tie-break toward the MORE CONSERVATIVE field** (prefer catching obstacles):
+   larger dilation, then larger voxel, then smaller min_support. A thin/sparse
+   obstacle (chair/table leg) sampled by few depth points occupies few tiny
+   cells; dilation ≥ 1 and a not-too-fine voxel help it reach min_support so the
+   oracle does NOT miss it.
 
 ## Step-Size Stability (default params 0.05/1/3)
 
@@ -389,14 +495,15 @@ Agreement fraction: **{default_stab:.3f}**  (labels_A={stab_labels_a}  B={stab_l
 
 ## Full Comparison Table
 
-| voxel | dil | ms | stability | fc/open | fc_rate |
-|------:|----:|---:|----------:|--------:|--------:|
+| voxel | dil | ms | stability | fc/open | fc_rate | miss/vis | missed_rate |
+|------:|----:|---:|----------:|--------:|--------:|---------:|------------:|
 """
         for (voxel, dil, ms), v in sorted(results.items()):
             star = " ← **BEST**" if (voxel, dil, ms) == best_key else ""
             report += (
                 f"| {voxel:.2f} | {dil} | {ms} | {v['stab']:.3f} | "
-                f"{v['n_fc']}/{v['n_open']} | {v['fc_rate']:.3f} |{star}\n"
+                f"{v['n_fc']}/{v['n_open']} | {v['fc_rate']:.3f} | "
+                f"{v['n_miss']}/{v['n_vis']} | {v['missed_rate']:.3f} |{star}\n"
             )
 
         report += f"""
@@ -410,6 +517,7 @@ Agreement fraction: **{default_stab:.3f}**  (labels_A={stab_labels_a}  B={stab_l
 
 - Stability: {best_val['stab']:.3f}
 - False-contact rate: {best_val['fc_rate']:.3f} ({best_val['n_fc']}/{best_val['n_open']} open poses)
+- Missed-visible-obstacle (false-safe) rate: {best_val['missed_rate']:.3f} ({best_val['n_miss']}/{best_val['n_vis']} visible-contact poses)
 
 ## Floor Over-Estimation Detail
 
@@ -422,6 +530,33 @@ Over-estimation rate: {over_count}/{total_poses} = {over_rate:.3f}
 """
         report += floor_rec
 
+        # Honest methodological caveat about the selection.
+        n_eligible = len([1 for _, v in results.items()
+                          if v["stab"] >= MIN_STABILITY and v["fc_rate"] <= MAX_FALSE_CONTACT_RATE])
+        report += f"""
+## Caveat: selection was decided by the TIE-BREAK, not the metrics
+
+On this single scene ({n_poses} poses) the `false_contact_rate` is 0.000 for
+**all** combos and `missed_visible_obstacle_rate` is 0.000 for all but one
+combo — both proxies are **non-binding** here (only 3 poses had a visible
+navmesh contact, and 3/7 open poses fed the false-contact proxy). With
+{n_eligible} combos tied at (stab=1.0, fc=0, miss=0), the chosen value
+**{best_key}** is entirely a product of the tie-break order
+(larger dilation → larger voxel → smaller min_support).
+
+This pushed the pick to the **coarsest** voxel (0.08 m) at maximum dilation,
+which is the most conservative obstacle field but also the least spatially
+precise. The coordinator's stated expectation was 0.05/1/3 (or 0.03/1/3).
+**Decision flagged for the controller**: if a 0.08 m / dilation-2 field is
+considered too coarse / too dilated (risk of false-CONTACT on a larger pose
+set, which this single scene cannot expose), the principled safe default
+within the tie is **0.05 / 1 / 3** — it is stable, fc=0, miss=0, uses
+dilation ≥ 1 to catch thin obstacles, and keeps a moderate voxel size. The
+sample here (1 scene, 3 visible-contact poses) is too small to discriminate
+on the cardinal metric; a larger multi-scene sweep is recommended before
+freezing these constants.
+"""
+
         report_path = os.path.join(OUT_DIR, "voxel_tuning_report.md")
         with open(report_path, "w") as f:
             f.write(report)
@@ -430,7 +565,8 @@ Over-estimation rate: {over_count}/{total_poses} = {over_rate:.3f}
         # Final summary
         print("\n[tune_voxel] DONE")
         print(f"  Chosen: VOXEL_SIZE_M={best_voxel}  VOXEL_DILATION={best_dil}  MIN_SUPPORT_VOXELS={best_ms}")
-        print(f"  Stability: {best_val['stab']:.3f}  FC-rate: {best_val['fc_rate']:.3f}")
+        print(f"  Stability: {best_val['stab']:.3f}  FC-rate: {best_val['fc_rate']:.3f}  "
+              f"Missed(false-safe)-rate: {best_val['missed_rate']:.3f}")
         if over_rate > 0.3:
             print(f"  *** FLOOR OVER-ESTIMATION WARNING: {over_count}/{total_poses} ({over_rate:.0%}) poses. "
                   f"See report for clamp recommendation. ***")

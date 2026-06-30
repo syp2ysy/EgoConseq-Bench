@@ -23,9 +23,14 @@ TURN_ANGLES_DEG = (-15, 0, 15)   # ±30 optional, not in core demo
 H_BODYWIDTHS = (1, 2, 4, 6)      # O1/O3 horizon unit
 D_MAX_M = 5.0                    # cap for "no contact within visible local space"
 
-# --- voxel oracle (tuned in P1.5; placeholders) ---
-VOXEL_SIZE_M = 0.03
-VOXEL_DILATION = 0               # voxels
+# --- voxel oracle (tuned in P1.5) ---
+# Tuning sweep proxies (1 scene/7 poses) were non-binding (fc=0, miss=0 across
+# combos), so the choice is a judgment call. Controller decision: 0.05/1/3 —
+# 5cm precision, dilation=1 catches thin obstacles (chair legs) without the
+# over-expansion of 0.08/dilation2 (which risks false-CONTACT + poor contact
+# localization). Re-tune on a larger multi-scene sweep before final freeze.
+VOXEL_SIZE_M = 0.05
+VOXEL_DILATION = 1               # voxels
 MIN_SUPPORT_VOXELS = 3
 
 # --- gates (design §5) ---
