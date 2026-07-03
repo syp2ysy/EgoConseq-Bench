@@ -210,34 +210,27 @@ Kendall tau / pairwise ranking accuracy
 这是你们最强的一类。
 
 **测什么：**
-同一张 RGB、同一个 pose、同一个动作，只改 body radius / width，GT 是否翻转；模型是否也翻转。
+同一张 RGB、同一个 pose、同一个动作，只改圆柱形底盘的 body radius / width，GT 是否翻转；模型是否也翻转。
+
+注意题面形式：**每道题只描述一个机器人、一个底盘直径**。反事实不是在同一道题里做双对象比较，而是在 manifest 里把同图同动作、不同底盘直径的若干道题用同一个 `group_id` 绑起来，组内看答案是否翻转。机器人高度固定为 Habitat 默认 agent height，不作为变量，也不写进 prompt。
 
 **GT：**
 
 ```text
-pass_small = d_safe(r_small, action) >= H
-pass_large = d_safe(r_large, action) >= H
+label(r) = contact iff d_safe(r, action) < H
+group flip = 同一 group 内同时出现 contact 和 no_contact
 ```
 
 **问题示例：**
 
 ```text
-同一张图、同一个起点、同一个动作。
-小机器人宽约 0.2 米，大机器人宽约 0.8 米。
-如果它们都向正前方移动 2 米，哪种说法正确？
-
-A. 两个都不会接触
-B. 只有小机器人不会接触
-C. 两个都会接触
+图中是一个圆柱形底盘的机器人，底盘直径约 0.8 米。
+它从当前位置朝正前方移动约 2.0 米。
+只看这张第一视角图，判断它的身体在当前可见的局部空间内会不会与障碍物发生接触。
+请只回答：会接触 / 不会接触。
 ```
 
-这里可以是三选一，因为纯 footprint radius 下：
-
-```text
-large 能过但 small 不能过
-```
-
-在物理上不应出现。你们应该把这个单调性作为 oracle sanity check。
+同一个 `group_id` 下可以另有一道完全相同图像/动作、但底盘直径约 0.2 米的题。窄底盘 no_contact、宽底盘 contact 的组才是 O5 的核心判别组。纯 footprint radius 下 `d_safe(r_large) <= d_safe(r_small)`，这个单调性仍然作为 oracle sanity check。
 
 **低分说明：**
 
@@ -330,7 +323,7 @@ collision_point_3d → project to RGB → region / grid cell
 | Forward Swept Clearance  | 数值：`3.2 body-widths`           | MAE / bin accuracy             |
 | Fixed-Horizon Contact    | `contact / no contact`         | Acc / False-Safe Rate          |
 | Directional Comparison   | 排序：`left > straight > right`   | Top-1 / Kendall tau            |
-| Footprint Counterfactual | `both / small-only / neither`  | Acc / pair consistency         |
+| Footprint Counterfactual | 单题：`contact / no_contact`；组内：flip / invariant | case Acc / group flip consistency |
 | Critical Body Width      | 数值：`0.55m` 或 `1.2× body-width` | MAE / tolerance accuracy       |
 | First-Contact Grounding  | grid cell：`B3` 或 `none`        | grid accuracy / pixel distance |
 
@@ -693,10 +686,10 @@ absolute error <= 0.75 body-width 记为正确
 ## 示例 4：body counterfactual
 
 ```text
-同一张图、同一个起点、同一个正前方动作。
-小机器人宽约 0.2 米，大机器人宽约 0.8 米。
-如果它们都向前移动 2 米，哪种情况会发生？
-请回答：两个都不接触 / 只有小机器人不接触 / 两个都会接触。
+图中是一个圆柱形底盘的机器人，底盘直径约 0.8 米。
+它从当前位置朝正前方移动约 2.0 米。
+只看这张第一视角图，判断它的身体在当前可见的局部空间内会不会与障碍物发生接触。
+请只回答：会接触 / 不会接触。
 ```
 
 ## 示例 5：critical body width
@@ -729,7 +722,7 @@ absolute error <= 0.75 body-width 记为正确
 | Forward Clearance        | MAE / bin Acc                       | body-relative clearance 是否弱 |
 | Fixed-Horizon Contact    | Acc / False-Safe Rate               | 会不会把危险动作说成不接触               |
 | Directional Ranking      | Top-1 / Kendall tau                 | 是否能比较多方向 action consequence |
-| Footprint Counterfactual | Pair consistency / flip sensitivity | 是否对 body width 敏感           |
+| Footprint Counterfactual | group flip accuracy / invariance error | 是否对 body width 敏感           |
 | Critical Width           | MAE / tolerance Acc                 | 是否理解连续 body-width 约束        |
 | Contact Grounding        | grid Acc / normalized distance      | 是否 grounded 到可见首碰证据         |
 

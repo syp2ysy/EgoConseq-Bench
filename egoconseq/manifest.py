@@ -26,7 +26,7 @@ class Case:
     # ── identity ─────────────────────────────────────────────────────────────
     case_id: str = ""
     operation_id: Optional[str] = None       # e.g. "O5"
-    readout_tag: Optional[str] = None        # e.g. "pair_flip"
+    readout_tag: Optional[str] = None        # e.g. "binary_contact"
     episode_id: Optional[str] = None
     group_id: Optional[str] = None
 
@@ -38,7 +38,7 @@ class Case:
 
     # ── body geometry ─────────────────────────────────────────────────────────
     body: Dict[str, Any] = field(default_factory=dict)
-    # {radius_m, width_m, height_m}
+    # {radius_m, diameter_m}
 
     # ── action ────────────────────────────────────────────────────────────────
     action: Dict[str, Any] = field(default_factory=dict)

@@ -3,164 +3,152 @@ egoconseq.tasks.instantiate
 ============================
 Factory helpers for EgoConseq-Bench O5 (footprint counterfactual).
 
+New O5 design (single-robot binary contact + counterfactual grouping)
+----------------------------------------------------------------------
+Each case describes exactly ONE cylindrical-chassis robot with a given
+radius.  The question is binary: "会接触 / 不会接触".
+
+The counterfactual is NOT inside one question — it is constructed ACROSS
+cases: same image + same pose + same forward horizon H, multiple cases
+with DIFFERENT chassis diameters, tied by a shared ``group_id``.
+The flip metric is measured across the group.
+
 Key design invariants
 ---------------------
 RED LINE (design §6):
-    The action horizon for O5 is a FIXED physical path in METRES, identical
-    for BOTH body sizes.  It is stored as horizon_m in the action dict, with
-    horizon_reference="metric_fixed".  The horizon must NEVER be derived from
-    body-width (e.g. "N body-widths") — doing so would confound the causal
-    claim that only width changes.
+    The action horizon for O5 is a FIXED physical path in METRES.
+    Stored as horizon_m in the action dict with
+    horizon_reference="metric_fixed".  The horizon must NEVER be derived
+    from body-width (e.g. "N body-widths") — doing so would confound the
+    causal claim that only diameter changes.
 
-Margin rule (per-body):
-    A case is accepted only when EACH body is clearly on one side of the
+Margin rule (single body):
+    A case is accepted only when the body is clearly on one side of the
     decision boundary H:
 
-        abs(d_safe_X - H) >= 0.5 * (2 * r_X)   for X ∈ {small, large}
+        abs(d_safe_m - H) >= radius_m
 
-    This equals r_X — one body-radius — as the minimum distance from d_safe
-    to H.  Cases where either body sits ambiguously close to the boundary
-    are rejected (make_o5 returns None).
+    Cases where the body sits ambiguously close to the boundary are
+    rejected (make_o5_case returns None).
 
-Monotonicity invariant:
-    By physical geometry, d_safe_large <= d_safe_small (a wider body
-    encounters obstacles sooner or at the same point as a narrower one).
-    If d_safe_large > d_safe_small, the caller has made an error; o5_label
-    returns the sentinel "INVALID" so the pipeline can flag and discard.
+GT evidence (anti-bug invariant):
+    The rule "contact iff d_safe < H" together with the raw values
+    (d_safe_m, horizon_m) is stored in tags["gt_evidence"] so any
+    reviewer can independently verify the label without the pipeline code.
 """
 
 from __future__ import annotations
 
 import uuid
-from typing import Any, Optional
+from typing import Any, List, Optional
 
 from egoconseq.manifest import Case
+from egoconseq.tasks.prompts import o5_prompt
 
 
 # ── label function ────────────────────────────────────────────────────────────
 
-def o5_label(
-    d_safe_small: float,
-    d_safe_large: float,
-    horizon_m: float,
-) -> str:
-    """Assign the O5 class label by comparing EACH d_safe to the shared horizon.
+def o5_label(d_safe_m: float, horizon_m: float) -> str:
+    """Assign binary contact label for a single robot.
 
     Parameters
     ----------
-    d_safe_small:
-        Safe travel distance (m) for the narrow body before first contact.
-    d_safe_large:
-        Safe travel distance (m) for the wide body before first contact.
+    d_safe_m:
+        Safe travel distance (m) before first contact with any obstacle.
     horizon_m:
-        The shared fixed metric path length both bodies travel.
+        The fixed forward path length the robot attempts to travel.
 
     Returns
     -------
-    "both"
-        Both d_safe >= horizon_m → neither body contacts an obstacle.
-    "small_only"
-        d_safe_small >= horizon_m but d_safe_large < horizon_m → only the
-        small body passes; the large body contacts (this is the flip case).
-    "neither"
-        Both d_safe < horizon_m → both bodies contact an obstacle.
-    "INVALID"
-        d_safe_large > d_safe_small, which violates the physical monotonicity
-        invariant (a wider body cannot have more clearance in the same scene).
-        Callers should treat this as a data error and discard the case.
+    "contact"
+        d_safe_m < horizon_m: the robot will hit an obstacle before
+        reaching the horizon.
+    "no_contact"
+        d_safe_m >= horizon_m: the robot clears the horizon safely.
     """
-    # Monotonicity check: large body must never have MORE clearance than small.
-    if d_safe_large > d_safe_small:
-        return "INVALID"
-
-    small_passes = d_safe_small >= horizon_m
-    large_passes = d_safe_large >= horizon_m
-
-    if small_passes and large_passes:
-        return "both"
-    elif small_passes and not large_passes:
-        return "small_only"
-    else:
-        # Neither passes (large_passes being True while small_passes is False
-        # is excluded by the monotonicity guard above).
-        return "neither"
+    if d_safe_m < horizon_m:
+        return "contact"
+    return "no_contact"
 
 
 # ── factory function ──────────────────────────────────────────────────────────
 
-def make_o5(
-    d_safe_small: float,
-    d_safe_large: float,
+def make_o5_case(
+    d_safe_m: float,
+    radius_m: float,
     horizon_m: float,
-    r_small: float,
-    r_large: float,
+    group_id: str,
     **meta: Any,
 ) -> Optional[Case]:
-    """Build an O5 Case, or return None if any quality gate fails.
+    """Build a single-robot O5 Case, or return None if the margin gate fails.
 
     Parameters
     ----------
-    d_safe_small:
-        Safe travel distance (m) for the narrow body.
-    d_safe_large:
-        Safe travel distance (m) for the wide body.
+    d_safe_m:
+        Safe travel distance (m) for this robot before first contact.
+    radius_m:
+        Body radius (m) of the cylindrical-chassis robot.
+        Diameter = 2 * radius_m.
     horizon_m:
-        The shared fixed forward distance (metres) — RED LINE: this is the
-        SAME physical path for both bodies (design §6).
-    r_small:
-        Body radius (m) of the narrow robot.  Width = 2 * r_small.
-    r_large:
-        Body radius (m) of the wide robot.  Width = 2 * r_large.
+        The fixed forward distance (metres) — RED LINE: must be a fixed
+        metric path (design §6), not derived from body width.
+    group_id:
+        Shared identifier for the counterfactual group (same image/pose/H,
+        different diameters).
     **meta:
         Optional metadata forwarded to Case fields:
-        group_id, scene_id, episode_id, image_path, question, pose,
-        sensor_profile, geometry_tag, etc.
+        scene_id, episode_id, image_path, question, pose,
+        sensor_profile, geometry_tag, case_id, etc.
 
     Returns
     -------
     Case | None
-        A fully populated Case on success, or None when:
-        - o5_label returns "INVALID" (monotonicity violation), OR
-        - The per-body margin rule is violated for either body.
+        A fully populated Case on success, or None when the margin rule
+        is violated.
 
-    Margin rule (per-body)
-    ----------------------
-        abs(d_safe_X - H) >= 0.5 * (2 * r_X)   ≡   abs(d_safe_X - H) >= r_X
+    Margin rule
+    -----------
+        abs(d_safe_m - horizon_m) >= radius_m
 
-    This ensures each body is unambiguously on its correct side of H.
+    This ensures the robot is unambiguously on its correct side of H by
+    at least its own footprint radius.
+
+    GT evidence
+    -----------
+    Stored in tags["gt_evidence"] = {
+        "d_safe_m": d_safe_m,
+        "horizon_m": horizon_m,
+        "rule": "contact iff d_safe < H"
+    }
+    so a reviewer can independently verify the label.
     """
-    # ── 1. Compute label (also checks monotonicity) ───────────────────────────
-    label = o5_label(d_safe_small, d_safe_large, horizon_m)
-    if label == "INVALID":
+    # ── 1. Margin check ───────────────────────────────────────────────────────
+    if abs(d_safe_m - horizon_m) < radius_m:
         return None
 
-    # ── 2. Per-body margin check (each body must clear its own radius from H) ──
-    margin_small = abs(d_safe_small - horizon_m)
-    margin_large = abs(d_safe_large - horizon_m)
-    threshold_small = 0.5 * (2 * r_small)   # == r_small
-    threshold_large = 0.5 * (2 * r_large)   # == r_large
-
-    if margin_small < threshold_small or margin_large < threshold_large:
-        return None
+    # ── 2. Compute binary label ───────────────────────────────────────────────
+    label = o5_label(d_safe_m, horizon_m)
 
     # ── 3. Extract well-known meta fields ─────────────────────────────────────
-    group_id    = meta.pop("group_id",      None)
-    scene_id    = meta.pop("scene_id",      None)
-    episode_id  = meta.pop("episode_id",    None)
-    image_path  = meta.pop("image_path",    None)
-    question    = meta.pop("question",      None)
-    pose        = meta.pop("pose",          [])
+    scene_id       = meta.pop("scene_id",       None)
+    episode_id     = meta.pop("episode_id",     None)
+    image_path     = meta.pop("image_path",     None)
+    question       = meta.pop("question",       None)
+    pose           = meta.pop("pose",           [])
     sensor_profile = meta.pop("sensor_profile", {})
     geometry_tag   = meta.pop("geometry_tag",   "narrow-gap")
-    # Remaining kwargs are ignored (YAGNI)
+    case_id        = meta.pop("case_id",        f"O5-{uuid.uuid4().hex[:8]}")
+    # Remaining kwargs are silently ignored (YAGNI)
 
-    case_id = meta.pop("case_id", f"O5-{uuid.uuid4().hex[:8]}")
+    # ── 4. Build the question if not provided ─────────────────────────────────
+    if question is None:
+        question = o5_prompt(2 * radius_m, horizon_m)
 
-    # ── 4. Build the Case ─────────────────────────────────────────────────────
+    # ── 5. Build the Case ─────────────────────────────────────────────────────
     case = Case(
         case_id=case_id,
         operation_id="O5",
-        readout_tag="pair_flip",
+        readout_tag="binary_contact",
         group_id=group_id,
         scene_id=scene_id,
         episode_id=episode_id,
@@ -168,10 +156,10 @@ def make_o5(
         question=question,
         pose=pose,
         sensor_profile=sensor_profile,
-        # ── body: carry both radii ────────────────────────────────────────────
+        # ── body: single-robot cylindrical chassis ────────────────────────────
         body={
-            "radius_small_m": r_small,
-            "radius_large_m": r_large,
+            "radius_m": radius_m,
+            "diameter_m": 2 * radius_m,
         },
         # ── action: FIXED metric horizon (RED LINE §6) ────────────────────────
         action={
@@ -179,15 +167,53 @@ def make_o5(
             "horizon_m": horizon_m,
             "horizon_reference": "metric_fixed",
         },
-        # ── answer schema ─────────────────────────────────────────────────────
+        # ── answer schema: binary_contact ─────────────────────────────────────
         answer={
-            "answer_type": "pair_flip",
-            "options": ["both", "small_only", "neither"],
+            "answer_type": "binary_contact",
+            "options": ["contact", "no_contact"],
             "label": label,
         },
-        # ── tags ──────────────────────────────────────────────────────────────
+        # ── GT safe distance (evidence anchor) ───────────────────────────────
+        d_safe_visible_m=d_safe_m,
+        # ── tags: GT evidence + geometry tag ─────────────────────────────────
         tags={
             "geometry_tag": geometry_tag,
+            "gt_evidence": {
+                "d_safe_m": d_safe_m,
+                "horizon_m": horizon_m,
+                "rule": "contact iff d_safe < H",
+            },
         },
     )
     return case
+
+
+# ── group flip detection ──────────────────────────────────────────────────────
+
+def o5_group_has_flip(cases_in_group: List[Case]) -> bool:
+    """Return True iff the group contains at least one label flip.
+
+    A flip means the group has BOTH "contact" and "no_contact" GT labels —
+    i.e. some chassis sizes contact an obstacle and some don't, producing a
+    genuine counterfactual pair.
+
+    By physical monotonicity, larger-radius bodies encounter obstacles
+    sooner (smaller d_safe), so larger diameters contact first.
+
+    Parameters
+    ----------
+    cases_in_group:
+        List of Case objects sharing the same group_id (same image/pose/H,
+        different radii).
+
+    Returns
+    -------
+    bool
+        True iff GT labels are NOT all identical.
+    """
+    if len(cases_in_group) <= 1:
+        return False
+
+    labels = {c.answer.get("label") for c in cases_in_group if c.answer}
+    # A flip exists iff there are at least 2 distinct labels
+    return len(labels) >= 2

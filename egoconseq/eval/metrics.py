@@ -1,134 +1,102 @@
 """
 egoconseq.eval.metrics
 ======================
-Evaluation metrics for EgoConseq-Bench O5 (footprint counterfactual).
+Evaluation metrics for O5 single-robot binary contact groups.
 
-The key discriminative band is the ``small_only`` GT class — cases where the
-narrow robot passes but the wide robot contacts an obstacle.  A model that
-always outputs the same label ("both" or "neither") exhibits *embodiment
-invariance* and fails precisely these cases.
+O5 now uses one robot per question:
+    label = "contact" iff d_safe(radius, action) < H else "no_contact"
 
-Operationalization
-------------------
-All band metrics are computed over the ``small_only`` GT subset only.
-
-narrow_band_flip_acc / correct_flip_rate:
-    Fraction of GT ``small_only`` cases predicted exactly as ``small_only``.
-    These two names refer to the same quantity; both are returned so callers
-    can use whichever is more readable in context.
-
-embodiment_sensitivity:
-    Fraction of GT ``small_only`` cases where the model acknowledges a
-    width-dependent difference.  Operationally identical to
-    ``correct_flip_rate``: the model is *sensitive* to embodiment only when
-    it outputs ``small_only``.  A model that always says "both" or "neither"
-    has sensitivity = 0.
-
-invariance_error:
-    Fraction of GT ``small_only`` cases where the model outputs "both" or
-    "neither" — i.e. treats the two bodies as indistinguishable.
-    By construction: ``invariance_error + embodiment_sensitivity == 1.0``.
-
-accuracy:
-    Standard 3-way overall accuracy over all GT labels (reference metric).
-
-Division-by-zero handling
--------------------------
-When there are no ``small_only`` GT cases (including the empty-list case),
-band metrics (``narrow_band_flip_acc``, ``embodiment_sensitivity``,
-``correct_flip_rate``, ``invariance_error``) are set to ``float('nan')``.
-Overall ``accuracy`` is set to ``float('nan')`` when the list is empty.
-These values are *never* ``None`` — callers can use ``math.isnan()`` to
-detect the undefined case.
+Counterfactual sensitivity is measured across cases sharing a group_id:
+same RGB / pose / action horizon, different chassis diameters.
 """
 
 from __future__ import annotations
 
-import math
-from typing import List, Sequence
+from typing import Mapping, Sequence
 
 
-def o5_metrics(
-    gt_labels: Sequence[str],
-    pred_labels: Sequence[str],
-) -> dict:
-    """Compute O5 flip-discrimination metrics.
+def _nan() -> float:
+    return float("nan")
+
+
+def o5_metrics(groups: Sequence[Sequence[Mapping[str, object]]]) -> dict:
+    """Compute O5 binary-contact and group-flip metrics.
 
     Parameters
     ----------
-    gt_labels:
-        Ground-truth labels.  Each element must be one of
-        ``{"both", "small_only", "neither"}``.
-    pred_labels:
-        Predicted labels from the model, same length as ``gt_labels``.
+    groups:
+        Sequence of counterfactual groups. Each group is a sequence of dicts
+        containing:
+            radius_m: float
+            gt: "contact" | "no_contact"
+            pred: "contact" | "no_contact"
 
     Returns
     -------
-    dict with keys:
-        ``accuracy``, ``narrow_band_flip_acc``, ``correct_flip_rate``,
-        ``embodiment_sensitivity``, ``invariance_error``.
+    dict
+        case_accuracy:
+            Fraction of individual cases whose prediction matches GT.
+        false_safe_rate:
+            Among GT contact cases, fraction predicted no_contact.
+        flip_groups:
+            Number of groups where GT labels differ across radii.
+        correct_flip_rate:
+            Among flip groups, fraction whose every case is predicted
+            correctly.
+        invariance_error:
+            Among flip groups, fraction where all predictions are identical,
+            i.e. the model did not react to chassis diameter.
 
-    See module docstring for full operationalization.
-
-    Raises
-    ------
-    ValueError
-        If ``gt_labels`` and ``pred_labels`` have different lengths.
+    Compatibility aliases are included for older reporting code:
+        accuracy = case_accuracy
+        narrow_band_flip_acc = correct_flip_rate
+        embodiment_sensitivity = 1 - invariance_error when defined
     """
-    if len(gt_labels) != len(pred_labels):
-        raise ValueError(
-            f"gt_labels and pred_labels must have the same length; "
-            f"got {len(gt_labels)} vs {len(pred_labels)}"
+    flat = [case for group in groups for case in group]
+
+    if not flat:
+        case_accuracy = _nan()
+    else:
+        case_accuracy = sum(c.get("gt") == c.get("pred") for c in flat) / len(flat)
+
+    contact_cases = [c for c in flat if c.get("gt") == "contact"]
+    if not contact_cases:
+        false_safe_rate = _nan()
+    else:
+        false_safe_rate = (
+            sum(c.get("pred") == "no_contact" for c in contact_cases)
+            / len(contact_cases)
         )
 
-    n_total = len(gt_labels)
+    flip_groups = []
+    for group in groups:
+        gt_labels = {c.get("gt") for c in group}
+        if len(gt_labels) >= 2:
+            flip_groups.append(group)
 
-    # ── overall accuracy ──────────────────────────────────────────────────────
-    if n_total == 0:
-        accuracy = float("nan")
+    if not flip_groups:
+        correct_flip_rate = _nan()
+        invariance_error = _nan()
+        embodiment_sensitivity = _nan()
     else:
-        accuracy = sum(g == p for g, p in zip(gt_labels, pred_labels)) / n_total
-
-    # ── band metrics (restricted to GT == "small_only") ───────────────────────
-    small_only_indices = [i for i, g in enumerate(gt_labels) if g == "small_only"]
-    n_band = len(small_only_indices)
-
-    if n_band == 0:
-        # No discriminative cases → all band metrics undefined
-        nan = float("nan")
-        return {
-            "accuracy": accuracy,
-            "narrow_band_flip_acc": nan,
-            "correct_flip_rate": nan,
-            "embodiment_sensitivity": nan,
-            "invariance_error": nan,
-        }
-
-    # Counts over the small_only GT subset
-    n_correct_flip = 0   # pred == "small_only"
-    n_invariant = 0      # pred in {"both", "neither"}
-
-    for i in small_only_indices:
-        p = pred_labels[i]
-        if p == "small_only":
-            n_correct_flip += 1
-        else:
-            # "both" or "neither" → model treats bodies identically
-            n_invariant += 1
-
-    correct_flip_rate = n_correct_flip / n_band
-    invariance_error = n_invariant / n_band
-
-    # narrow_band_flip_acc and embodiment_sensitivity are the same quantity
-    # as correct_flip_rate (see docstring); returned under their own keys for
-    # readability.
-    narrow_band_flip_acc = correct_flip_rate
-    embodiment_sensitivity = correct_flip_rate
+        correct_flip_rate = (
+            sum(all(c.get("gt") == c.get("pred") for c in group) for group in flip_groups)
+            / len(flip_groups)
+        )
+        invariance_error = (
+            sum(len({c.get("pred") for c in group}) == 1 for group in flip_groups)
+            / len(flip_groups)
+        )
+        embodiment_sensitivity = 1.0 - invariance_error
 
     return {
-        "accuracy": accuracy,
-        "narrow_band_flip_acc": narrow_band_flip_acc,
+        "case_accuracy": case_accuracy,
+        "false_safe_rate": false_safe_rate,
+        "flip_groups": len(flip_groups),
         "correct_flip_rate": correct_flip_rate,
-        "embodiment_sensitivity": embodiment_sensitivity,
         "invariance_error": invariance_error,
+        # Backward-compatible report aliases.
+        "accuracy": case_accuracy,
+        "narrow_band_flip_acc": correct_flip_rate,
+        "embodiment_sensitivity": embodiment_sensitivity,
     }

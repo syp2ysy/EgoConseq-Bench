@@ -1,169 +1,179 @@
 """
-Tests for egoconseq.eval.metrics: o5_metrics()
-TDD: tests must FAIL before implementation, PASS after.
+Tests for egoconseq.eval.metrics: o5_metrics() — new group-based binary contact metrics.
 
-Operationalization of metrics:
-- narrow_band_flip_acc:
-    Accuracy over the GT `small_only` subset only.
-    = #{pred == "small_only" | GT == "small_only"} / #{GT == "small_only"}
-
-- embodiment_sensitivity:
-    Among GT `small_only` cases, fraction where the model acknowledges a
-    width-based difference (i.e. pred == "small_only").
-    Operationally: same as correct_flip_rate (pred == "small_only" over GT
-    small_only).  A model that always says "both" or "neither" has
-    sensitivity = 0.
-
-- correct_flip_rate:
-    Among GT `small_only`, fraction predicted exactly "small_only".
-    = #{pred=="small_only" | GT=="small_only"} / #{GT=="small_only"}
-    (same fraction as narrow_band_flip_acc but named semantically)
-
-- invariance_error:
-    Among GT `small_only`, fraction where pred is "both" or "neither"
-    (model treats both bodies identically — fails to discriminate).
-    = #{pred in {"both","neither"} | GT=="small_only"} / #{GT=="small_only"}
-    Note: invariance_error + embodiment_sensitivity == 1.0 by construction.
-
-- accuracy:
-    Standard 3-way overall accuracy = #{pred == gt} / N.
+Operationalization:
+- Input: groups = list of groups; each group = list of dicts
+  {"radius_m": float, "gt": "contact"|"no_contact", "pred": "contact"|"no_contact"}
+- case_accuracy: fraction of all cases correct.
+- false_safe_rate: among gt=="contact", fraction predicted "no_contact" (cardinal safety error).
+- flip_groups: count of groups whose GT labels are NOT all equal.
+- correct_flip_rate: among flip_groups, fraction where ALL cases in the group are
+  predicted correctly (pred matches gt for every case in the group).
+- invariance_error: among flip_groups, fraction where model gives the SAME prediction
+  to ALL cases in the group (failed to react to chassis size).
+- NaN when denominator is zero.
 """
+import math
 import pytest
 from egoconseq.eval.metrics import o5_metrics
 
 
-# ── Minimal smoke test (given in the task spec) ───────────────────────────────
+# ── Helper: build a group ─────────────────────────────────────────────────────
 
-def test_o5_flip_metrics():
-    """Spec-given minimal test: keys exist and values are in [0,1]."""
-    gt   = ["small_only", "small_only", "both"]
-    pred = ["small_only", "both",       "both"]
-    m = o5_metrics(gt, pred)
-    assert 0 <= m["narrow_band_flip_acc"] <= 1
-    assert "embodiment_sensitivity" in m
+def make_group(*cases):
+    """Build a group list from (radius_m, gt, pred) tuples."""
+    return [{"radius_m": r, "gt": gt, "pred": pred} for r, gt, pred in cases]
+
+
+# ── Basic correctness ─────────────────────────────────────────────────────────
+
+def test_all_correct_no_flip():
+    """All predictions correct, no flip groups."""
+    groups = [
+        make_group((0.10, "no_contact", "no_contact"), (0.40, "contact", "contact")),
+    ]
+    # group has flip (no_contact + contact)
+    m = o5_metrics(groups)
+    assert m["case_accuracy"] == pytest.approx(1.0)
+    assert m["false_safe_rate"] == pytest.approx(0.0)
+    assert m["flip_groups"] == 1
+    assert m["correct_flip_rate"] == pytest.approx(1.0)
+    assert m["invariance_error"] == pytest.approx(0.0)
+
+
+def test_correct_flip_group():
+    """One flip group, all cases correctly predicted → correct_flip_rate=1.0."""
+    groups = [
+        make_group(
+            (0.10, "no_contact", "no_contact"),
+            (0.40, "contact", "contact"),
+        )
+    ]
+    m = o5_metrics(groups)
+    assert m["correct_flip_rate"] == pytest.approx(1.0)
+    assert m["invariance_error"] == pytest.approx(0.0)
+
+
+def test_invariance_error_model_same_pred():
+    """Model predicts same label for all in a flip group → invariance_error=1.0."""
+    groups = [
+        make_group(
+            (0.10, "no_contact", "no_contact"),   # gt=no_contact, pred=no_contact ✓
+            (0.40, "contact", "no_contact"),       # gt=contact, pred=no_contact ✗ + invariance
+        )
+    ]
+    m = o5_metrics(groups)
+    assert m["flip_groups"] == 1
+    # all predictions are "no_contact" → model gave same pred to both → invariance_error=1.0
+    assert m["invariance_error"] == pytest.approx(1.0)
+    # group not fully correct → correct_flip_rate=0.0
+    assert m["correct_flip_rate"] == pytest.approx(0.0)
+
+
+def test_false_safe_rate():
+    """false_safe_rate: gt=contact predicted no_contact."""
+    # 1 contact case predicted no_contact, 1 contact case predicted correctly
+    groups = [
+        make_group((0.40, "contact", "no_contact")),   # false safe
+        make_group((0.40, "contact", "contact")),      # correct
+    ]
+    m = o5_metrics(groups)
+    assert m["false_safe_rate"] == pytest.approx(0.5)
+
+
+def test_false_safe_rate_zero_when_all_contact_correct():
+    """false_safe_rate=0 when all contact cases predicted correctly."""
+    groups = [
+        make_group((0.40, "contact", "contact")),
+        make_group((0.10, "no_contact", "no_contact")),
+    ]
+    m = o5_metrics(groups)
+    assert m["false_safe_rate"] == pytest.approx(0.0)
+
+
+# ── Nan handling ──────────────────────────────────────────────────────────────
+
+def test_no_flip_groups_nan_rates():
+    """When no flip groups, correct_flip_rate and invariance_error are NaN."""
+    groups = [
+        make_group((0.10, "no_contact", "no_contact")),
+        make_group((0.40, "no_contact", "no_contact")),
+    ]
+    m = o5_metrics(groups)
+    assert m["flip_groups"] == 0
+    assert math.isnan(m["correct_flip_rate"])
+    assert math.isnan(m["invariance_error"])
+
+
+def test_no_contact_cases_false_safe_nan():
+    """When no gt=='contact' cases, false_safe_rate is NaN."""
+    groups = [
+        make_group((0.10, "no_contact", "no_contact")),
+    ]
+    m = o5_metrics(groups)
+    assert math.isnan(m["false_safe_rate"])
+
+
+def test_empty_groups():
+    """Empty input must return dict with expected keys and NaN values."""
+    m = o5_metrics([])
+    assert "case_accuracy" in m
+    assert "false_safe_rate" in m
+    assert "flip_groups" in m
     assert "correct_flip_rate" in m
     assert "invariance_error" in m
-    assert "accuracy" in m
+    assert math.isnan(m["case_accuracy"])
+    assert math.isnan(m["false_safe_rate"])
+    assert m["flip_groups"] == 0
+    assert math.isnan(m["correct_flip_rate"])
+    assert math.isnan(m["invariance_error"])
 
 
-# ── All-correct case ──────────────────────────────────────────────────────────
+# ── Multi-group scenarios ─────────────────────────────────────────────────────
 
-def test_all_correct():
-    """All predictions match GT → all metrics at maximum."""
-    gt   = ["small_only", "both", "neither", "small_only"]
-    pred = ["small_only", "both", "neither", "small_only"]
-    m = o5_metrics(gt, pred)
-    assert m["accuracy"] == 1.0
-    assert m["narrow_band_flip_acc"] == 1.0
-    assert m["embodiment_sensitivity"] == 1.0
-    assert m["correct_flip_rate"] == 1.0
-    assert m["invariance_error"] == 0.0
-
-
-# ── All-invariant case (model always says "both") ─────────────────────────────
-
-def test_all_invariant_both():
-    """Model says 'both' for everything → invariance_error == 1.0 over small_only."""
-    gt   = ["small_only", "small_only", "neither"]
-    pred = ["both",       "both",       "both"]
-    m = o5_metrics(gt, pred)
-    assert m["invariance_error"] == 1.0
-    assert m["correct_flip_rate"] == 0.0
-    assert m["embodiment_sensitivity"] == 0.0
-    assert m["narrow_band_flip_acc"] == 0.0
-
-
-def test_all_invariant_neither():
-    """Model says 'neither' for everything → invariance_error == 1.0 over small_only."""
-    gt   = ["small_only", "small_only", "both"]
-    pred = ["neither",    "neither",    "neither"]
-    m = o5_metrics(gt, pred)
-    assert m["invariance_error"] == 1.0
-    assert m["embodiment_sensitivity"] == 0.0
-
-
-# ── Numeric sanity checks on the spec example ─────────────────────────────────
-
-def test_spec_example_numeric():
-    """
-    gt   = ["small_only", "small_only", "both"]
-    pred = ["small_only", "both",       "both"]
-
-    GT small_only cases: indices 0, 1
-      - idx 0: pred "small_only" → correct
-      - idx 1: pred "both"       → invariance error
-
-    narrow_band_flip_acc = 1/2 = 0.5
-    correct_flip_rate    = 1/2 = 0.5
-    embodiment_sensitivity = 1/2 = 0.5
-    invariance_error     = 1/2 = 0.5
-    accuracy (3-way overall): idx0 correct, idx1 wrong, idx2 correct → 2/3
-    """
-    gt   = ["small_only", "small_only", "both"]
-    pred = ["small_only", "both",       "both"]
-    m = o5_metrics(gt, pred)
-    assert m["narrow_band_flip_acc"] == pytest.approx(0.5)
-    assert m["correct_flip_rate"]    == pytest.approx(0.5)
-    assert m["embodiment_sensitivity"] == pytest.approx(0.5)
-    assert m["invariance_error"]     == pytest.approx(0.5)
-    assert m["accuracy"]             == pytest.approx(2/3)
-
-
-# ── Edge: no small_only in GT ─────────────────────────────────────────────────
-
-def test_no_small_only_in_gt():
-    """
-    When there are no 'small_only' GT cases, band metrics should be NaN or None
-    (division by zero — implementation should handle gracefully, not crash).
-    """
-    gt   = ["both", "neither", "both"]
-    pred = ["both", "neither", "both"]
-    m = o5_metrics(gt, pred)
-    assert "narrow_band_flip_acc" in m
-    # Value should be NaN or None (implementation-defined; must not crash)
-    val = m["narrow_band_flip_acc"]
-    import math
-    assert val is None or (isinstance(val, float) and math.isnan(val)), (
-        f"Expected NaN/None when no small_only GT cases, got {val!r}"
-    )
-
-
-# ── Edge: empty lists ─────────────────────────────────────────────────────────
-
-def test_empty_lists():
-    """Empty inputs must not crash and return a dict with the expected keys."""
-    m = o5_metrics([], [])
-    assert "accuracy" in m
-    assert "narrow_band_flip_acc" in m
-    assert "invariance_error" in m
-
-
-# ── invariance_error + embodiment_sensitivity sum to 1.0 ──────────────────────
-
-def test_invariance_plus_sensitivity_sums_to_one():
-    """invariance_error + embodiment_sensitivity == 1.0 (complementary over small_only)."""
-    gt   = ["small_only", "small_only", "small_only", "both"]
-    pred = ["small_only", "both",       "neither",    "small_only"]
-    m = o5_metrics(gt, pred)
-    import math
-    ie = m["invariance_error"]
-    es = m["embodiment_sensitivity"]
-    assert not math.isnan(ie) and not math.isnan(es)
-    assert ie + es == pytest.approx(1.0), (
-        f"invariance_error ({ie}) + embodiment_sensitivity ({es}) != 1.0"
-    )
-
-
-# ── Partial flip correctness ───────────────────────────────────────────────────
-
-def test_partial_flip():
-    """Two small_only GT, one correctly predicted, one predicted 'neither'."""
-    gt   = ["small_only", "small_only"]
-    pred = ["small_only", "neither"]
-    m = o5_metrics(gt, pred)
+def test_two_flip_groups_one_correct_one_invariant():
+    """Two flip groups: one correct, one invariant → correct_flip_rate=0.5, invariance_error=0.5."""
+    groups = [
+        # Group 1: correctly predicted flip
+        make_group(
+            (0.10, "no_contact", "no_contact"),
+            (0.40, "contact", "contact"),
+        ),
+        # Group 2: model predicts same for all (invariance error)
+        make_group(
+            (0.10, "no_contact", "contact"),    # wrong
+            (0.40, "contact", "contact"),       # correct but same pred as above
+        ),
+    ]
+    m = o5_metrics(groups)
+    assert m["flip_groups"] == 2
     assert m["correct_flip_rate"] == pytest.approx(0.5)
-    # 'neither' is an invariance error (model treated them the same)
     assert m["invariance_error"] == pytest.approx(0.5)
-    assert m["embodiment_sensitivity"] == pytest.approx(0.5)
-    assert m["narrow_band_flip_acc"] == pytest.approx(0.5)
-    assert m["accuracy"] == pytest.approx(0.5)
+
+
+def test_case_accuracy_mixed():
+    """case_accuracy across multiple groups."""
+    groups = [
+        make_group(
+            (0.10, "no_contact", "no_contact"),   # correct
+            (0.40, "contact", "no_contact"),       # wrong
+        ),
+        make_group(
+            (0.10, "no_contact", "no_contact"),   # correct
+        ),
+    ]
+    m = o5_metrics(groups)
+    # 2/3 cases correct
+    assert m["case_accuracy"] == pytest.approx(2.0 / 3.0)
+
+
+def test_non_flip_group_not_counted_in_flip_metrics():
+    """Groups with all same GT labels don't count toward flip_groups."""
+    groups = [
+        make_group((0.10, "no_contact", "contact")),   # all no_contact GT → no flip
+        make_group((0.40, "contact", "contact")),      # all contact GT → no flip
+    ]
+    m = o5_metrics(groups)
+    assert m["flip_groups"] == 0
+    assert math.isnan(m["correct_flip_rate"])
+    assert math.isnan(m["invariance_error"])

@@ -48,7 +48,7 @@ d_safe(r, action)
 | **O2** | 孔径 / 横向通过性 | 最宽可通过身体（侧向 margin） | magnitude | 地基 |
 | **O3** | 转向后 sweep | 心理旋转 swept corridor 后判接触 | threshold | 中间 |
 | **O4** | 跨朝向比较 | 比较多方向后果（相对、抗绝对尺度误差） | ranking | **headline** |
-| **O5** | body 反事实 | `do(width)` → 结论是否翻转（body 作为因果算子） | pair-flip | **headline** |
+| **O5** | body 反事实 | `do(width)` → 组内结论是否翻转（body 作为因果算子） | binary_contact + group-flip | **headline** |
 | **O6** | 接触定位 | 把「会撞」grounded 到可见首碰证据 | grid | 诊断（可选） |
 
 **O1↔O3 与 d_safe 的对应**
@@ -56,7 +56,7 @@ d_safe(r, action)
 - O2 = 对 r 反演：`r_crit = max r s.t. d_safe(r, action) ≥ H`，`critical_width = 2·r_crit`
 - O3 = `d_safe(r, turnθ→forward) < H`，θ ∈ {±15°(主), ±30°(可选)}
 - O4 = `rank over θ of d_safe(r, θ)`，θ ∈ {−15°, 0, +15°}
-- O5 = 比较 `d_safe(r_small, a)≥H` 与 `d_safe(r_large, a)≥H` 的符号
+- O5 = 单题 `label(r)=contact iff d_safe(r,a)<H`；同图同动作不同半径的 `group_id` 内比较符号是否翻转
 - O6 = `project(first_contact_3d) → 3×3 grid cell` 或 `none`
 
 ### 2.2 读出轴（正交 tag，保证非 MCQ）
@@ -66,7 +66,7 @@ d_safe(r, action)
 | `magnitude` | 数值，单位 body-width | capped-MAE / bin-acc |
 | `threshold` | 会接触 / 不会接触 | Acc / **False-Safe Rate** |
 | `ranking` | `right > straight > left` | Top-1 / Kendall τ |
-| `pair-flip` | both / small-only / neither | **配对翻转 acc** |
+| `binary_contact` + `group-flip` | 单题 contact / no_contact；组内 flip / invariant | **组内翻转 acc** |
 | `grid` | `B3` / `none` | grid-acc / 像素距离 |
 
 manifest 里保存标准化 answer schema（HTML 展示页可给自然问法）：
@@ -74,7 +74,7 @@ manifest 里保存标准化 answer schema（HTML 展示页可给自然问法）�
 ```json
 { "answer_type": "numeric_body_widths", "unit": "body_width", "label": 3.6, "tolerance": 0.75 }
 { "answer_type": "ranking", "items": ["left15","straight","right15"], "label": ["right15","straight","left15"] }
-{ "answer_type": "pair_flip", "options": ["both","small_only","neither"], "label": "small_only", "group_id": "g0427" }
+{ "answer_type": "binary_contact", "options": ["contact","no_contact"], "label": "contact", "group_id": "g0427" }
 ```
 
 ### 2.3 Headline 判别器（论文主张的命门）
@@ -200,15 +200,16 @@ step-size 稳定性: step=0.02 vs 0.01 m 的 label 一致率 ≥ 95%
 | O2 Critical Width | tolerance-acc / MAE | 是否理解连续 body-width 约束 |
 | O3 Turn-then-go Contact | Acc / **False-Safe Rate** | 能否把动作轨迹投进图像做 sweep |
 | O4 Directional Ranking | Top-1 / Kendall τ | 能否比较多方向后果 / 是否只有 center bias |
-| O5 Counterfactual | **配对翻转 acc**（不是 3-way acc） | 是否把 body width 当 collision operator |
+| O5 Counterfactual | **组内翻转 acc**（不是 3-way acc） | 是否把 body width 当 collision operator |
 | O6 Contact Grounding | grid-acc / 归一化像素距离 | 是否 grounded 到可见首碰证据 |
 
 **全局最重要指标：False-Safe Rate**（GT 会接触、模型说不接触的比例）——对应「行动前身体安全判断」的现实含义。
 
 **指标细节修正**
 - **O5 action horizon 必须是固定物理路径（米 或 reference-body-width），不随各自 body-width 缩放**（红线）。否则 "large 撞、small 不撞" 会被 "large 走更远" 污染，破坏 `do(width)` 因果解释。manifest 存 `horizon_m + horizon_reference=metric_fixed`。
-- O5 主指标 = **窄缝带（r_small 过、r_large 不过）上的配对翻转准确率**。`both/neither` 读一次 clearance 就能蒙对，判别力全在 `small_only` 翻转档；用 3-way acc 会让「忽略 body width」的模型虚高。
-- O5 配套报三个细分指标（比单一 pair-flip acc 更能写 finding）：
+- **O5 题面必须是一题一个机器人**：只描述一个圆柱形底盘直径，二值回答 `contact/no_contact`；反事实翻转只在同 `group_id` 的多 case 之间评估。机器人高度固定为 Habitat 默认 agent height，不写进 prompt。
+- O5 主指标 = **窄缝带（r_small no_contact、r_large contact）上的组内翻转准确率**。all-contact/all-no-contact 控制组用于检查 shortcut；用 3-way acc 会让「忽略 body width」的模型虚高。
+- O5 配套报三个细分指标（比单一 group-flip acc 更能写 finding）：
     Embodiment Sensitivity = 同一 counterfactual group 内模型答案是否随 width 改变
     Correct Flip Rate      = 是否按 GT 方向翻转
     Invariance Error       = GT 翻转但模型输出完全不变的比例
@@ -369,7 +370,7 @@ HFOV=79° 是唯一刻意偏离默认(90°)处，功能性理由(真实 RGB-D �
 P0  1 个 Habitat 场景 + 1 个 pose: 渲染 RGB+depth → 建 obstacle voxel(去地面/膨胀/支撑) → d_safe(forward)
     smoke: 人工看一张图 + overlay + d_safe 数值是否合理
 P1  接上 navmesh 校验(disagreement taxonomy) + 单调性 sanity
-P2  【生死门·先做】O5 narrow-gap pair: 验证 small 过 / large 撞，且 horizon 固定物理路径
+P2  【生死门·先做】O5 narrow-gap group: 验证 small no_contact / large contact，且 horizon 固定物理路径
     gate: 同图换 width，GT 翻转，MLLM 是否翻转？(headline 1)
 P3  【生死门】O4 directional fan: 验证 left/straight/right 有明显 d_safe 差异
     gate: depth/center-ray heuristic 是否 ≪ MLLM？(headline 2)

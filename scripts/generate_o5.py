@@ -4,11 +4,11 @@ For each accepted pose across 3 HM3D val scenes:
   1. Render RGB + depth.
   2. Build obstacle VoxelField (backproject → to_agent_ground → estimate_floor_height
      → remove_floor → VoxelField).
-  3. Compute d_safe_visible for r=0.10 (small) and r=0.40 (large).
+  3. Compute d_safe_visible for r=0.10 and r=0.40.
   4. Compute d_safe_navmesh for both radii (recompute_navmesh per radius).
   5. Apply disagreement.classify for BOTH radii — keep only if BOTH verdict.keep=True.
-  6. Choose horizon H to target small_only / both / neither label balance.
-  7. Call make_o5(...) — respects margin rule, returns None on failure.
+  6. Choose horizon H to target flip / all_no_contact / all_contact groups.
+  7. Emit one binary-contact case per radius, sharing group_id.
   8. Save:  data/demo/o5/img/{case_id}.png
             data/demo/o5/topdown/{case_id}.png
   9. Write  data/demo/o5/manifest.jsonl
@@ -52,8 +52,7 @@ from egoconseq.oracle.voxel import VoxelField
 from egoconseq.oracle.sweep import d_safe_visible
 from egoconseq.oracle.disagreement import classify as classify_disagreement
 from egoconseq.pipeline.sample_poses import is_valid_start, MIN_CLEARANCE_M
-from egoconseq.tasks.instantiate import make_o5
-from egoconseq.tasks.prompts import o5_prompt
+from egoconseq.tasks.instantiate import make_o5_case
 from egoconseq.manifest import Case, write_jsonl
 from egoconseq.geometry import swept_path
 
@@ -67,14 +66,14 @@ R_LARGE = 0.40  # wide body radius
 W_SMALL = 2 * R_SMALL  # width 0.20 m
 W_LARGE = 2 * R_LARGE  # width 0.80 m
 
-# Discriminative band condition for small_only:
+# Discriminative band condition for a GT flip group:
 #   d_safe_large + R_LARGE <= H <= d_safe_small - R_SMALL
 #   i.e. gap >= R_SMALL + R_LARGE = 0.50 m
-MIN_GAP_FOR_SMALL_ONLY = R_SMALL + R_LARGE  # 0.50 m
+MIN_GAP_FOR_FLIP = R_SMALL + R_LARGE  # 0.50 m
 
-# H offsets outside the band for both / neither
-BOTH_H_FRACTION = 0.80   # H = 80% of d_safe_large (well below, so both pass)
-NEITHER_H_FRACTION = 1.15  # H = 115% of d_safe_small (well above, neither passes)
+# H offsets outside the band for non-flip control groups.
+ALL_NO_CONTACT_H_FRACTION = 0.80
+ALL_CONTACT_MARGIN_M = 0.10
 
 # Default 3 scenes from HM3D val
 DEFAULT_SCENES = [
@@ -89,29 +88,37 @@ TOPDOWN_DIR = os.path.join(OUT_DIR, "topdown")
 MANIFEST_PATH = os.path.join(OUT_DIR, "manifest.jsonl")
 
 
+def clear_o5_output_dirs(img_dir: str = IMG_DIR, topdown_dir: str = TOPDOWN_DIR) -> None:
+    """Remove stale generated PNGs before a fresh O5 run."""
+    for directory in (img_dir, topdown_dir):
+        if not os.path.isdir(directory):
+            continue
+        for name in os.listdir(directory):
+            if name.lower().endswith(".png"):
+                os.remove(os.path.join(directory, name))
+
+
 # ---------------------------------------------------------------------------
-# Top-down plot helper (O5 version: two contact disks + H marker)
+# Top-down plot helper (O5 version: one robot + H marker)
 # ---------------------------------------------------------------------------
 
 def save_topdown_o5(
     out_path: str,
     obstacle_pts: np.ndarray,
-    path_samples_small: list,
-    path_samples_large: list,
-    d_safe_small: float,
-    d_safe_large: float,
+    path_samples: list,
+    d_safe_m: float,
     horizon_m: float,
-    r_small: float,
-    r_large: float,
-    label: str,
+    radius_m: float,
+    gt_label: str,
     title: str = "",
     step: float = config.MARCH_STEP_M,
 ) -> None:
-    """Save a top-down plot showing obstacle pts + both contact disks + H marker."""
+    """Save a top-down plot showing evidence for one single-robot O5 case."""
     fig, ax = plt.subplots(figsize=(7, 7))
 
     # Obstacle cloud (x, z)
-    if obstacle_pts.shape[0] > 0:
+    obstacle_pts = np.asarray(obstacle_pts)
+    if obstacle_pts.size > 0 and obstacle_pts.shape[0] > 0:
         n = obstacle_pts.shape[0]
         idx = np.random.choice(n, min(n, 8000), replace=False)
         ax.scatter(
@@ -119,21 +126,21 @@ def save_topdown_o5(
             s=1, c="steelblue", alpha=0.4, label="obstacle pts",
         )
 
-    # Small body path + contact disk
-    _plot_body_path(
-        ax, path_samples_small, d_safe_small, r_small,
-        path_color="limegreen", disk_color="limegreen",
-        path_label=f"r_small={r_small:.2f}m path",
-        disk_label=f"r_small contact (d={d_safe_small:.2f}m)",
-        step=step,
+    path_limit = min(d_safe_m, horizon_m)
+    disk_label = (
+        f"first contact (d={d_safe_m:.2f}m)"
+        if gt_label == "contact"
+        else f"clear endpoint (H={horizon_m:.2f}m)"
     )
-
-    # Large body path + contact disk
     _plot_body_path(
-        ax, path_samples_large, d_safe_large, r_large,
-        path_color="tomato", disk_color="tomato",
-        path_label=f"r_large={r_large:.2f}m path",
-        disk_label=f"r_large contact (d={d_safe_large:.2f}m)",
+        ax,
+        path_samples,
+        path_limit,
+        radius_m,
+        path_color="tomato" if gt_label == "contact" else "limegreen",
+        disk_color="tomato" if gt_label == "contact" else "limegreen",
+        path_label=f"robot path r={radius_m:.2f}m",
+        disk_label=disk_label,
         step=step,
     )
 
@@ -146,7 +153,10 @@ def save_topdown_o5(
 
     ax.set_xlabel("x (right)  [m]")
     ax.set_ylabel("z (forward)  [m]")
-    ax.set_title(f"{title}\nlabel={label}  d_small={d_safe_small:.2f}  d_large={d_safe_large:.2f}  H={horizon_m:.2f}")
+    ax.set_title(
+        f"{title}\nGT={gt_label}  radius={radius_m:.2f}  "
+        f"d_safe={d_safe_m:.2f}  H={horizon_m:.2f}"
+    )
     ax.legend(loc="upper right", fontsize=7)
     ax.set_aspect("equal")
     ax.grid(True, alpha=0.3)
@@ -278,31 +288,32 @@ def choose_horizon(
     d_safe_large: float,
     target_counts: dict,
 ) -> tuple | None:
-    """Choose (horizon_m, label) to balance small_only/both/neither targets.
+    """Choose (horizon_m, group_kind) to balance O5 group targets.
 
     Returns None if we cannot generate a valid case for any needed label.
 
     Args:
-        target_counts: dict mapping label -> (target, current_count).
-            We try to fill the label that is most behind target.
+        target_counts: dict mapping group_kind -> (target, current_count).
+            We try to fill the group kind that is most behind target.
     """
-    # --- small_only candidate ---
+    # --- flip candidate ---
     # Need: d_safe_large + R_LARGE <= H <= d_safe_small - R_SMALL
-    lo_so = d_safe_large + R_LARGE
-    hi_so = d_safe_small - R_SMALL
-    has_small_only_band = (hi_so - lo_so) >= 0.01  # at least 1 cm gap
+    lo_flip = d_safe_large + R_LARGE
+    hi_flip = d_safe_small - R_SMALL
+    has_flip_band = (hi_flip - lo_flip) >= 0.01
 
-    # --- both candidate ---
-    # H well below d_safe_large: H = BOTH_H_FRACTION * (d_safe_large - R_LARGE)
-    # Need H + R_LARGE < d_safe_large AND H + R_SMALL < d_safe_small
-    # Use H = 0.8 * (d_safe_large - R_LARGE) if positive
-    h_both = BOTH_H_FRACTION * (d_safe_large - R_LARGE)
-    has_both = h_both > 0.05  # at least 5 cm horizon
+    # --- all_no_contact control ---
+    # H well below the large-body contact boundary, so both radii clear H.
+    h_all_no_contact = ALL_NO_CONTACT_H_FRACTION * (d_safe_large - R_LARGE)
+    has_all_no_contact = h_all_no_contact > 0.05
 
-    # --- neither candidate ---
-    # H well above d_safe_small: H = d_safe_small + R_SMALL + 0.1
-    h_neither = d_safe_small + R_SMALL + 0.10
-    has_neither = h_neither < config.D_MAX_M  # must be within scene range
+    # --- all_contact control ---
+    # H beyond the contact boundary for both radii with each radius margin.
+    h_all_contact = max(
+        d_safe_small + R_SMALL,
+        d_safe_large + R_LARGE,
+    ) + ALL_CONTACT_MARGIN_M
+    has_all_contact = h_all_contact < config.D_MAX_M
 
     # Priority: fill the label furthest below its target
     label_priority = []
@@ -316,24 +327,77 @@ def choose_horizon(
         if current_val >= target_val:
             continue  # already met target for this label
 
-        if lbl == "small_only" and has_small_only_band:
-            H = (lo_so + hi_so) / 2.0
-            return H, "small_only"
-        elif lbl == "both" and has_both:
-            return h_both, "both"
-        elif lbl == "neither" and has_neither:
-            return h_neither, "neither"
+        if lbl == "flip" and has_flip_band:
+            H = (lo_flip + hi_flip) / 2.0
+            return H, "flip"
+        elif lbl == "all_no_contact" and has_all_no_contact:
+            return h_all_no_contact, "all_no_contact"
+        elif lbl == "all_contact" and has_all_contact:
+            return h_all_contact, "all_contact"
 
-    # If all targets met, try to add small_only (bonus)
-    if has_small_only_band:
-        H = (lo_so + hi_so) / 2.0
-        return H, "small_only"
-    if has_both:
-        return h_both, "both"
-    if has_neither:
-        return h_neither, "neither"
+    # If all targets met, prefer more flip groups.
+    if has_flip_band:
+        H = (lo_flip + hi_flip) / 2.0
+        return H, "flip"
+    if has_all_no_contact:
+        return h_all_no_contact, "all_no_contact"
+    if has_all_contact:
+        return h_all_contact, "all_contact"
 
     return None
+
+
+def build_o5_group_cases(
+    group_id: str,
+    case_prefix: str,
+    scene_id: str,
+    pose: list[float],
+    horizon_m: float,
+    group_kind: str,
+    d_vis_small: float,
+    d_vis_large: float,
+    d_nav_small: float,
+    d_nav_large: float,
+) -> list[Case] | None:
+    """Build the two single-robot binary-contact cases for one O5 group.
+
+    The group shares one image/pose/action horizon.  Each returned case
+    describes exactly one cylindrical-chassis robot; no prompt compares the
+    two body sizes.
+    """
+    geometry_tag = "narrow-gap" if group_kind == "flip" else group_kind
+    specs = [
+        ("r010", R_SMALL, d_vis_small, d_nav_small),
+        ("r040", R_LARGE, d_vis_large, d_nav_large),
+    ]
+
+    cases: list[Case] = []
+    for suffix, radius_m, d_vis, d_nav in specs:
+        case = make_o5_case(
+            d_safe_m=d_vis,
+            radius_m=radius_m,
+            horizon_m=horizon_m,
+            group_id=group_id,
+            case_id=f"{case_prefix}-{suffix}",
+            scene_id=scene_id,
+            pose=list(pose),
+            geometry_tag=geometry_tag,
+        )
+        if case is None:
+            return None
+
+        case.d_safe_navmesh_m = d_nav
+        case.tags.update({
+            "group_kind": group_kind,
+            "d_safe_small_m": d_vis_small,
+            "d_safe_large_m": d_vis_large,
+            "d_safe_navmesh_small_m": d_nav_small,
+            "d_safe_navmesh_large_m": d_nav_large,
+            "radii_in_group_m": [R_SMALL, R_LARGE],
+        })
+        cases.append(case)
+
+    return cases
 
 
 # ---------------------------------------------------------------------------
@@ -343,9 +407,9 @@ def choose_horizon(
 def generate_o5_cases(
     scenes: list[str],
     max_poses_per_scene: int = 400,
-    target_small_only: int = 40,
-    target_both: int = 20,
-    target_neither: int = 20,
+    target_flip: int = 40,
+    target_all_no_contact: int = 20,
+    target_all_contact: int = 20,
     seed: int = 42,
 ) -> list[Case]:
     """Generate O5 cases across multiple scenes."""
@@ -355,18 +419,20 @@ def generate_o5_cases(
 
     os.makedirs(IMG_DIR, exist_ok=True)
     os.makedirs(TOPDOWN_DIR, exist_ok=True)
+    clear_o5_output_dirs()
 
     cases: list[Case] = []
-    # Track how many of each label we have
+    # Track how many counterfactual groups of each kind we have.
     target_counts = {
-        "small_only": [target_small_only, 0],
-        "both": [target_both, 0],
-        "neither": [target_neither, 0],
+        "flip": [target_flip, 0],
+        "all_no_contact": [target_all_no_contact, 0],
+        "all_contact": [target_all_contact, 0],
     }
 
     total_poses_tried = 0
     total_kept_after_disagree = 0
-    label_counts = {"small_only": 0, "both": 0, "neither": 0}
+    group_counts = {"flip": 0, "all_no_contact": 0, "all_contact": 0}
+    case_label_counts = {"contact": 0, "no_contact": 0}
     scene_stats = []
 
     for scene_glb in scenes:
@@ -375,7 +441,8 @@ def generate_o5_cases(
 
         scene_poses_tried = 0
         scene_kept = 0
-        scene_labels = {"small_only": 0, "both": 0, "neither": 0}
+        scene_groups = {"flip": 0, "all_no_contact": 0, "all_contact": 0}
+        scene_labels = {"contact": 0, "no_contact": 0}
 
         try:
             sim = EgoConseqSim(scene_glb)
@@ -394,8 +461,8 @@ def generate_o5_cases(
                     for t, c in target_counts.values()
                 )
                 if total_needed == 0:
-                    # All targets met — still try to add small_only if possible
-                    if label_counts["small_only"] >= target_small_only + 10:
+                    # All targets met — still try to add extra flip groups if possible.
+                    if group_counts["flip"] >= target_flip + 10:
                         break
 
                 # Sample a random pose
@@ -438,76 +505,71 @@ def generate_o5_cases(
                 if result is None:
                     continue
 
-                horizon_m, desired_label = result
+                horizon_m, group_kind = result
 
-                # Build the case
-                case_id = f"O5-{uuid.uuid4().hex[:8]}"
-                question = o5_prompt(W_SMALL, W_LARGE, round(horizon_m, 2))
-
-                case = make_o5(
-                    d_safe_small=d_vis_small,
-                    d_safe_large=d_vis_large,
+                group_uid = uuid.uuid4().hex[:8]
+                group_id = f"O5G-{group_uid}"
+                case_prefix = f"O5-{group_uid}"
+                group_cases = build_o5_group_cases(
+                    group_id=group_id,
+                    case_prefix=case_prefix,
                     horizon_m=horizon_m,
-                    r_small=R_SMALL,
-                    r_large=R_LARGE,
-                    case_id=case_id,
                     scene_id=scene_name,
                     pose=[float(pos[0]), float(pos[1]), float(pos[2]), float(yaw)],
-                    question=question,
-                    geometry_tag="narrow-gap" if desired_label == "small_only" else desired_label,
-                    group_id=scene_name,
+                    group_kind=group_kind,
+                    d_vis_small=d_vis_small,
+                    d_vis_large=d_vis_large,
+                    d_nav_small=d_nav_small,
+                    d_nav_large=d_nav_large,
                 )
 
-                if case is None:
-                    # Margin check failed
+                if group_cases is None:
+                    # Margin check failed for at least one radius.
                     continue
 
-                actual_label = case.answer["label"]
-                if actual_label != desired_label:
-                    # Label didn't match target (e.g. H midpoint gave wrong side)
-                    # Still keep it but don't count toward the target we aimed for
-                    pass
+                for case in group_cases:
+                    # Save the same RGB image under each case id so model payloads stay per-case.
+                    img_path = os.path.join(IMG_DIR, f"{case.case_id}.png")
+                    Image.fromarray(rgb).save(img_path)
+                    case.image_path = img_path
 
-                # Save RGB image
-                img_path = os.path.join(IMG_DIR, f"{case_id}.png")
-                Image.fromarray(rgb).save(img_path)
-                case.image_path = img_path
+                    # Save one single-robot evidence plot for this case.
+                    td_path = os.path.join(TOPDOWN_DIR, f"{case.case_id}.png")
+                    case_d_safe = float(case.d_safe_visible_m)
+                    case_radius = float(case.body["radius_m"])
+                    case_label = case.answer["label"]
+                    path_samples = swept_path(
+                        0.0,
+                        forward_m=min(case_d_safe, horizon_m),
+                        step=config.MARCH_STEP_M,
+                    )
+                    save_topdown_o5(
+                        td_path,
+                        obstacle_pts=pts_obs,
+                        path_samples=path_samples,
+                        d_safe_m=case_d_safe,
+                        horizon_m=horizon_m,
+                        radius_m=case_radius,
+                        gt_label=case_label,
+                        title=f"{scene_name[:20]} | {case.case_id}",
+                    )
 
-                # Save top-down plot
-                td_path = os.path.join(TOPDOWN_DIR, f"{case_id}.png")
-                path_samples_small = swept_path(0.0, forward_m=d_vis_small, step=config.MARCH_STEP_M)
-                path_samples_large = swept_path(0.0, forward_m=d_vis_large, step=config.MARCH_STEP_M)
-                save_topdown_o5(
-                    td_path,
-                    obstacle_pts=pts_obs,
-                    path_samples_small=path_samples_small,
-                    path_samples_large=path_samples_large,
-                    d_safe_small=d_vis_small,
-                    d_safe_large=d_vis_large,
-                    horizon_m=horizon_m,
-                    r_small=R_SMALL,
-                    r_large=R_LARGE,
-                    label=actual_label,
-                    title=f"{scene_name[:20]} | {case_id}",
-                )
+                    actual_label = case_label
+                    case_label_counts[actual_label] = case_label_counts.get(actual_label, 0) + 1
+                    scene_labels[actual_label] = scene_labels.get(actual_label, 0) + 1
 
-                # Enrich case with extra fields
-                case.d_safe_visible_m = d_vis_small  # main d_safe (small body)
-                case.d_safe_navmesh_m = d_nav_small
+                group_counts[group_kind] = group_counts.get(group_kind, 0) + 1
+                scene_groups[group_kind] = scene_groups.get(group_kind, 0) + 1
+                if group_kind in target_counts:
+                    target_counts[group_kind][1] += 1
 
-                # Update counts
-                label_counts[actual_label] = label_counts.get(actual_label, 0) + 1
-                scene_labels[actual_label] = scene_labels.get(actual_label, 0) + 1
-                if actual_label in target_counts:
-                    target_counts[actual_label][1] += 1
-
-                cases.append(case)
+                cases.extend(group_cases)
 
                 if (scene_kept % 5 == 0) or scene_kept <= 3:
                     print(
                         f"  [kept {scene_kept:3d}] attempt={attempt+1:4d}"
                         f"  d_small={d_vis_small:.2f}  d_large={d_vis_large:.2f}"
-                        f"  H={horizon_m:.2f}  label={actual_label}"
+                        f"  H={horizon_m:.2f}  group={group_kind}"
                     )
 
         finally:
@@ -517,9 +579,13 @@ def generate_o5_cases(
             "scene": scene_name,
             "poses_tried": scene_poses_tried,
             "kept_after_disagree": scene_kept,
+            "groups": scene_groups,
             "labels": scene_labels,
         })
-        print(f"  Scene summary: tried={scene_poses_tried}  kept={scene_kept}  labels={scene_labels}")
+        print(
+            f"  Scene summary: tried={scene_poses_tried}  kept={scene_kept}"
+            f"  groups={scene_groups}  case_labels={scene_labels}"
+        )
 
     # Print summary
     print("\n" + "=" * 60)
@@ -528,13 +594,19 @@ def generate_o5_cases(
     print(f"  Total poses tried       : {total_poses_tried}")
     print(f"  Kept after disagree     : {total_kept_after_disagree}")
     print(f"  Cases generated         : {len(cases)}")
-    print(f"  small_only              : {label_counts['small_only']}")
-    print(f"  both                    : {label_counts['both']}")
-    print(f"  neither                 : {label_counts['neither']}")
-    print(f"  small_only >= 30?       : {'YES' if label_counts['small_only'] >= 30 else 'NO'}")
+    print(f"  Groups generated        : {sum(group_counts.values())}")
+    print(f"  flip groups             : {group_counts['flip']}")
+    print(f"  all_no_contact groups   : {group_counts['all_no_contact']}")
+    print(f"  all_contact groups      : {group_counts['all_contact']}")
+    print(f"  contact cases           : {case_label_counts['contact']}")
+    print(f"  no_contact cases        : {case_label_counts['no_contact']}")
+    print(f"  flip groups >= 30?      : {'YES' if group_counts['flip'] >= 30 else 'NO'}")
     print("=" * 60)
     for ss in scene_stats:
-        print(f"  {ss['scene']}: tried={ss['poses_tried']}  kept={ss['kept_after_disagree']}  {ss['labels']}")
+        print(
+            f"  {ss['scene']}: tried={ss['poses_tried']}"
+            f"  kept={ss['kept_after_disagree']}  groups={ss['groups']}  labels={ss['labels']}"
+        )
     print("=" * 60)
 
     return cases
@@ -548,10 +620,19 @@ def parse_args():
     p = argparse.ArgumentParser(description="Generate O5 dataset cases")
     p.add_argument("--max-poses", type=int, default=500,
                    help="Max pose attempts per scene (default 500)")
-    p.add_argument("--target-small-only", type=int, default=40,
-                   help="Target small_only count (default 40)")
-    p.add_argument("--target-both", type=int, default=20)
-    p.add_argument("--target-neither", type=int, default=20)
+    p.add_argument("--target-flip", type=int, default=40,
+                   help="Target counterfactual flip group count (default 40)")
+    p.add_argument("--target-all-no-contact", type=int, default=20,
+                   help="Target control groups where both radii do not contact")
+    p.add_argument("--target-all-contact", type=int, default=20,
+                   help="Target control groups where both radii contact")
+    # Backward-compatible aliases from the previous three-way O5 schema.
+    p.add_argument("--target-small-only", dest="target_flip", type=int,
+                   help=argparse.SUPPRESS)
+    p.add_argument("--target-both", dest="target_all_no_contact", type=int,
+                   help=argparse.SUPPRESS)
+    p.add_argument("--target-neither", dest="target_all_contact", type=int,
+                   help=argparse.SUPPRESS)
     p.add_argument("--seed", type=int, default=42)
     return p.parse_args()
 
@@ -562,15 +643,18 @@ def main():
     print("[O5-gen] Starting O5 dataset generation")
     print(f"  Scenes : {len(DEFAULT_SCENES)}")
     print(f"  Max poses per scene : {args.max_poses}")
-    print(f"  Targets: small_only={args.target_small_only}"
-          f"  both={args.target_both}  neither={args.target_neither}")
+    print(
+        f"  Targets: flip={args.target_flip}"
+        f"  all_no_contact={args.target_all_no_contact}"
+        f"  all_contact={args.target_all_contact}"
+    )
 
     cases = generate_o5_cases(
         scenes=DEFAULT_SCENES,
         max_poses_per_scene=args.max_poses,
-        target_small_only=args.target_small_only,
-        target_both=args.target_both,
-        target_neither=args.target_neither,
+        target_flip=args.target_flip,
+        target_all_no_contact=args.target_all_no_contact,
+        target_all_contact=args.target_all_contact,
         seed=args.seed,
     )
 

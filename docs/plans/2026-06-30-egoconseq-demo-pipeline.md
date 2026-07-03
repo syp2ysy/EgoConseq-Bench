@@ -32,7 +32,7 @@
 
 **D_MAX semantics**: `d_safe == D_MAX_M` means "no contact within the visible local horizon" (treated as `> D_max`). Thresholds (`d_safe < H`) and capped-MAE treat the capped value as the upper bin edge; never compare two capped values as if precise.
 
-**VLM is mandatory for the P2/P3 gate decisions** (it is the content of the life-or-death gates), accessed via `eval/baselines.py::vlm_answer(image, question)` wrapping the repo's qwen3vl serving. Generation tasks stay decoupled from serving details, but a gate is NOT "passed" until the VLM has been run.
+**SEQUENCING (amended 2026-06-30 per user):** the VLM "考生" (model-under-test) is the LAST step, not part of P2/P3. The order is: **(1) generate QA + GT with this pipeline → (2) HUMAN checks QA correctness → (3) only then connect the VLM to evaluate.** So P2/P3/P4 = GENERATE cases + produce human-checkable artifacts (RGB + question + GT + top-down evidence) + run the NON-VISION shortcut baselines (random / majority / blind text-only / radius-only / center-ray depth heuristic — none of these is the 考生; they exist to prove the QA can't be shortcut-solved). The actual VLM run is DEFERRED to a separate post-validation phase. A P2/P3 gate "passes" on: human-verified GT correctness + answer balance + shortcut baselines ≈ chance/low. `eval/baselines.py::vlm_answer` is still built (interface) but NOT invoked until the dataset passes human check.
 
 ---
 
@@ -290,16 +290,16 @@ def swept_path(turn_deg: float, forward_m: float, step: float):
 from egoconseq.manifest import Case, write_jsonl, read_jsonl
 
 def test_roundtrip(tmp_path):
-    c = Case(case_id="x1", operation_id="O5", readout_tag="pair_flip",
+    c = Case(case_id="x1", operation_id="O5", readout_tag="binary_contact",
              scene_id="s", pose=[0,0,0,0], body={"radius_m":0.25},
              action={"type":"forward","horizon_m":1.0,"horizon_reference":"metric_fixed"},
              d_safe_visible_m=1.4, d_safe_navmesh_m=1.5, oracle_agreement="agree",
-             gates={"visible_sweep_ratio":0.82}, answer={"answer_type":"pair_flip","label":"small_only"},
+             gates={"visible_sweep_ratio":0.82}, answer={"answer_type":"binary_contact","label":"no_contact"},
              tags={"geometry_tag":"narrow-gap"}, group_id="g1")
     p = tmp_path/"m.jsonl"
     write_jsonl([c], p)
     got = read_jsonl(p)
-    assert got[0].operation_id == "O5" and got[0].answer["label"] == "small_only"
+    assert got[0].operation_id == "O5" and got[0].answer["label"] == "no_contact"
 ```
 
 - [ ] **Step 2: Run** → FAIL
@@ -584,35 +584,32 @@ def test_g2_rejects_holey_no_contact():
 
 **Files:** Create `egoconseq/tasks/prompts.py`; Test `tests/test_prompts.py`
 
-- [ ] **Step 1: Failing test**: `o5_prompt(width_small_m, width_large_m, horizon_m)` mentions both widths + a **fixed metric** horizon, mentions "身体接触"/"宽", and does **NOT** mention height. Assert `"高" not in prompt and "米" in prompt`.
-- [ ] **Step 2-4: Implement + run** → PASS. Answer schema `{answer_type:"pair_flip", options:[both,small_only,neither], label, group_id}`.
-- [ ] **Step 5: Commit** `git commit -am "feat: O5 width-only prompt + pair-flip schema"`
+- [ ] **Step 1: Failing test**: `o5_prompt(diameter_m, horizon_m)` describes exactly one cylindrical-chassis robot + a **fixed metric** horizon, asks binary `会接触 / 不会接触`, and does **NOT** mention height or two robots. Assert `"高" not in prompt`, `"两个" not in prompt`, and `"米" in prompt`.
+- [ ] **Step 2-4: Implement + run** → PASS. Answer schema per case `{answer_type:"binary_contact", options:[contact,no_contact], label, group_id}`. Counterfactual grouping lives in `group_id`, not in one prompt.
+- [ ] **Step 5: Commit** `git commit -am "feat: O5 single-robot binary prompt schema"`
 
 ---
 
 ### Task 16: O5 instantiation (fixed-meter horizon)
 
-**Files:** Create `egoconseq/tasks/instantiate.py` (`make_o5`); Test `tests/test_instantiate_o5.py`
+**Files:** Create `egoconseq/tasks/instantiate.py` (`make_o5_case`); Test `tests/test_instantiate_o5.py`
 
 - [ ] **Step 1: Failing test** — the red line:
 
 ```python
-from egoconseq.tasks.instantiate import make_o5, o5_label
+from egoconseq.tasks.instantiate import make_o5_case, o5_label
 
 def test_o5_uses_fixed_metric_horizon_not_bodywidth():
-    # same physical path for both bodies
-    case = make_o5(d_safe_small=1.2, d_safe_large=0.6, horizon_m=1.0,
-                   r_small=0.10, r_large=0.40)
+    case = make_o5_case(d_safe_m=0.6, radius_m=0.40, horizon_m=1.0, group_id="g1")
     assert case.action["horizon_reference"] == "metric_fixed"
     assert case.action["horizon_m"] == 1.0
-    assert o5_label(1.2, 0.6, 1.0) == "small_only"     # small passes (1.2>1.0), large contacts (0.6<1.0)
-    assert o5_label(1.2, 1.1, 1.0) == "both"
-    assert o5_label(0.5, 0.4, 1.0) == "neither"
+    assert o5_label(0.6, 1.0) == "contact"
+    assert o5_label(1.2, 1.0) == "no_contact"
 ```
 
 - [ ] **Step 2: Run** → FAIL
-- [ ] **Step 3: Implement** `o5_label(d_small,d_large,H)` (compare each `d_safe` to the **same** fixed-meter `H`) and `make_o5(...)` → `Case` with `operation_id="O5"`, group_id, narrow-gap tag.
-  - **Margin rule (resolves ambiguity):** reject (return None) unless **each body independently clears its own-width margin**: `|d_small − H| ≥ 0.5*(2*r_small)` AND `|d_large − H| ≥ 0.5*(2*r_large)`. The horizon `H` is the single shared physical path (red line); only the margin threshold is per-body (each body must be unambiguously on its side of `H` relative to its own footprint).
+- [ ] **Step 3: Implement** `o5_label(d_safe,H)` and `make_o5_case(...)` → one `Case` with `operation_id="O5"`, `readout_tag="binary_contact"`, group_id, narrow-gap tag, and stored GT evidence.
+  - **Margin rule (resolves ambiguity):** reject (return None) unless the case independently clears its own-radius margin: `|d_safe − H| ≥ r`. The horizon `H` is the shared physical path within the group; only the margin threshold is per-body.
 - [ ] **Step 4: Run** → PASS
 - [ ] **Step 5: Commit** `git commit -am "feat: O5 instantiation with fixed-metric horizon (red line)"`
 
@@ -628,15 +625,16 @@ def test_o5_uses_fixed_metric_horizon_not_bodywidth():
 from egoconseq.eval.metrics import o5_metrics
 
 def test_o5_flip_metrics():
-    # groups with GT flip (small_only). model preds vary or not.
-    gt   = ["small_only","small_only","both"]
-    pred = ["small_only","both",      "both"]
-    m = o5_metrics(gt, pred)
+    groups = [[
+        {"radius_m": 0.10, "gt": "no_contact", "pred": "no_contact"},
+        {"radius_m": 0.40, "gt": "contact", "pred": "no_contact"},
+    ]]
+    m = o5_metrics(groups)
     assert 0 <= m["narrow_band_flip_acc"] <= 1
     assert "embodiment_sensitivity" in m and "correct_flip_rate" in m and "invariance_error" in m
 ```
 
-- [ ] **Step 2-4: Implement + run** → PASS. Primary = `narrow_band_flip_acc` over `small_only` groups; plus Embodiment Sensitivity / Correct Flip Rate / Invariance Error (design §6).
+- [ ] **Step 2-4: Implement + run** → PASS. Primary = `correct_flip_rate` over GT-flip groups; plus False-Safe Rate / Embodiment Sensitivity / Invariance Error (design §6).
 - [ ] **Step 5: Commit** `git commit -am "feat: O5 flip metrics"`
 
 ---
@@ -645,16 +643,17 @@ def test_o5_flip_metrics():
 
 **Files:** Create `egoconseq/pipeline/generate.py` (`generate_o5`); Create `scripts/run_o5_demo.py`
 
-- [ ] **Step 1: Implement** `generate_o5(scenes, n_pairs)`: sample poses valid for all radii → forward `d_safe` for `r_small,r_large` (depth + navmesh) → disagreement keep → narrow-band O5 pairs → write `data/demo/o5/manifest.jsonl` + overlays.
-- [ ] **Step 2: Run generation** on 2–3 scenes, target ≥30 pairs; print kept/discarded by taxonomy.
-- [ ] **Step 3: Baselines + oracle + VLM (VLM MANDATORY)**: run `radius-only`, `image-only-no-body`, oracle, and the qwen3vl VLM via `eval/baselines.py::vlm_answer`; compute `o5_metrics`. The gate cannot be evaluated without the VLM run.
-- [ ] **Step 4: GATE 1 decision** — write `data/demo/o5/report.md`. Two conditions, BOTH required:
-  - **(a) GT-discriminator exists** (necessary): ≥30 `small_only` pairs; oracle flip_acc ≈ 1.0; radius-only/blind ≈ chance.
-  - **(b) VLM gap confirmed** (also required, per spec §7): VLM fails to flip reliably (low `correct_flip_rate` / high `invariance_error`).
-  - Pass only if (a) AND (b). If VLM flips perfectly → O5 not discriminative for this VLM → reconsider difficulty/headline before scaling.
-- [ ] **Step 5: Commit** `git commit -am "feat: O5 demo generation + GATE 1 report"`
+- [ ] **Step 1: Implement** `generate_o5(scenes, n_groups)`: sample poses valid for all radii → forward `d_safe` for `r_small,r_large` (depth + navmesh) → disagreement keep → emit one binary-contact case per radius sharing `group_id` → write `data/demo/o5/manifest.jsonl` + overlays.
+- [ ] **Step 2: Run generation** on 2–3 scenes, target ≥30 flip groups; print kept/discarded by taxonomy.
+- [ ] **Step 3: Human-check artifacts + NON-VISION shortcut baselines (NO 考生 VLM)**: build a per-case review panel (HTML or PNG grid) = RGB + the question + GT label + the top-down oracle evidence + tags, written to `data/demo/o5/review/`. Run only the non-vision shortcut baselines (`random`, `majority`, `blind text-only`, `radius-only`) + the geometry `oracle`; compute `o5_metrics` on these. Do NOT call any VLM.
+- [ ] **Step 4: GATE 1 (generation-validity, NO VLM)** — write `data/demo/o5/report.md`:
+  - **(a) GT-discriminator exists**: ≥30 GT-flip groups; oracle correct_flip_rate ≈ 1.0.
+  - **(b) not shortcut-solvable**: blind / majority should show high invariance on flip groups; radius-only is reported as a diagnostic because it hard-codes narrow=no_contact/wide=contact and must be checked on control groups too.
+  - **(c) human QA check**: the review panels are handed to the user to verify GT correctness (question is unambiguous, GT matches the top-down evidence). This is the real gate.
+  - The VLM ("考生") run is DEFERRED to a later phase, after the user signs off on QA quality.
+- [ ] **Step 5: Commit** `git commit -am "feat: O5 generation + human-check panels + shortcut-baseline sanity"`
 
-> ⚠ GATE P2 (LIFE-OR-DEATH 1): a real GT flip set exists and behaves as a discriminator. This is the primary justification for the whole benchmark.
+> ⚠ GATE P2 (generation-validity): a real GT-flip set exists, is not shortcut-solvable, AND passes human QA inspection. The VLM evaluation happens only after this passes.
 
 ---
 
@@ -685,9 +684,9 @@ def test_o5_flip_metrics():
 **Files:** Modify `generate.py` (`generate_o4`); Create `scripts/run_o4_demo.py`
 
 - [ ] **Step 1-2: Implement + generate** ≥30 O4 cases over 2–3 scenes (depth + navmesh per direction, disagreement keep, tie-reject).
-- [ ] **Step 3: Run** baselines (center-ray, three-ray, random) + oracle + VLM; compute ranking metrics.
-- [ ] **Step 4: GATE 2 decision** — `data/demo/o4/report.md`: **is center-ray/three-ray depth heuristic ≪ VLM, and is VLM above center-bias (not always "straight")?** If depth heuristic already solves O4 → O4 is just depth, weaken headline.
-- [ ] **Step 5: Commit** `git commit -am "feat: O4 demo generation + GATE 2 report"`
+- [ ] **Step 3: Human-check panels + NON-VISION baselines (NO 考生 VLM)**: build `data/demo/o4/review/` panels (RGB + ranking question + GT order + top-down fan + tags); run `random`, `center-ray`/`three-ray` depth heuristic, `oracle`; compute ranking metrics on these. No VLM.
+- [ ] **Step 4: GATE 2 (generation-validity, NO VLM)** — `data/demo/o4/report.md`: ≥30 cases; oracle ranking ≈ perfect; **random ≈ chance and the depth heuristic does NOT trivially solve it** (if center-ray depth already gets the full ranking, the cases are too easy/depth-only → re-sample harder asymmetric scenes); **human verifies** the GT ordering matches the top-down fan. VLM deferred.
+- [ ] **Step 5: Commit** `git commit -am "feat: O4 generation + human-check panels + shortcut sanity"`
 
 > ⚠ GATE P3 (LIFE-OR-DEATH 2): O4 is not solved by a depth heuristic and the VLM shows non-trivial directional comparison.
 

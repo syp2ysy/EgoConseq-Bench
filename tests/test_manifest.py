@@ -8,7 +8,7 @@ def test_roundtrip(tmp_path):
     c = Case(
         case_id="x1",
         operation_id="O5",
-        readout_tag="pair_flip",
+        readout_tag="binary_contact",
         scene_id="s",
         pose=[0, 0, 0, 0],
         body={"radius_m": 0.25},
@@ -17,7 +17,7 @@ def test_roundtrip(tmp_path):
         d_safe_navmesh_m=1.5,
         oracle_agreement="agree",
         gates={"visible_sweep_ratio": 0.82},
-        answer={"answer_type": "pair_flip", "label": "small_only"},
+        answer={"answer_type": "binary_contact", "label": "contact"},
         tags={"geometry_tag": "narrow-gap"},
         group_id="g1",
     )
@@ -25,7 +25,7 @@ def test_roundtrip(tmp_path):
     write_jsonl([c], p)
     got = read_jsonl(p)
     assert got[0].operation_id == "O5"
-    assert got[0].answer["label"] == "small_only"
+    assert got[0].answer["label"] == "contact"
 
 
 def test_model_payload_keys_only():
@@ -74,7 +74,7 @@ def test_roundtrip_preserves_nested():
         sensor_profile={"camera_height": 1.5, "hfov": 79, "resolution": [640, 480]},
         body={"radius_m": 0.18, "width_m": 0.36, "height_m": 1.5},
         action={"type": "turn", "angle_deg": 30},
-        answer={"answer_type": "pair_flip", "label": "large_only"},
+        answer={"answer_type": "binary_contact", "label": "contact"},
         contact_point_3d=[1.1, 2.2, 3.3],
         contact_pixel=[320, 240],
         d_safe_visible_body_widths=2.5,
