@@ -1,0 +1,36 @@
+# Training/runtime dependencies for the qwen3vl conda environment, plus the
+# small test dependency needed by this repository. Core runtime versions match
+# the environment used for the current R2R/RxR runs.
+
+# Core deep learning stack
+torch>=2.5.0
+transformers>=4.57.0
+accelerate>=1.12.0
+deepspeed>=0.18.0
+flash-attn>=2.5.0
+
+# Checkpoint I/O
+safetensors>=0.4.5
+
+# Image/data processing
+pillow>=11.0.0
+numpy>=1.26.0
+scipy>=1.10.0
+PyYAML>=6.0.0
+fastdtw>=0.3.4
+
+# Unit tests
+pytest>=8.0.0
+
+# Habitat evaluation and depth/pose replay are intentionally not installed from
+# this file. Use a separate qwen3vl_habitat environment:
+#   habitat-lab==0.2.4
+#   habitat-sim==0.2.4
+#   hydra-core==1.3.2
+#   omegaconf==2.3.0
+#   attrs>=25.3.0
+# plus Matterport3D/HM3D assets and the local config/vln_r2r.yaml paths
+# documented in README.md.
+#
+# Optional: qwen-vl-utils is useful for upstream Qwen-VL examples, but this
+# project passes PIL images directly to Qwen3VLProcessor and does not import it.

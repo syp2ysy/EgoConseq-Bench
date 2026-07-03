@@ -1,0 +1,60 @@
+model_name: Qwen/Qwen3-VL-4B-Instruct
+output_dir: outputs/qwen3vl_streamvln_r2r_rxr_depth_stage2_current_patch2_w05to01_hold30_zero3
+
+annotation_path:
+  - /home/zhangshan/syp/datasets/StreamVLN-Trajectory-Data/R2R/annotations_v1-3.json
+  - /home/zhangshan/syp/datasets/StreamVLN-Trajectory-Data/RxR/annotations.json
+image_root:
+  - /home/zhangshan/syp/datasets/StreamVLN-Trajectory-Data/R2R/images
+  - /home/zhangshan/syp/datasets/StreamVLN-Trajectory-Data/RxR/images
+
+history_images: 8
+max_action_segments: 3
+chunking_strategy: navida_random
+chunking_seed: 41
+chunking_merge_probability: 0.7
+image_size: [308, 252]
+stop_upsample_ratio: 2
+
+depth_enable: true
+depth_stage: 2
+init_depth_head_from: outputs/qwen3vl_streamvln_r2r_rxr_depth_stage1_current_patch2_zero3
+depth_supervise_frames: current
+depth_resize_mode: nearest
+depth_root:
+  - /home/zhangshan/syp/datasets/StreamVLN-Trajectory-Data/R2R/images
+  - /home/zhangshan/syp/datasets/StreamVLN-Trajectory-Data/RxR/images
+depth_weight: 0.5
+depth_weight_schedule: plateau_cosine_decay
+depth_weight_final: 0.1
+depth_weight_hold_ratio: 0.3
+depth_warmup_steps: 0
+depth_tap_layer: 24
+depth_max_meters: 10.0
+depth_head_hidden_dim: 512
+depth_head_patch: 2
+depth_silog_alpha: 1.0
+depth_silog_variance_focus: 0.85
+depth_min_valid_pixels: 16
+
+seed: 41
+num_train_epochs: 1
+learning_rate: 2.0e-5
+per_device_train_batch_size: 4
+gradient_accumulation_steps: 4
+lr_scheduler_type: cosine
+bf16: true
+attn_implementation: flash_attention_2
+gradient_checkpointing: true
+dataloader_num_workers: 4
+dataloader_pin_memory: true
+logging_steps: 5
+logging_nan_inf_filter: false
+max_grad_norm: 1.0
+save_strategy: epoch
+save_total_limit: 2
+report_to: none
+deepspeed: scripts/zero3.json
+
+freeze_vision_encoder: true
+train_visual_merger: true
