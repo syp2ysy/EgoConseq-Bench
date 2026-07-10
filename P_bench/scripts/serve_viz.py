@@ -16,8 +16,9 @@ import argparse
 import json
 import os
 import sys
+import threading
 import time
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
 import numpy as np
@@ -126,6 +127,10 @@ class State:
         self.sim = None
         self.open_key = None
         self.fcache = {}          # (active, frame_id, htag) -> Frame
+        # One Habitat/GS session is shared and NOT thread-safe: every sim-touching
+        # op (render/re-judge/sample/set_active) runs under this lock. Static file
+        # + records-JSON GETs read only startup-frozen data, so they stay lock-free.
+        self.lock = threading.Lock()
 
     # ---- dataset / scene ----
     @property
@@ -264,6 +269,8 @@ def _safe_join(root, rel):
 
 def make_handler(state, page):
     class H(BaseHTTPRequestHandler):
+        timeout = 60          # don't let a dropped client wedge a handler thread forever
+
         def log_message(self, *a):
             pass
 
@@ -307,19 +314,21 @@ def make_handler(state, page):
             n = int(self.headers.get("Content-Length", 0))
             req = json.loads(self.rfile.read(n) or b"{}")
             try:
-                if self.path == "/api/ds/set":
-                    r = state.set_active(req["name"])
-                elif self.path == "/api/ds/rejudge":
-                    r = state.rejudge(req["frame_id"], float(req["height"]), float(req["radius"]))
-                elif self.path == "/api/ds/render":
-                    r = state.ds_render(req["frame_id"], req["actions"],
-                                        float(req["height"]), float(req["radius"]))
-                elif self.path == "/api/frame":
-                    r = state.sample(req["scene"], int(req.get("seed", 0)))
-                elif self.path == "/api/judge":
-                    r = state.live_render(req["frame_id"], float(req["radius"]), req["actions"])
-                else:
-                    return self._send(404, b"")
+                with state.lock:   # single Habitat session -> serialize sim-touching POSTs
+                    if self.path == "/api/ds/set":
+                        r = state.set_active(req["name"])
+                    elif self.path == "/api/ds/rejudge":
+                        r = state.rejudge(req["frame_id"], float(req["height"]), float(req["radius"]))
+                    elif self.path == "/api/ds/render":
+                        r = state.ds_render(req["frame_id"], req["actions"],
+                                            float(req["height"]), float(req["radius"]))
+                    elif self.path == "/api/frame":
+                        r = state.sample(req["scene"], int(req.get("seed", 0)))
+                    elif self.path == "/api/judge":
+                        r = state.live_render(req["frame_id"], float(req["radius"]), req["actions"])
+                    else:
+                        return self._send(404, b"")
+                # response written OUTSIDE the lock: a slow client can't hold up renders
                 return self._json(r) if r is not None else self._json({"error": "failed"}, 400)
             except Exception as e:
                 return self._json({"error": repr(e)}, 500)
@@ -349,7 +358,8 @@ def main():
     else:
         ap.error("need --datasets or --dataset")
     state = State(args.img_dir, datasets)
-    httpd = HTTPServer(("0.0.0.0", args.port), make_handler(state, PAGE))
+    httpd = ThreadingHTTPServer(("0.0.0.0", args.port), make_handler(state, PAGE))
+    httpd.daemon_threads = True   # handler threads don't block shutdown
     print(f"serving on http://localhost:{args.port}  datasets={[d[0] for d in datasets]}")
     httpd.serve_forever()
 
