@@ -12,6 +12,10 @@ HM3D_ROOT = "/home/zhangshan/syp/datasets/versioned_data/hm3d-0.2/hm3d"
 HM3D_VAL_DIR = HM3D_ROOT + "/val"
 HM3D_SCENE_DATASET_CFG = HM3D_ROOT + "/hm3d_annotated_basis.scene_dataset_config.json"
 
+# GS backend (Habitat-GS 3DGS scenes + InteriorGS bbox labels), one dir per scene:
+#   <GS_ROOT>/<scene>/{scene.gs.ply, scene.navmesh, labels.json}
+GS_ROOT = "/home/zhangshan/syp/datasets/gs"
+
 # --- sensor (Habitat defaults) ---
 HFOV_DEG = 79.0
 RESOLUTION = (640, 480)           # (W, H)
@@ -23,6 +27,10 @@ FOV_HALF_DEG = HFOV_DEG / 2.0     # 39.5 deg — view-cone half-angle
 # robot vacuum ~0.17, Amazon Astro ~0.21, Temi ~0.22, Pepper ~0.24.
 CYLINDER_HEIGHT_M = 1.5
 RADII_M = (0.15, 0.20, 0.25)
+
+# Camera/eye heights (m above floor) offered by the review app's robot-body panel.
+# HM3D pre-builds one color+depth sensor per height; GS renders any height (gsplat).
+RENDER_HEIGHTS = (0.4, 0.8, 1.2, 1.5, 1.7)
 
 # --- perception / occupancy ---
 OBSTACLE_BAND_M = (0.05, 1.5)     # height-above-floor band counted as obstacle
@@ -76,6 +84,11 @@ def hw():
     """Habitat sensor resolution [H, W] from RESOLUTION=(W, H)."""
     w, h = RESOLUTION
     return [h, w]
+
+
+def height_tag(h: float) -> str:
+    """Compact tag for a camera height, for sensor uuids / filenames (0.4 -> '040')."""
+    return f"{int(round(h * 100)):03d}"
 
 
 def intrinsics():

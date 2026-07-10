@@ -47,17 +47,19 @@ class Frame:
 
 
 def build_frame(sim, position, yaw: float, *,
-                frame_id: str, scene_id: str, scene_glb: str) -> Frame:
+                frame_id: str, scene_id: str, scene_glb: str,
+                cam_h: float = config.CAMERA_HEIGHT_M) -> Frame:
     """Render one observation and derive all geometric evidence (single unproject).
 
-    Per-point instance ids come from the offline SemanticIndex (nearest
-    labelled semantic surface in world frame), since the semantic sensor is
-    unusable in this build.
+    `cam_h` = camera/eye height above the floor. The camera height threads through
+    the render (sim.render(pos, yaw, cam_h)) and the ground transform, so a lower
+    camera yields a genuinely different egocentric image + visible geometry.
+    Per-point instance ids come from the offline SemanticIndex.
     """
-    rgb, depth, K = sim.render(position, yaw)
+    rgb, depth, K = sim.render(position, yaw, cam_h)
 
     pts_cam, uv = perception.unproject(depth, K)
-    pts = perception.to_agent_ground(pts_cam)
+    pts = perception.to_agent_ground(pts_cam, camera_height=cam_h)
     world = perception.world_from_local(pts, position, yaw)
     sem = sim.assign_instances(world).astype(np.int64)
 

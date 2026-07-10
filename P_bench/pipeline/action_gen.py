@@ -1,51 +1,21 @@
-"""Action-sequence generators for collection (grid / random / fov-bucketed)."""
+"""Action-sequence generation: length-bucketed, in-FOV, no-degenerate pools."""
 
 from __future__ import annotations
 
-import math
 from typing import Dict, List
 
 import numpy as np
 
-from pipeline import config
+from pipeline import config, perception
 from pipeline.actions import Turn, Forward, ActionSeq, sample_path
 
-_GRID_TURNS = [0, 15, -15, 30, -30, 45, -45, 90, -90]
-_GRID_FORWARDS = [0.5, 1.0, 1.5, 2.0]
-_GRID_PURE_TURNS = [30, -30, 45, -45, 90, -90]
-_RAND_TURNS = [15, -15, 30, -30, 45, -45, 90, -90]
-
 _FOV_HALF = config.FOV_HALF_DEG
-
-
-def grid() -> List[ActionSeq]:
-    """42 sequences: turn x forward (36) + pure turns (6)."""
-    seqs = [[Turn(t), Forward(f)] for t in _GRID_TURNS for f in _GRID_FORWARDS]
-    seqs += [[Turn(t)] for t in _GRID_PURE_TURNS]
-    return seqs
-
-
-def random_seqs(rng: np.random.Generator, k: int) -> List[ActionSeq]:
-    """k random sequences: 1-2 legs, discrete turns, forward in [0.4, 2.5]."""
-    out: List[ActionSeq] = []
-    for _ in range(k):
-        legs = int(rng.integers(1, 3))
-        acts: ActionSeq = []
-        for _ in range(legs):
-            acts.append(Turn(float(rng.choice(_RAND_TURNS))))
-            acts.append(Forward(float(round(rng.uniform(0.4, 2.5), 2))))
-        out.append(acts)
-    return out
+_in_cone = perception.in_cone     # (x, z) -> bool, within horizontal FOV cone
 
 
 # --------------------------------------------------------------------------
 # in-FOV, length-bucketed generation
 # --------------------------------------------------------------------------
-
-def _in_cone(x: float, z: float) -> bool:
-    """Mirror of consequence._in_cone: strictly in front, within horizontal FOV."""
-    return z > 1e-9 and abs(math.degrees(math.atan2(x, z))) <= _FOV_HALF
-
 
 def path_stays_in_fov(acts: ActionSeq) -> bool:
     """True iff every non-origin swept-centreline sample stays in the FOV cone.

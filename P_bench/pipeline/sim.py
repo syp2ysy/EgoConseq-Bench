@@ -58,12 +58,43 @@ class Nav:
         return float(g) if np.isfinite(g) else None
 
 
+def sample_pose(pf, render, rng, radii, *, min_floor=0.05, min_valid_depth=None,
+                yaws=None, max_tries=2000):
+    """Draw a quality-filtered (position, yaw); None on failure. Shared by both
+    backends. `render(pos, yaw) -> (rgb, depth, K)`; `min_valid_depth` gates HM3D
+    depth holes (GS depth is always valid, so pass None)."""
+    min_clear = max(radii) + 0.1
+    if yaws is None:
+        yaws = [math.radians(a) for a in range(0, 360, 45)]
+    for _ in range(max_tries):
+        pos = pf.get_random_navigable_point()
+        if not np.all(np.isfinite(pos)):
+            continue
+        if pf.distance_to_closest_obstacle(pos) < min_clear:
+            continue
+        yaw = float(rng.choice(yaws))
+        _, depth, K = render(pos, yaw)
+        if min_valid_depth is not None and \
+                float((np.isfinite(depth) & (depth > 0)).mean()) < min_valid_depth:
+            continue
+        pts = perception.to_agent_ground(perception.unproject(depth, K)[0])
+        floor_y = perception.estimate_floor_height(pts)
+        vfr = float((np.abs(pts[:, 1] - floor_y) <= 0.10).sum()) / float(depth.size)
+        if vfr < min_floor:
+            continue
+        return np.array(pos, dtype=np.float64), yaw
+    return None
+
+
 class SimSession:
     """Renders one HM3D scene; owns the pathfinder and semantic index."""
 
-    def __init__(self, scene_glb: str, *, scene_dataset_cfg: Optional[str] = None):
+    def __init__(self, scene_glb: str, *, scene_dataset_cfg: Optional[str] = None,
+                 heights=None):
         self.scene_glb = scene_glb
         self.scene_id = os.path.basename(os.path.dirname(scene_glb))  # e.g. 00800-TEEsavR23oF
+        # one color+depth sensor per requested camera height (default: just 1.5 m).
+        self._heights = [float(h) for h in (heights or [config.CAMERA_HEIGHT_M])]
 
         backend = habitat_sim.SimulatorConfiguration()
         backend.scene_id = scene_glb
@@ -72,14 +103,15 @@ class SimSession:
 
         hw = config.hw()
         specs = []
-        for uuid, stype in (("color", habitat_sim.SensorType.COLOR),
-                            ("depth", habitat_sim.SensorType.DEPTH)):
-            s = habitat_sim.CameraSensorSpec()
-            s.uuid = uuid; s.sensor_type = stype
-            s.resolution = hw
-            s.position = [0.0, config.CAMERA_HEIGHT_M, 0.0]
-            s.hfov = config.HFOV_DEG
-            specs.append(s)
+        for h in self._heights:
+            for pfx, stype in (("color", habitat_sim.SensorType.COLOR),
+                               ("depth", habitat_sim.SensorType.DEPTH)):
+                s = habitat_sim.CameraSensorSpec()
+                s.uuid = f"{pfx}_{config.height_tag(h)}"; s.sensor_type = stype
+                s.resolution = hw
+                s.position = [0.0, h, 0.0]
+                s.hfov = config.HFOV_DEG
+                specs.append(s)
         agent_cfg = habitat_sim.agent.AgentConfiguration()
         agent_cfg.sensor_specifications = specs
 
@@ -97,14 +129,16 @@ class SimSession:
     def id_to_cat(self) -> Dict[int, str]:
         return self._sem.id_to_cat
 
-    def render(self, position, yaw: float) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    def render(self, position, yaw: float,
+               cam_h: float = config.CAMERA_HEIGHT_M) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         st = habitat_sim.AgentState()
         st.position = np.array(position, dtype=np.float32)
         st.rotation = quaternion.from_rotation_vector(np.array([0.0, yaw, 0.0]))
         self._sim.get_agent(0).set_state(st)
         obs = self._sim.get_sensor_observations()
-        rgb = obs["color"][..., :3].astype(np.uint8)
-        depth = obs["depth"].astype(np.float32)
+        tag = config.height_tag(min(self._heights, key=lambda h: abs(h - cam_h)))  # nearest sensor
+        rgb = obs[f"color_{tag}"][..., :3].astype(np.uint8)
+        depth = obs[f"depth_{tag}"].astype(np.float32)
         return rgb, depth, self._K
 
     def assign_instances(self, world_points: np.ndarray) -> np.ndarray:
@@ -133,33 +167,10 @@ class SimSession:
         return Nav(self._sim.pathfinder, position, yaw)
 
     # -- sampling --
-    def sample_random_pose(self, rng: np.random.Generator, radii,
-                           yaws=None, max_tries: int = 2000):
-        """Draw a quality-filtered (position, yaw). Returns None if it fails."""
-        min_clear = max(radii) + 0.1
-        if yaws is None:
-            yaws = [math.radians(a) for a in (0, 45, 90, 135, 180, 225, 270, 315)]
-        pf = self._sim.pathfinder
-        for _ in range(max_tries):
-            pos = pf.get_random_navigable_point()
-            if not np.all(np.isfinite(pos)):
-                continue
-            if pf.distance_to_closest_obstacle(pos) < min_clear:
-                continue
-            yaw = float(rng.choice(yaws))
-            _, depth, K = self.render(pos, yaw)
-            valid = np.isfinite(depth) & (depth > 0)
-            vdr = float(valid.mean())
-            if vdr < 0.85:
-                continue
-            pts_cam, _ = perception.unproject(depth, K)
-            pts = perception.to_agent_ground(pts_cam)
-            floor_y = perception.estimate_floor_height(pts)
-            vfr = float((np.abs(pts[:, 1] - floor_y) <= 0.10).sum()) / float(depth.size)
-            if vfr < 0.05:
-                continue
-            return np.array(pos, dtype=np.float64), yaw
-        return None
+    def sample_random_pose(self, rng, radii, yaws=None, max_tries=2000):
+        return sample_pose(self._sim.pathfinder, self.render, rng, radii,
+                           min_floor=0.05, min_valid_depth=0.85,
+                           yaws=yaws, max_tries=max_tries)
 
     def close(self) -> None:
         self._sim.close()

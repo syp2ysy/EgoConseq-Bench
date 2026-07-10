@@ -70,6 +70,16 @@ def to_agent_ground(pts_cam: np.ndarray,
     return pts
 
 
+def bearing_dist(x: float, z: float) -> Tuple[float, float]:
+    """(bearing deg, horizontal distance) of a ground point; 0 = straight ahead."""
+    return math.degrees(math.atan2(x, z)), math.hypot(x, z)
+
+
+def in_cone(x: float, z: float) -> bool:
+    """Ground point is strictly in front and within the horizontal FOV cone."""
+    return z > 1e-9 and abs(math.degrees(math.atan2(x, z))) <= config.FOV_HALF_DEG
+
+
 def project_ground(point_3d_ground, K: np.ndarray,
                    camera_height: float = config.CAMERA_HEIGHT_M
                    ) -> Optional[Tuple[float, float]]:

@@ -10,17 +10,14 @@ Bearing/distance are measured from the current pose (origin (0,0), heading 0):
 
 from __future__ import annotations
 
-import math
 from collections import Counter
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
-from pipeline import config
+from pipeline import config, perception
 
-
-def _bearing_dist(x: float, z: float) -> Tuple[float, float]:
-    return math.degrees(math.atan2(x, z)), math.hypot(x, z)
+_bearing_dist = perception.bearing_dist   # (x, z) -> (bearing deg, distance)
 
 
 def extract_objects(

@@ -1,8 +1,9 @@
 """Batch collection: random poses x action seqs x bodies -> records.jsonl.
 
     MAGNUM_LOG=quiet HABITAT_SIM_LOG=quiet python scripts/collect.py \
-        --scenes .../TEEsavR23oF.basis.glb --poses-per-scene 3 \
-        --action-mode grid --radii 0.25 --out data/conseq/smoke_p2
+        --auto-scenes --poses-per-scene 20 --radii 0.15 0.20 0.25 \
+        --out data/conseq/v2                 # HM3D (default backend)
+    # ... --backend gs --gs-root /path/to/gs   # 3DGS scenes (gsplat)
 """
 
 import argparse
@@ -26,15 +27,10 @@ from pipeline.record import build_record, append_record
 from pipeline.sim import SimSession, discover_semantic_scenes
 
 
-def action_seqs(mode, rng, per_frame, file_path):
-    if mode == "grid":
-        return action_gen.grid()
-    if mode == "random":
-        return action_gen.random_seqs(rng, per_frame)
-    if mode == "file":
-        data = json.load(open(file_path))
-        return [parse_actions(s["actions"]) for s in data["sequences"]]
-    raise ValueError(mode)
+def action_seqs(file_path):
+    """--action-mode file: load explicit sequences from JSON."""
+    data = json.load(open(file_path))
+    return [parse_actions(s["actions"]) for s in data["sequences"]]
 
 
 def main():
@@ -46,9 +42,7 @@ def main():
     ap.add_argument("--poses-per-scene", type=int, default=20)
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--radii", type=float, nargs="+", default=list(config.RADII_M))
-    ap.add_argument("--action-mode", choices=["fov_len", "grid", "random", "file"],
-                    default="fov_len")
-    ap.add_argument("--actions-per-frame", type=int, default=12)
+    ap.add_argument("--action-mode", choices=["fov_len", "file"], default="fov_len")
     ap.add_argument("--action-file", default=None)
     ap.add_argument("--lengths", type=int, nargs="+", default=list(config.GEN_LENGTHS))
     ap.add_argument("--keep-per-length", type=int, default=config.KEEP_PER_LENGTH)
@@ -60,9 +54,16 @@ def main():
     ap.add_argument("--debug-outcomes-per-frame", type=int, default=4)
     ap.add_argument("--out", required=True)
     ap.add_argument("--no-validate", action="store_true")
+    ap.add_argument("--backend", choices=["hm3d", "gs"], default="hm3d")
+    ap.add_argument("--gs-root", default=config.GS_ROOT)
     args = ap.parse_args()
 
-    scenes = discover_semantic_scenes() if args.auto_scenes else args.scenes
+    if args.backend == "gs":
+        from pipeline.gs_sim import GsSimSession as Session, discover_gs_scenes
+        scenes = discover_gs_scenes(args.gs_root) if args.auto_scenes else args.scenes
+    else:
+        from pipeline.sim import SimSession as Session
+        scenes = discover_semantic_scenes() if args.auto_scenes else args.scenes
     if args.max_scenes:
         scenes = scenes[:args.max_scenes]
     os.makedirs(args.out, exist_ok=True)
@@ -77,7 +78,7 @@ def main():
     t0 = time.time()
 
     for si, scene in enumerate(scenes):
-        sim = SimSession(scene)
+        sim = Session(scene)
         print(f"[{si+1}/{len(scenes)}] {sim.scene_id}")
 
         # sample poses (using the largest-radius navmesh)
@@ -105,7 +106,7 @@ def main():
             for L in args.lengths:
                 stats[f"pool_L{L}"] += len(pool[L])
         else:
-            seqs = action_seqs(args.action_mode, rng, args.actions_per_frame, args.action_file)
+            seqs = action_seqs(args.action_file)
 
         # judge: outer loop over radius (navmesh recompute is expensive)
         outcomes = {fr.frame_id: [] for fr in frames}

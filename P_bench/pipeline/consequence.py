@@ -31,12 +31,8 @@ def _in_frame(uv, shape) -> bool:
     return 0 <= u < W and 0 <= v < H
 
 
-def _in_cone(x: float, z: float) -> bool:
-    return z > 1e-9 and abs(math.degrees(math.atan2(x, z))) <= FOV_HALF
-
-
-def _bearing_dist(x: float, z: float) -> Tuple[float, float]:
-    return math.degrees(math.atan2(x, z)), math.hypot(x, z)
+_in_cone = perception.in_cone          # (x, z) -> bool, within horizontal FOV cone
+_bearing_dist = perception.bearing_dist  # (x, z) -> (bearing deg, distance)
 
 
 # --------------------------------------------------------------------------
