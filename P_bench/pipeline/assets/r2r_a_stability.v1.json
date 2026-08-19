@@ -1,0 +1,13 @@
+{
+  "schema": "r2r-a-stability-asset.v1",
+  "certificate_version": "r2r-a-stability.v1",
+  "perturbations": [
+    {"id": "nominal", "x_m": 0.0, "z_m": 0.0, "yaw_deg": 0.0},
+    {"id": "x_negative", "x_m": -0.01, "z_m": 0.0, "yaw_deg": 0.0},
+    {"id": "x_positive", "x_m": 0.01, "z_m": 0.0, "yaw_deg": 0.0},
+    {"id": "z_negative", "x_m": 0.0, "z_m": -0.01, "yaw_deg": 0.0},
+    {"id": "z_positive", "x_m": 0.0, "z_m": 0.01, "yaw_deg": 0.0},
+    {"id": "yaw_negative", "x_m": 0.0, "z_m": 0.0, "yaw_deg": -1.0},
+    {"id": "yaw_positive", "x_m": 0.0, "z_m": 0.0, "yaw_deg": 1.0}
+  ]
+}

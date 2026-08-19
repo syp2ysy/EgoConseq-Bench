@@ -3,6 +3,7 @@
 import numpy as np
 
 from pipeline import config, perception
+from tests._synthetic import LEVEL_FLOOR
 
 
 K = config.intrinsics()
@@ -14,35 +15,37 @@ def test_unproject_roundtrip_recovers_pixels():
     pts_g = perception.to_agent_ground(pts_cam)
     # sample a few points, project back
     for i in np.linspace(0, pts_g.shape[0] - 1, 25).astype(int):
-        res = perception.project_ground(pts_g[i], K)
+        res = perception.project_ground(pts_g[i], K, camera_height=config.CAMERA_HEIGHT_M)
         assert res is not None
         u, v = res
         assert abs(u - uv[i, 0]) < 1e-6 and abs(v - uv[i, 1]) < 1e-6
 
 
 def test_project_ground_behind_camera_returns_none():
-    assert perception.project_ground((0.0, 1.5, -1.0), K) is None
+    assert perception.project_ground((0.0, 1.5, -1.0), K,
+                                     camera_height=config.CAMERA_HEIGHT_M) is None
 
 
-def test_estimate_floor_dense_floor():
-    floor = np.zeros((500, 3))          # y = 0
-    floor[:, 0] = np.random.uniform(-2, 2, 500)
-    floor[:, 2] = np.random.uniform(0.5, 4, 500)
-    furniture = np.zeros((300, 3))
-    furniture[:, 1] = 0.6
-    pts = np.vstack([floor, furniture])
-    assert abs(perception.estimate_floor_height(pts)) < 0.06
-
-
-def test_estimate_floor_sparse_returns_zero():
-    pts = np.zeros((50, 3)); pts[:, 1] = 0.02
-    assert perception.estimate_floor_height(pts) == 0.0
+def test_perception_no_longer_offers_a_per_image_floor_estimate():
+    # The scalar histogram estimator is gone, not deprecated: while it existed,
+    # any consumer could reach for a floor of its own and disagree with the
+    # pose's canonical plane. Its replacement is tested in test_pl_floor_plane.
+    assert not hasattr(perception, "estimate_floor_height")
 
 
 def test_obstacle_mask_band():
-    pts = np.array([[0, 0.0, 1], [0, 0.5, 1], [0, 2.0, 1], [0, -0.5, 1]], float)
-    m = perception.obstacle_mask(pts, floor_y=0.0)
+    pts = np.array([[0, 0.0, 1], [0, 0.15, 1], [0, 0.5, 1], [0, -0.5, 1]], float)
+    m = perception.obstacle_mask(pts, LEVEL_FLOOR)
     assert list(m) == [False, True, False, False]
+
+
+def test_obstacle_mask_band_top_excludes_overhang():
+    # Explicit bands remain available for deterministic geometry diagnostics.
+    pts = np.array([[0, 0.3, 1], [0, 0.7, 1]], float)
+    short = perception.obstacle_mask(pts, LEVEL_FLOOR, band=(0.05, 0.5))
+    tall = perception.obstacle_mask(pts, LEVEL_FLOOR, band=(0.05, 1.0))
+    assert list(short) == [True, False]
+    assert list(tall) == [True, True]
 
 
 def test_voxel_support_hits_wall_and_misses_far():

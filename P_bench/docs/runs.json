@@ -1,0 +1,323 @@
+{
+  "schema_version": "egoconseq.runs-registry.v1",
+  "comment": "Authoritative collection/artifact runs only. Debug and throwaway smokes are not registered; anything absent here carries no authority. data/ is gitignored, so this registry is the durable index. A registry-tombstone retains provenance after operator-approved byte cleanup; its root is not expected to exist.",
+  "runs": [
+    {
+      "root": "data/candidate_pool/v10_abc_golden_20260805_f52ea66",
+      "kind": "collection-and-candidate-artifact",
+      "status": "superseded",
+      "code_revision": "f52ea66c7400a8653b463fc59a4eefd6a9917e58",
+      "record_schema": "conseq.v10",
+      "qa_schema": "egoconseq.qa.v16-candidate-preview",
+      "oracle_contract": "ground-disc-visible-v8",
+      "task_scope": [
+        "A1_collision",
+        "A2_collision_step_grounding",
+        "A3_contact_object",
+        "B1_endpoint_distance",
+        "B2_endpoint_direction",
+        "C1_future_view_selection"
+      ],
+      "sampling_provenance": {
+        "pose_discovery": "shared-pool",
+        "pose_pool_schema_version": "egoconseq.pose-pool.v3"
+      },
+      "golden_manifest": "docs/golden/2026-08-05-r2r-abc-v10-24qa.json",
+      "coverage": {
+        "A1_collision": 10,
+        "A2_collision_step_grounding": 2,
+        "A3_contact_object": 2,
+        "B1_endpoint_distance": 2,
+        "B2_endpoint_direction": 2,
+        "C1_future_view_selection": 6
+      },
+      "headline_eligible": false,
+      "notes": "Fresh strict-v10 R2R recollection after removing deferred D and the legacy Q/probe/projection/review branches. Four one-record shards validate cleanly; candidate replay is 1.0 and is a scorer-integrity check, not a benchmark result. Superseded by the conseq.v11 corpus: v11 replaced the per-run action bank digest with a per-pose materialized bank and moved action-policy authority into the run contract, so these records are no longer revalidatable and the manifest exits 2 rather than running.",
+      "retention": "registry-tombstone; bytes purged 2026-08-13",
+      "fixture_role": "Deterministic input corpus for scripts/check_abc_golden.py. Four single-record shards over one scene, hand-fixed so the gate is reproducible: main-safe-r00 draws balanced actions, while the A3, B and C1 shards pin an explicit action file and B additionally pins a pose exclusion.",
+      "not_a_sampling_source": "Its coverage is the size of the gate, not of the benchmark. It is hand-selected and must never be reported as a sampled distribution or used to estimate per-task yield.",
+      "superseded_by": "data/candidate_pool/v11_abc_golden_20260805_7c3222a"
+    },
+    {
+      "root": "data/candidate_pool/v11_abc_golden_20260805_7c3222a",
+      "kind": "collection-and-candidate-artifact",
+      "status": "superseded",
+      "code_revision": "7c3222a",
+      "record_schema": "conseq.v11",
+      "qa_schema": "egoconseq.qa.v16-candidate-preview",
+      "oracle_contract": "ground-disc-visible-v8",
+      "task_scope": [
+        "A1_collision",
+        "A2_collision_step_grounding",
+        "A3_contact_object",
+        "B1_endpoint_distance",
+        "B2_endpoint_direction",
+        "C1_future_view_selection"
+      ],
+      "sampling_provenance": {
+        "pose_discovery": "shared-pool",
+        "pose_pool_schema_version": "egoconseq.pose-pool.v3"
+      },
+      "golden_manifest": "docs/golden/2026-08-07-r2r-abc-v11-24qa.strict-c1-superseded.json",
+      "coverage": {
+        "A1_collision": 10,
+        "A2_collision_step_grounding": 2,
+        "A3_contact_object": 2,
+        "B1_endpoint_distance": 2,
+        "B2_endpoint_direction": 2,
+        "C1_future_view_selection": 6
+      },
+      "headline_eligible": false,
+      "notes": "Recollection of the same four shards under conseq.v11 and the depth-conditioned action proposal, on regenerated pose pools whose poses are identical to v10's (same positions, yaws and geometry digests; only the code-revision binding changed). Coverage is unchanged at 10/2/2/2/2/6 and candidate replay is 1.0, which is a scorer-integrity check rather than a benchmark result. The 2026-08-07 golden freezes the intentional QA-policy, public-contract, and diagnostic-report changes while preserving these record inputs.",
+      "retention": "registry-tombstone; bytes purged 2026-08-13",
+      "fixture_role": "Deterministic input corpus for scripts/check_abc_golden.py, covering both action-sampling policies: main-safe-r00 is balanced and declares depth_conditioned_action_proposal_v1 (three depth-conditioned pairs materialised, one reaching selection), while the A3, B and C1 shards pin an explicit action file and declare explicit_action_file_v1; B additionally pins a pose exclusion.",
+      "not_a_sampling_source": "Its coverage is the size of the gate, not of the benchmark. It is hand-selected and must never be reported as a sampled distribution or used to estimate per-task yield.",
+      "superseded_by": "data/candidate_pool/r2r_counterfactual_c1_golden_20260811"
+    },
+    {
+      "root": "data/candidate_pool/r2r_counterfactual_c1_golden_20260811",
+      "kind": "collection-and-candidate-artifact",
+      "status": "superseded",
+      "code_revision": "f18b801afdb0b6ebf6661755c1fb915fd522435e",
+      "record_schema": "conseq.v11",
+      "qa_schema": "egoconseq.qa.v16-candidate-preview",
+      "oracle_contract": "ground-disc-visible-v8",
+      "task_scope": [
+        "A1_collision",
+        "A2_collision_step_grounding",
+        "A3_contact_object",
+        "B1_endpoint_distance",
+        "B2_endpoint_direction",
+        "C1_future_view_selection"
+      ],
+      "sampling_provenance": {
+        "pose_discovery": "shared-pool",
+        "pose_pool_schema_version": "egoconseq.pose-pool.v4"
+      },
+      "golden_manifest": "docs/golden/2026-08-11-r2r-abc-v11-counterfactual-c1-47qa.json",
+      "coverage": {
+        "A1_collision": 4,
+        "A2_collision_step_grounding": 9,
+        "A3_contact_object": 22,
+        "B1_endpoint_distance": 6,
+        "B2_endpoint_direction": 5,
+        "C1_future_view_selection": 1
+      },
+      "headline_eligible": false,
+      "notes": "Two current-format R2R records freeze the sole counterfactual C1 route together with A1/A2/A3/B1/B2. The fixture validates the deterministic build and scorer replay; it is not evidence of task yield or C1 scientific readiness.",
+      "retention": "superseded-golden-input",
+      "fixture_role": "Deterministic two-record source for scripts/check_abc_golden.py. It covers all six active tasks without a strict/matched future-view selector or future-view gate.",
+      "not_a_sampling_source": "Its 47-item coverage is the size of the regression gate, not a sampled benchmark distribution.",
+      "superseded_by": "data/candidate_pool/abc1_three_dataset_1h_20260813_aa04f8e"
+    },
+    {
+      "root": "data/candidate_pool/abc1_three_dataset_1h_20260813_aa04f8e",
+      "kind": "collection-and-candidate-artifact",
+      "status": "regression-fixture",
+      "record_code_revision": "aa04f8e265b846a944cc6b0a5cad976c9a575c23",
+      "artifact_code_revision": "0854ea653ad16a9ca5ce116c3716460e5a9ea96c",
+      "record_schemas": {
+        "r2r": "conseq.v11",
+        "gs": "conseq.v18",
+        "b1k": "conseq.v11"
+      },
+      "qa_schema": "egoconseq.qa.v16-candidate-preview",
+      "oracle_contract": "ground-disc-visible-v8",
+      "task_scope": [
+        "A1_collision",
+        "A2_collision_step_grounding",
+        "A3_contact_object",
+        "B1_endpoint_distance",
+        "B2_endpoint_direction",
+        "C1_future_view_selection"
+      ],
+      "golden_manifest": "docs/golden/2026-08-14-r2r-gs-b1k-abc-golden.json",
+      "golden_manifest_sha256": "51d5b75eebb5036a1c6aacc3156f66def151e42f357e004f27eecca968650278",
+      "coverage": {
+        "A1_collision": 16,
+        "A2_collision_step_grounding": 20,
+        "A3_contact_object": 19,
+        "B1_endpoint_distance": 38,
+        "B2_endpoint_direction": 48,
+        "C1_future_view_selection": 41
+      },
+      "headline_eligible": false,
+      "notes": "Active compact three-dataset Golden. It freezes deterministic construction, source binding and GT-as-pred replay; its 182 items are a regression fixture, not a yield estimate or benchmark result.",
+      "retention": "authoritative-golden-input",
+      "not_a_sampling_source": "Its coverage is the size of the regression gate, not a sampled benchmark distribution."
+    },
+    {
+      "root": "data/candidate_pool/v6_q8_supplement_be2c0c0",
+      "kind": "collection",
+      "status": "historical",
+      "code_revision": "be2c0c0e77952b2ec7939c41c11bc9cf069b280d",
+      "record_schema": "conseq.v8",
+      "oracle_contract": "ground-disc-visible-v6",
+      "sampling_provenance": {
+        "pose_discovery": "inline",
+        "pose_pool_schema_version": null
+      },
+      "formal_source_policy": {
+        "enabled": false,
+        "include_modes": [
+          "q8_fov",
+          "q8_occlusion"
+        ]
+      },
+      "notes": "Completed post-fix Q8 supplement collected with inline pose discovery. Retained for audit and candidate comparisons, but formal-sources v3 excludes it because no authenticated shared pose pool backs the shards.",
+      "retention": "registry-tombstone; bytes purged 2026-08-13"
+    },
+    {
+      "root": "data/candidate_pool/v6_q8_pilot_be2c0c0",
+      "kind": "collection-pilot",
+      "status": "historical",
+      "code_revision": "be2c0c0e77952b2ec7939c41c11bc9cf069b280d",
+      "record_schema": "conseq.v8",
+      "oracle_contract": "ground-disc-visible-v6",
+      "notes": "Preregistered three-backend, 20-scene Q8 direction and occlusion pilot. FOV realized wide-only witnesses: HM3D 20, R2R 17, GS 8; narrow-only: 0 on all backends, so narrow-only remains diagnostic-only. Occlusion witnesses: HM3D 3, R2R 6, GS 0; these establish feasibility but do not satisfy three-backend primary support.",
+      "retention": "registry-tombstone; bytes purged 2026-08-13"
+    },
+    {
+      "root": "data/candidate_pool/v1333_oracle_v6_full_b6c01d5",
+      "kind": "collection",
+      "status": "historical",
+      "code_revision": "b6c01d5",
+      "record_schema": "conseq.v8",
+      "oracle_contract": "ground-disc-visible-v6",
+      "sampling_provenance": {
+        "pose_discovery": "inline",
+        "pose_pool_schema_version": null
+      },
+      "formal_source_policy": {
+        "enabled": false,
+        "exclude_modes": [
+          "q8_fov",
+          "q8_occlusion"
+        ]
+      },
+      "notes": "First oracle-v6 full collection, produced with inline pose discovery. Superseded by the breaking oracle-v7 GT contract; its Q8 shards are additionally sampling-biased. Retained for audit and candidate comparisons, but formal-sources v3 excludes every shard.",
+      "retention": "registry-tombstone; bytes purged 2026-08-13"
+    },
+    {
+      "root": "data/candidate_pool/v14_posepool100_20260730_6c367a6",
+      "kind": "collection",
+      "status": "historical",
+      "code_revision": "6c367a64e14646356b48b140623a0db55259d07b",
+      "record_schema": "conseq.v8",
+      "oracle_contract": "ground-disc-visible-v6",
+      "sampling_provenance": {
+        "pose_discovery": "shared-pool",
+        "pose_pool_schema_version": "egoconseq.pose-pool.v1"
+      },
+      "formal_source_policy": {
+        "enabled": false
+      },
+      "record_output": "none",
+      "artifact_status": "not_compiled",
+      "notes": "Interrupted pose-pool-v1 collection. It produced no authoritative records and was never compiled; retained only to preserve the sampling transition audit trail.",
+      "retention": "registry-tombstone; bytes purged 2026-08-13"
+    },
+    {
+      "root": "data/benchmark/egoconseq_v14_atlas_20260730_f028206",
+      "kind": "artifact",
+      "status": "historical",
+      "code_revision": "f02820627d38402cdbb37b83227c4f6f19e467d4",
+      "qa_schema": "egoconseq.qa.v14",
+      "prompt_contract": "visible-ground-disc.v14",
+      "oracle_contract": "ground-disc-visible-v6",
+      "notes": "Candidate v14 atlas retained for audit provenance and paper-page visual references. Its release gate has not passed, and neither candidate counts nor GT-as-pred outputs are benchmark results; no numbers from this artifact may be cited.",
+      "retention": "registry-tombstone; bytes purged 2026-08-13"
+    },
+    {
+      "root": "data/candidate_pool/v133_smoke_6e77ef0/candidate_qa_v133_2182f30",
+      "kind": "artifact",
+      "status": "superseded",
+      "code_revision": "2182f30",
+      "qa_schema": "egoconseq.qa.v13",
+      "prompt_contract": "visible-ground-disc.v14",
+      "oracle_contract": "ground-disc-visible-v5",
+      "notes": "Pre-oracle-v6 candidate preview once served on port 8772. Legacy design reference only; the running viewer process must not be restarted against current code (contract gate would refuse it).",
+      "retention": "registry-tombstone; bytes purged 2026-08-13"
+    },
+    {
+      "root": "data/benchmark/egoconseq_v131a_preview_20260728",
+      "kind": "artifact",
+      "status": "historical",
+      "code_revision": "100e3ab",
+      "qa_schema": "egoconseq.qa.v10",
+      "prompt_contract": "visible-ground-disc.v11",
+      "oracle_contract": "ground-disc-visible-v5",
+      "notes": "v1.3.1a preview, graded candidate by the v1.3.3 execution-regime audit (Q9 label collapse, Q6 all-closer). Numbers must not be cited.",
+      "retention": "keep-for-audit-provenance"
+    },
+    {
+      "root": "data/candidate_pool/v1333_directed_20260728_755751c",
+      "kind": "collection",
+      "status": "missing-tombstone",
+      "code_revision": "755751c",
+      "record_schema": "conseq.v8",
+      "oracle_contract": "ground-disc-visible-v5",
+      "notes": "Zero-yield directed witness run that triggered the proposal redesign. The registered root was absent at the 2026-08-09 freeze. This entry is a tombstone only: it must not be redirected to v1333_directed_smoke_755751c or any other smoke run.",
+      "retention": "tombstone-only"
+    },
+    {
+      "root": "data/candidate_pool/abc1_train_seen_200k_20260816_451b61a",
+      "kind": "recovery-checkpoint",
+      "status": "recovery-snapshot",
+      "collection_code_revision": "451b61aa81bcef00f755197e7a3613a60e41b372",
+      "artifact_code_revision": "7b1628cfca2ad41ac1a005d08e9feeb949cb0555",
+      "record_schemas": {
+        "r2r": "conseq.v11",
+        "gs": "conseq.v18",
+        "b1k": "conseq.v11"
+      },
+      "qa_schema": "egoconseq.qa.v16-candidate-preview",
+      "oracle_contract": "ground-disc-visible-v8",
+      "task_scope": [
+        "A1_collision",
+        "A2_collision_step_grounding",
+        "A3_contact_object",
+        "B1_endpoint_distance",
+        "B2_endpoint_direction",
+        "C1_future_view_selection"
+      ],
+      "checkpoint": "recovery-562",
+      "checkpoint_summary": {
+        "path": "data/candidate_pool/abc1_train_seen_200k_20260816_451b61a/artifacts/global/recovery-562/checkpoint.json",
+        "sha256": "968248000449cbaacde41871c0c30bec22d25464964cd8f41e12bfa5deb645b7",
+        "content_sha256": "882786ccef479faa03431c43830ef6ab3d5a34b2aad6eb803737914c5b664441"
+      },
+      "controller_manifest_sha256": "1ef5d8afb3e363ed75d421d203da7f2a3d7bf4273f0bdce8a990b6affe1c90b7",
+      "source_shards": {
+        "r2r": 293,
+        "gs": 180,
+        "b1k": 89,
+        "total": 562
+      },
+      "records": {
+        "r2r": 5149,
+        "gs": 3576,
+        "b1k": 1303,
+        "total": 10028
+      },
+      "unique_source_frames": {
+        "r2r": 5049,
+        "gs": 3460,
+        "b1k": 1289,
+        "total": 9798
+      },
+      "coverage": {
+        "A1_collision": 3772,
+        "A2_collision_step_grounding": 5989,
+        "A3_contact_object": 5691,
+        "B1_endpoint_distance": 7551,
+        "B2_endpoint_direction": 10531,
+        "C1_future_view_selection": 10870
+      },
+      "total_items": 44404,
+      "headline_eligible": false,
+      "notes": "Authenticated recovery snapshot of the interrupted train-seen collection. Exactly 445 previously rejected transaction bindings were re-derived from their sealed spool contracts; 562 source shards and 10,028 records compiled with zero recovery rejection. This is a retained training-data snapshot, not a completed 200K run or a benchmark result.",
+      "retention": "keep checkpoint.json, recovery sidecar/report, all 562 bound source shards, and the published candidate artifact"
+    }
+  ]
+}

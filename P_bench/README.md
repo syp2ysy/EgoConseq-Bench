@@ -1,773 +1,483 @@
-# EgoConseq-Bench / P_bench
+# EgoConseq-Bench
 
-EgoConseq-Bench is a single-image embodied physical-consequence VQA benchmark.
-This repository folder, `P_bench/`, contains the current demo implementation.
+[中文说明](README.zh-CN.md)
 
-The benchmark asks a deliberately local question:
+EgoConseq-Bench generates first-person, action-conditioned consequence QA from
+three simulators: R2R/Matterport3D, Habitat-GS/InteriorGS, and BEHAVIOR-1K. It
+stores simulator-grounded records first, then deterministically compiles them
+into one six-task candidate artifact.
 
-```text
-Given one egocentric RGB image, one robot body footprint, and one short action,
-what physical consequence would happen before the robot acts?
-```
+This repository contains the collection, validation, compilation, evaluation,
+and static-review pipeline. Raw simulator assets are not redistributed; obtain
+them from their official providers under their respective licenses.
 
-It is not a navigation-policy benchmark. There is no long-horizon goal, no SPL,
-no episode rollout, and no planner evaluation. The core object is:
+## Quick starts
 
-```text
-d_safe(body, action)
-= the distance the swept robot body can move along the action before first contact
-```
-
-The VLM sees only:
-
-```text
-RGB image + natural-language question
-```
-
-Depth, point clouds, navmesh, poses, and top-down plots are offline artifacts
-used only for label generation, oracle checks, and human review.
-
----
-
-## Current Status
-
-Implemented:
-
-- Habitat-Sim RGB/depth rendering wrapper.
-- Depth-to-point-cloud oracle over the currently visible local scene geometry.
-- Floor estimation/removal, obstacle voxelization, and swept-cylinder `d_safe`.
-- Per-radius Habitat navmesh cross-check.
-- Visibility gates, no-contact evidence gates, and disagreement taxonomy.
-- O5 body-counterfactual demo generation.
-- O5 HTML review page.
-- O5 non-vision baseline report.
-- Unit tests for the deterministic core and O5 schema.
-
-Not yet fully implemented:
-
-- O1/O2/O3/O4/O6 generators and review pages.
-- Qwen3-VL or other VLM evaluation loop.
-- Final multi-scene parameter freeze for the voxel oracle.
-
-The current end-to-end runnable task is **O5 Body Counterfactual Consequence**.
-
----
-
-## Reproduction Matrix
-
-The current local environment used to build and test this demo is:
-
-| Component | Current Value |
-| --- | --- |
-| Python | `3.9.23` |
-| Habitat-Sim | `0.2.4` |
-| HM3D | `v0.2` |
-| Required HM3D split for the current demo | `val` |
-| Local conda env | `/home/zhangshan/miniconda3/envs/qwen3vl_habitat` |
-| Local HM3D root | `/home/zhangshan/syp/datasets/versioned_data/hm3d-0.2/hm3d` |
-| RGB/depth resolution | `640 x 480` |
-| Horizontal FOV | `79 deg` |
-| Camera height | `1.5 m` |
-
-Important: this project currently uses HM3D `val` only. The local machine has
-100 HM3D v0.2 val scenes. It does not require HM3D train/test data for the O5
-demo. If you later scale the benchmark beyond the demo, use train/minival for
-development and reserve val or another held-out split for final reporting.
-
----
-
-## Repository Location
-
-On GitHub the project is expected to live under:
-
-```text
-EgoConseq-Bench/P_bench/
-```
-
-After cloning:
+Clone the outer repository, then enter this benchmark subtree:
 
 ```bash
 git clone https://github.com/syp2ysy/EgoConseq-Bench.git
 cd EgoConseq-Bench/P_bench
+export P_BENCH_ROOT="$PWD"
 ```
 
-On the current development machine, the working directory is:
+Choose one workflow:
 
-```bash
-cd /home/zhangshan/syp/myvln/P_bench
-```
+- **Use the frozen snapshot:** create the Habitat environment in section 1,
+  download and extract both Hugging Face archives as described in
+  [Current frozen training snapshot](#current-frozen-training-snapshot), then
+  run the verification commands in section 5. You can immediately inspect the
+  compiled QA, saved replay, and static browser; no simulator is launched.
+- **Collect fresh records:** create both environments (sections 1-2), place the
+  three official source datasets under `data/sources/` or set the documented
+  overrides, build GS/B1K source authorities (section 3), run the three smokes
+  (section 6), then launch the measured background workflow (section 7).
 
-All commands below assume you are inside `P_bench/`.
+Restore downloaded files into real directories below `P_bench/data`; do not
+replace `data/` with a symlink. Source authorities intentionally bind the
+lexical source paths. The recovery snapshot is immutable evidence and cannot
+be resumed with newer code; use a new output directory and manifest for fresh
+collection.
 
----
+## What is implemented
 
-## Environment Setup
+The active benchmark contract has exactly six tasks:
 
-### Existing Local Environment
+| ID | Question answered from the initial egocentric view and an action program |
+| --- | --- |
+| A1 | Will the robot collide? |
+| A2 | During which 1-based action does the first collision occur? |
+| A3 | Which initially visible object or surface is contacted first? |
+| B1 | After a safe execution, how far is the selected initial-visible target? |
+| B2 | After a safe execution, is that target in front, left, right, or rear? |
+| C1 | Which of four real terminal renders is the true future view? |
 
-On the current machine, use the existing environment directly:
+Public input is one initial RGB image, body radius, optical-center height,
+HFOV/VFOV, a canonical action sequence, and a target for B. Depth, semantic
+labels, navmesh/full geometry, terminal pose, and GT certificates remain
+private. Collision and safety require agreement between full-geometry and
+initial-depth rollouts plus swept-corridor coverage.
 
-```bash
-/home/zhangshan/miniconda3/envs/qwen3vl_habitat/bin/python -m pytest -q
-```
+`A4_checkpoint_direction` is a separate, non-headline diagnostic derived from
+sealed records. It asks for a referent direction at the 25%, 50%, or 75% point
+inside a Forward action. It does not change collection, the six-task registry,
+or capacity stopping.
 
-Confirmed package versions in this environment:
+All candidate artifacts intentionally report `headline_eligible=false`.
+`--gt-as-pred` checks scorer integrity; it is not a model result.
+
+## Data flow and output layout
 
 ```text
-python             3.9.23
-habitat-sim        0.2.4
-numpy              1.26.4
-scipy              1.13.1
-matplotlib         3.8.4
-pillow             11.0.0
-pytest             8.4.2
-numpy-quaternion   2023.0.3
+read-only simulator assets
+  -> records/<dataset>/<shard>/<scene>/records.jsonl
+  -> artifacts/global/<checkpoint>/candidate_qa/
+  -> artifacts/global/<checkpoint>/candidate_qa_report/index.html
 ```
 
-Quick import check:
+The compiled artifact contains:
 
-```bash
-/home/zhangshan/miniconda3/envs/qwen3vl_habitat/bin/python - <<'PY'
-import habitat_sim
-import numpy
-import scipy
-import matplotlib
-from PIL import Image
-import quaternion
-
-print("habitat_sim", getattr(habitat_sim, "__version__", "unknown"))
-print("imports ok")
-PY
+```text
+candidate_qa/benchmark.json
+candidate_qa/public/items.jsonl
+candidate_qa/private/answers.jsonl
+candidate_qa/private/atoms.jsonl
+candidate_qa/private/source_map.json
+candidate_qa/report.json
+candidate_qa_report/index.html
 ```
 
-### Fresh Machine Setup
+The compiler reads sealed records and saved PNGs; it does not rerun a
+simulator. `pipeline/` is the only benchmark implementation, `scripts/`
+contains command-line entry points, and `tests/` contains deterministic tests.
 
-Create a Python 3.9 environment:
+## Current frozen training snapshot
+
+The current recovery snapshot is train-seen, candidate-only data:
+
+| Quantity | Value |
+| --- | ---: |
+| Source shards | 562 |
+| Simulator-grounded records | 10,028 |
+| Exact unique source frames | 9,798 |
+| Six-task QA | 44,404 |
+| A1 / A2 / A3 | 3,772 / 5,989 / 5,691 |
+| B1 / B2 / C1 | 7,551 / 10,531 / 10,870 |
+
+Its checkpoint is
+`data/candidate_pool/abc1_train_seen_200k_20260816_451b61a/artifacts/global/recovery-562/checkpoint.json`
+with SHA256
+`968248000449cbaacde41871c0c30bec22d25464964cd8f41e12bfa5deb645b7`.
+
+An access-controlled backup is hosted at the Hugging Face dataset repository
+`syp115/pbench-abc1-train-seen-recovery-562`. Access to that repository is
+required only to restore this snapshot; it is not required to collect fresh
+data. After access is granted:
 
 ```bash
-conda create -n egoconseq python=3.9 -y
-conda activate egoconseq
+huggingface-cli download syp115/pbench-abc1-train-seen-recovery-562 \
+  --repo-type dataset --local-dir /path/to/recovery-562-download
+
+cd /path/to/recovery-562-download
+sha256sum -c SHA256SUMS
+cat pbench-abc1-recovery-562.tar.zst.part-* | zstd -d | \
+  tar -xf - -C "$P_BENCH_ROOT"
+zstd -dc pbench-supporting-fixtures.tar.zst | \
+  tar -xf - -C "$P_BENCH_ROOT"
 ```
 
-Install Habitat-Sim first. The demo was validated with `habitat-sim==0.2.4`.
-Habitat-Sim wheels are platform/CUDA dependent, so if the pip wheel is not
-available for your machine, install the matching Habitat-Sim 0.2.4 build from
-the official Habitat-Sim instructions.
+The extraction destination must be the actual cloned `P_bench` directory, not
+a symlinked substitute. Verify the restored checkpoint before using it:
 
 ```bash
-pip install habitat-sim==0.2.4
+cd "$P_BENCH_ROOT"
+PY="${EGOCONSEQ_HABITAT_PYTHON:-$(command -v python)}"
+"$PY" scripts/check_abc_golden.py
+echo "968248000449cbaacde41871c0c30bec22d25464964cd8f41e12bfa5deb645b7  data/candidate_pool/abc1_train_seen_200k_20260816_451b61a/artifacts/global/recovery-562/checkpoint.json" | \
+  sha256sum -c -
+"$PY" -m http.server 8789 --directory "$P_BENCH_ROOT"
+# Open data/candidate_pool/abc1_train_seen_200k_20260816_451b61a/artifacts/global/recovery-562/candidate_qa_report/index.html
 ```
 
-Install the remaining Python dependencies:
+Do not report this recovery snapshot as a completed or headline benchmark. It
+is a reproducible training/candidate snapshot registered in `docs/runs.json`.
+
+## Tested system
+
+The current code was tested on Linux with four RTX 4090 GPUs (24 GB each),
+NVIDIA driver 575.57.08, and CUDA 12.x user-space packages. A single-scene
+smoke needs one GPU; the background controller can schedule several GPUs.
+
+Two Python environments are required because Isaac Sim 5.1 and the tested
+Habitat stack use different Python versions:
+
+| Runtime | Tested versions |
+| --- | --- |
+| Habitat/R2R/GS and controller | Python 3.9.23, Habitat-Sim 0.2.4 headless, Habitat-Lab 0.2.420230405, PyTorch 2.5.1, gsplat 1.5.3 |
+| BEHAVIOR-1K | Python 3.11.15, BEHAVIOR/OmniGibson 3.9.1, Isaac Sim 5.1.0, BDDL 3.7.0, PyTorch 2.7.0+cu128 |
+
+## 1. Create the Habitat environment
 
 ```bash
-pip install \
-  numpy==1.26.4 \
-  scipy==1.13.1 \
-  matplotlib==3.8.4 \
-  pillow==11.0.0 \
-  pytest==8.4.2 \
-  numpy-quaternion==2023.0.3
-```
+cd "$P_BENCH_ROOT"
 
-Then run:
+conda env create -f environment/habitat.yml
+conda activate egoconseq-habitat
+export EGOCONSEQ_HABITAT_PYTHON="$(command -v python)"
 
-```bash
 python - <<'PY'
-import habitat_sim
-from egoconseq.sim.habitat_env import EgoConseqSim
-from egoconseq.oracle.sweep import d_safe_visible
-print("simulator stack imports ok")
+import habitat_sim, habitat, gsplat, numpy, torch
+print("Habitat-Sim", habitat_sim.__version__)
+print("NumPy", numpy.__version__)
+print("PyTorch", torch.__version__, "CUDA", torch.cuda.is_available())
 PY
 ```
 
----
-
-## Dataset: HM3D v0.2
-
-### What Data Is Required?
-
-The current O5 demo requires:
-
-```text
-HM3D v0.2 val split
-```
-
-The code expects Habitat-compatible HM3D assets with `.basis.glb` scene files
-and the HM3D scene dataset config.
-
-Required local files include:
-
-```text
-/home/zhangshan/syp/datasets/versioned_data/hm3d-0.2/hm3d/
-  hm3d_annotated_basis.scene_dataset_config.json
-  val/
-    00800-TEEsavR23oF/
-      TEEsavR23oF.basis.glb
-    00801-HaxA7YrQdEC/
-      HaxA7YrQdEC.basis.glb
-    00802-wcojb4TFT35/
-      wcojb4TFT35.basis.glb
-    ...
-```
-
-The current local installation has:
-
-```text
-hm3d/
-  val/                 # 100 validation scenes
-  hm3d_annotated_basis.scene_dataset_config.json
-```
-
-The O5 generator currently uses three val scenes by default:
-
-```text
-val/00800-TEEsavR23oF/TEEsavR23oF.basis.glb
-val/00801-HaxA7YrQdEC/HaxA7YrQdEC.basis.glb
-val/00802-wcojb4TFT35/wcojb4TFT35.basis.glb
-```
-
-Those absolute paths are defined in:
-
-```text
-scripts/generate_o5.py
-```
-
-The shared root is defined in:
-
-```text
-egoconseq/config.py
-```
-
-### Download HM3D v0.2 Val
-
-HM3D requires official data access. After your Habitat/HM3D credentials are
-available, use Habitat-Sim's dataset downloader.
-
-The installed downloader exposes the following relevant HM3D groups:
-
-```text
-hm3d_val_v0.2
-hm3d_train_v0.2
-hm3d_minival_v0.2
-hm3d_full
-```
-
-For the current demo, download only val:
+`environment/habitat.yml` mirrors the tested versions. PyTorch installs a CUDA
+12 wheel; match it to a compatible NVIDIA driver. The GS collision-authority
+preprocessor additionally needs `usd-core` when reading the official USD
+files:
 
 ```bash
-python -m habitat_sim.utils.datasets_download \
-  --uids hm3d_val_v0.2 \
-  --data-path /home/zhangshan/syp/datasets
+python -m pip install usd-core
 ```
 
-If the downloader prompts for credentials:
+## 2. Install BEHAVIOR-1K / OmniGibson
+
+Use the official BEHAVIOR-1K v3.9.1 setup in a separate environment:
 
 ```bash
-python -m habitat_sim.utils.datasets_download \
-  --uids hm3d_val_v0.2 \
-  --data-path /home/zhangshan/syp/datasets \
-  --username YOUR_USERNAME \
-  --password YOUR_PASSWORD
+git clone -b v3.9.1 https://github.com/StanfordVL/BEHAVIOR-1K.git
+cd BEHAVIOR-1K
+./setup.sh --new-env --omnigibson --bddl --joylo --dataset --eval
 ```
 
-For a fresh machine, replace `/home/zhangshan/syp/datasets` with your dataset
-root. The expected final layout is:
+The tested checkout is tag `v3.9.1`, commit
+`26f2c7ef7b9cf96bd0414f81e1e751e493762779`. Follow the official installation
+guide if Isaac Sim requires a workstation-specific setup:
+
+- BEHAVIOR installation: <https://behavior.stanford.edu/getting_started/installation.html>
+- Isaac Sim 5.1 Python environment: <https://docs.isaacsim.omniverse.nvidia.com/5.1.0/installation/install_python.html>
+
+Set the resulting interpreter through `EGOCONSEQ_B1K_PYTHON`; no repository
+path is hard-coded.
+
+## 3. Download and prepare simulator assets
+
+### R2R / Matterport3D
+
+1. Download the R2R-VLNCE v1-3 episode archive from
+   <https://github.com/jacobkrantz/VLN-CE>.
+2. Request Matterport3D academic access at
+   <https://matterport.com/partners/meta> and download the MP3D scans.
+3. Keep each scan's `.glb`, `.house`, `.navmesh`, and semantic PLY files under
+   one MP3D scan root, together with
+   `mp3d_annotated_basis.scene_dataset_config.json` at that root.
+
+The R2R episode JSON is a scene whitelist; instructions and navigation goals
+are not benchmark inputs.
+
+### Habitat-GS / InteriorGS
+
+Download the source assets at their pinned revisions:
+
+- Habitat-GS scenes: <https://huggingface.co/datasets/RukawaY/gs_scenes>,
+  revision `034f5938c40c55b873da81b1b6717484b40faae9`;
+- InteriorGS labels: <https://huggingface.co/datasets/spatialverse/InteriorGS>,
+  revision `5201ed9fd11fc2b8ac23e069796c386dbbf8f943`;
+- SAGE-3D collision meshes:
+  <https://huggingface.co/datasets/spatialverse/SAGE-3D_Collision_Mesh>.
+
+Normalize each selected scene to this layout:
 
 ```text
-<DATA_ROOT>/versioned_data/hm3d-0.2/hm3d/
-  hm3d_annotated_basis.scene_dataset_config.json
-  val/
+GS_ROOT/
+  train/<scene>/scene.gs.ply
+  train/<scene>/scene.navmesh
+  train/<scene>/labels.json
+  splits/train.json
 ```
 
-Then either keep this repo's default root:
-
-```text
-/home/zhangshan/syp/datasets/versioned_data/hm3d-0.2/hm3d
-```
-
-or edit:
-
-```text
-egoconseq/config.py
-scripts/generate_o5.py
-```
-
-### Verify the Dataset
-
-Run:
+`splits/train.json` uses schema `egoconseq.scene_manifest.v1`; each scene row
+contains `scene_id`, relative `path`, `source_scene`, and `split: "train"`.
+Build the physical authority once from the official collision USDs:
 
 ```bash
-ls /home/zhangshan/syp/datasets/versioned_data/hm3d-0.2/hm3d/hm3d_annotated_basis.scene_dataset_config.json
-ls /home/zhangshan/syp/datasets/versioned_data/hm3d-0.2/hm3d/val/00800-TEEsavR23oF/TEEsavR23oF.basis.glb
-find /home/zhangshan/syp/datasets/versioned_data/hm3d-0.2/hm3d/val -mindepth 1 -maxdepth 1 -type d | wc -l
+"$EGOCONSEQ_HABITAT_PYTHON" scripts/build_gs_collision_authority.py \
+  --data-root "$EGOCONSEQ_GS_ROOT" \
+  --source-manifest "$EGOCONSEQ_GS_TRAIN_MANIFEST" \
+  --collision-root "$SAGE3D_COLLISION_ROOT" --jobs 4 \
+  --exclude-scene interior_0505_839970
 ```
 
-Expected for the current local machine:
+The excluded scene is a known source-conversion failure. Do not silently omit
+other scenes. Gaussian ellipsoids are used for rendering, never as the
+collision authority.
 
-```text
-100
-```
+### BEHAVIOR-1K source authority
 
----
-
-## Simulator Details
-
-The simulator is **Habitat-Sim**.
-
-The wrapper lives in:
-
-```text
-egoconseq/sim/habitat_env.py
-```
-
-It creates one Habitat agent with:
-
-- RGB camera sensor
-- depth camera sensor
-- resolution `640 x 480`
-- horizontal FOV `79 deg`
-- camera height `1.5 m`
-- Habitat default simulator agent body for rendering
-
-The renderer returns:
-
-```python
-rgb, depth, K, agent_state = sim.render(position, yaw)
-```
-
-where:
-
-- `rgb`: `(H, W, 3)` uint8 RGB image
-- `depth`: `(H, W)` float32 depth in metres
-- `K`: camera intrinsics
-- `agent_state`: Habitat pose state
-
-For navmesh checks, the code recomputes Habitat navmesh per robot radius:
-
-```text
-habitat_sim.NavMeshSettings.agent_radius
-habitat_sim.NavMeshSettings.agent_height
-```
-
-That code lives in:
-
-```text
-egoconseq/sim/navmesh.py
-```
-
----
-
-## Taxonomy
-
-EgoConseq-Bench organizes questions by the operation performed over
-`d_safe(body, action)`, not by scene object type or surface answer format.
-
-| ID | Name | Main Capability | Current Status |
-| --- | --- | --- | --- |
-| O1 | Forward Clearance | Estimate ego-scaled free space straight ahead | designed |
-| O2 | Aperture / Lateral Passability | Account for body width and lateral clearance | designed |
-| O3 | Turn-then-Forward Sweep | Project a turn-plus-forward action into the scene | designed |
-| O4 | Cross-Action Consequence Comparison | Compare multiple complete action commands | planned next |
-| O5 | Body Counterfactual Consequence | Change only body size and check whether the consequence flips | implemented demo |
-| O6 | First-Contact Target Grounding | Identify the visible first-contact region | designed |
-
-Readout format is a separate axis:
-
-```text
-magnitude / threshold / binary_contact / ranking / group_flip / target-id
-```
-
----
-
-## O5 Task Design
-
-O5 is the current runnable task.
-
-Each question describes exactly **one** cylindrical-base robot. The prompt does
-not compare two robots in the same question.
-
-Example prompt:
-
-```text
-图中是一个圆柱形底盘的机器人，底盘直径约 0.8 米。
-它从当前位置朝正前方移动约 1.5 米。
-只看这张第一视角图，判断它的身体在当前可见的局部空间内会不会与障碍物发生接触。
-请直接给出这个动作是否会接触的结论。
-```
-
-The single-case GT rule is:
-
-```text
-contact iff d_safe(radius, forward) < H
-```
-
-where `H` is a fixed physical forward distance in metres.
-
-Counterfactual behavior is measured across cases sharing the same `group_id`:
-
-```text
-same RGB
-same scene
-same pose
-same action direction
-same physical horizon H
-different chassis diameter
-```
-
-The demo uses:
-
-```text
-r_small = 0.10 m  -> diameter 0.20 m
-r_large = 0.40 m  -> diameter 0.80 m
-```
-
-O5 groups:
-
-- `flip`: small body clears, large body contacts.
-- `all_no_contact`: both bodies clear.
-- `all_contact`: both bodies contact.
-
-The control groups prevent shortcuts such as always predicting contact for the
-large body and no contact for the small body.
-
-Prompt rule:
-
-```text
-Only chassis diameter varies.
-Robot height is fixed by the simulator and is not mentioned in the prompt.
-```
-
----
-
-## Oracle Pipeline
-
-The O5 generation pipeline is:
-
-```text
-1. Load one HM3D val scene in Habitat-Sim
-2. Sample a navigable agent pose
-3. Render RGB and depth from the current pose
-4. Backproject the depth map into a 3D point cloud
-5. Convert the point cloud into the agent-local ground frame
-6. Estimate and remove the floor
-7. Keep obstacle points in the robot-height band
-8. Voxelize visible obstacle geometry
-9. Sweep a circular robot footprint through the visible voxel field
-10. Compute d_safe depth for each body radius
-11. Recompute Habitat navmesh per radius
-12. Compute d_safe nav as an independent sanity check
-13. Apply disagreement, visibility, and sanity gates
-14. Choose a fixed forward horizon H
-15. Emit two single-robot O5 cases under one counterfactual group_id
-16. Save RGB image, top-down evidence plot, and manifest JSONL
-```
-
-Two `d_safe` values are stored:
-
-- `d_safe depth`: the primary GT oracle. It uses only the currently rendered
-  depth frame, so labels are tied to visible single-image evidence.
-- `d_safe nav`: an independent Habitat navmesh cross-check. It uses simulator
-  scene geometry and may include geometry outside the current image.
-
-Project rule:
-
-```text
-d_safe depth defines labels.
-d_safe nav is for sanity checking and hidden-geometry diagnostics.
-```
-
----
-
-## End-to-End Quick Start
-
-### 1. Run Unit Tests
+After the official setup downloads the dataset, bind the installation and
+derive per-scene authority fragments:
 
 ```bash
-/home/zhangshan/miniconda3/envs/qwen3vl_habitat/bin/python -m pytest -q
+PY="$EGOCONSEQ_HABITAT_PYTHON"
+mkdir -p "$P_BENCH_ROOT/data/b1k-authority/fragments"
+
+"$PY" scripts/build_b1k_source_manifest.py verify-install \
+  --data-root "$B1K_DATA_ROOT" \
+  --source-root /path/to/BEHAVIOR-1K \
+  --output "$P_BENCH_ROOT/data/b1k-authority/install.json"
+
+"$PY" scripts/build_b1k_source_manifest.py derive-shard \
+  --data-root "$B1K_DATA_ROOT" \
+  --output-dir "$P_BENCH_ROOT/data/b1k-authority/fragments" \
+  --scene-timeout-s 1200 --resume \
+  --scenes <SCENE_ID_1> <SCENE_ID_2>
+
+INSTALL_SHA=$(sha256sum "$P_BENCH_ROOT/data/b1k-authority/install.json" | cut -d' ' -f1)
+"$PY" scripts/build_b1k_source_manifest.py assemble-catalog-audit \
+  --data-root "$B1K_DATA_ROOT" \
+  --install-manifest "$P_BENCH_ROOT/data/b1k-authority/install.json" \
+  --expected-install-manifest-sha256 "$INSTALL_SHA" \
+  --fragment-dir "$P_BENCH_ROOT/data/b1k-authority/fragments" \
+  --output "$B1K_SOURCE_MANIFEST" \
+  --audit-output "$B1K_CATALOG_AUDIT"
 ```
 
-Expected current result:
+Run `build_b1k_source_manifest.py <subcommand> --help` for catalog sharding and
+resume options. Authority derivation invokes `EGOCONSEQ_B1K_PYTHON`.
 
-```text
-117 passed
-```
-
-### 2. Generate O5 Demo Data
+## 4. Configure local paths
 
 ```bash
-MAGNUM_LOG=quiet HABITAT_SIM_LOG=quiet \
-/home/zhangshan/miniconda3/envs/qwen3vl_habitat/bin/python scripts/generate_o5.py \
-  --max-poses 500 \
-  --target-flip 40 \
-  --target-all-no-contact 20 \
-  --target-all-contact 20
+cp .env.example .env.local
+# Edit .env.local, then:
+source .env.local
+PY="$EGOCONSEQ_HABITAT_PYTHON"
+cd "$P_BENCH_ROOT"
 ```
 
-Outputs:
+`.env.local` and `data/` are ignored by Git. Keep source datasets read-only.
+`EGOCONSEQ_DATA_ROOT` defaults to `$P_BENCH_ROOT/data/sources`; the R2R,
+Matterport3D, and GS-specific variables override only their corresponding
+source when a different layout is necessary. `B1K_DATA_ROOT` similarly
+defaults to `data/sources/behavior-1k-v3.9.1` in controller commands.
+Before collection, the repository must be clean because each run records and
+enforces the exact Git revision.
 
-```text
-data/demo/o5/manifest.jsonl
-data/demo/o5/img/*.png
-data/demo/o5/topdown/*.png
-```
-
-`data/demo/` is generated output and is intentionally git-ignored. It can be
-deleted and regenerated.
-
-### 3. Build the HTML Review Page
+## 5. Verify the installation
 
 ```bash
-/home/zhangshan/miniconda3/envs/qwen3vl_habitat/bin/python scripts/build_o5_review.py
+"$PY" -m pytest -q
+"$PY" scripts/check_abc_golden.py
 ```
 
-Output:
+The Golden command rebuilds the compact, authenticated three-dataset fixture,
+checks all six tasks, and runs GT-as-pred replay. It does not launch a
+simulator or validate collection throughput.
 
-```text
-data/demo/o5/review.html
-```
+## 6. Run one-scene smokes
 
-The review page shows:
+Use a scene that exists in your authenticated train-seen catalog. The examples
+below keep the scientific gates unchanged and only reduce the collection size.
 
-- first-person RGB image
-- model-visible question
-- GT answer
-- body radius and diameter
-- fixed action horizon `H`
-- `d_safe depth`
-- `d_safe nav`
-- GT derivation
-- top-down oracle evidence
-- case id, scene id, group id, and group kind
-
-### 4. Open the HTML Review Page
-
-Do not rely on an IDE's "Open browser" button for a remote filesystem path.
-Serve the generated directory:
+R2R:
 
 ```bash
-python -m http.server 8765 --bind 0.0.0.0 --directory data/demo/o5
+REV=$(git rev-parse HEAD)
+"$PY" scripts/collect.py --backend r2r --benchmark-partition train_seen \
+  --scenes uNb9QFRL6hY --poses-per-scene 1 \
+  --pose-candidates-per-scene 800 --ordinary-actions-per-pose 24 \
+  --record-idle-stop-s 120 --scene-wallclock-stop-s 600 \
+  --code-revision "$REV" --out data/smoke/r2r
 ```
 
-Then open:
-
-```text
-http://127.0.0.1:8765/review.html
-```
-
-If the browser is on your local laptop but the code runs on a remote server,
-forward or preview port `8765` in your IDE/SSH setup. If direct networking is
-allowed, replace `127.0.0.1` with the server address.
-
-Check the server from the shell:
+GS:
 
 ```bash
-curl http://127.0.0.1:8765/review.html
+"$PY" scripts/collect.py --backend gs --benchmark-partition train_seen \
+  --scenes interior_0123_840023 --poses-per-scene 2 \
+  --pose-candidates-per-scene 800 --ordinary-actions-per-pose 24 \
+  --record-idle-stop-s 120 --scene-wallclock-stop-s 600 \
+  --code-revision "$REV" --out data/smoke/gs
 ```
 
-If this cannot connect, the static server is not running.
-
-### 5. Build the Baseline Report
+B1K should use the supervisor so the Isaac Sim worker is isolated:
 
 ```bash
-/home/zhangshan/miniconda3/envs/qwen3vl_habitat/bin/python scripts/run_baselines_report.py
+"$PY" scripts/run_b1k_collection_shard.py run \
+  --data-root "$B1K_DATA_ROOT" --source-manifest "$B1K_SOURCE_MANIFEST" \
+  --output-dir data/smoke/b1k --gpu-id 0 --shard-id smoke-b1k \
+  --code-revision "$REV" --scene-timeout-s 1200 \
+  --scenes Pomaria_0_garden --collect-args \
+  --poses-per-scene 1 --pose-candidates-per-scene 6000 \
+  --ordinary-actions-per-pose 24 --record-idle-stop-s 120 \
+  --scene-wallclock-stop-s 900 --benchmark-partition train_seen
 ```
 
-Output:
+A frame is retained when it supports at least one valid active task; it does
+not need to support A1, A2, A3, B1, B2, and C1 simultaneously.
 
-```text
-data/demo/o5/report.md
-```
+## 7. Run multi-GPU background collection
 
-The report includes random, majority, blind text-only, radius-only, and oracle
-diagnostic baselines. These are not the final model-under-test; they are used
-to detect shortcuts and confirm that O5 groups are meaningful.
-
----
-
-## Generated File Layout
-
-After running O5 generation and review:
-
-```text
-data/demo/o5/
-  manifest.jsonl
-  review.html
-  report.md
-  img/
-    O5-...-r010.png
-    O5-...-r040.png
-  topdown/
-    O5-...-r010.png
-    O5-...-r040.png
-```
-
-`review.html` uses relative paths:
-
-```text
-img/O5-...png
-topdown/O5-...png
-```
-
-That is why the recommended command serves `data/demo/o5` as the web root.
-
----
-
-## Manifest Format
-
-Each generated case is one JSON object in:
-
-```text
-data/demo/o5/manifest.jsonl
-```
-
-Important fields:
-
-- `case_id`: unique case id.
-- `operation_id`: currently `O5`.
-- `readout_tag`: currently `binary_contact`.
-- `group_id`: ties counterfactual O5 cases together.
-- `scene_id`: HM3D scene id.
-- `pose`: `[x, y, z, yaw]`.
-- `body`: radius and diameter.
-- `action`: forward action and fixed metric horizon.
-- `image_path`: RGB image path.
-- `question`: model-visible prompt.
-- `answer`: GT label.
-- `d_safe_visible_m`: primary depth oracle distance.
-- `d_safe_navmesh_m`: navmesh cross-check distance.
-- `tags.gt_evidence`: raw values and label rule.
-
-The model payload is intentionally restricted:
-
-```python
-case.model_payload() == {
-    "image_path": case.image_path,
-    "question": case.question,
-}
-```
-
-No depth, pose, navmesh, top-down plot, or GT evidence is exposed to the model.
-
----
-
-## Repository Layout
-
-```text
-P_bench/
-  README.md
-  goal.md
-  pytest.ini
-
-  egoconseq/
-    config.py                 # constants and dataset paths
-    geometry.py               # swept path and projection helpers
-    manifest.py               # Case schema and JSONL I/O
-    sim/
-      habitat_env.py          # Habitat-Sim RGB/depth wrapper
-      navmesh.py              # per-radius navmesh cross-check
-    oracle/
-      pointcloud.py           # depth -> point cloud
-      voxel.py                # visible obstacle voxel field
-      sweep.py                # swept-cylinder d_safe oracle
-      disagreement.py         # depth-vs-navmesh taxonomy
-      overlay.py              # RGB sweep overlay helpers
-    gates/
-      visibility.py           # visible sweep / no-contact evidence gates
-      sanity.py               # monotonicity and step-size checks
-    tasks/
-      prompts.py              # prompt builders
-      instantiate.py          # O5 case construction
-    eval/
-      baselines.py            # O5 shortcut baselines
-      metrics.py              # O5 metrics
-    pipeline/
-      sample_poses.py         # valid pose filtering helpers
-
-  scripts/
-    generate_o5.py            # O5 generation
-    build_o5_review.py        # O5 HTML review
-    run_baselines_report.py   # O5 baseline report
-
-  tests/
-    test_*.py
-
-  data/demo/
-    o5/                       # generated artifacts, git-ignored
-```
-
----
-
-## Common Issues
-
-### Habitat Cannot Load HM3D Scenes
-
-Check the dataset files:
+The controller uses a measured canary profile instead of guessing scene
+capacity. The normal sequence is: build canary, run canary, derive profile,
+build the immutable production manifest, then run it.
 
 ```bash
-ls /home/zhangshan/syp/datasets/versioned_data/hm3d-0.2/hm3d/hm3d_annotated_basis.scene_dataset_config.json
-ls /home/zhangshan/syp/datasets/versioned_data/hm3d-0.2/hm3d/val/00800-TEEsavR23oF/TEEsavR23oF.basis.glb
+CANARY="$EGOCONSEQ_RUN_ROOT/my-canary"
+RUN="$EGOCONSEQ_RUN_ROOT/my-train-seen-run"
+
+"$PY" scripts/run_background_collection.py canary-build \
+  --output-root "$CANARY" \
+  --r2r-scenes uNb9QFRL6hY XcA2TqTSSAj \
+  --gs-scenes interior_0123_840023 interior_0045_839925 \
+  --b1k-scenes Pomaria_0_garden Pomaria_0_int \
+  --python "$PY" --b1k-data-root "$B1K_DATA_ROOT" \
+  --b1k-source-manifest "$B1K_SOURCE_MANIFEST" \
+  --ordinary-actions-per-pose 24
+
+"$PY" scripts/run_background_collection.py canary-run \
+  --manifest "$CANARY/controller/canary-manifest.json"
+
+"$PY" scripts/run_background_collection.py profile \
+  --measurements "$CANARY/capacity-evidence.json" \
+  --out "$CANARY/capacity-profile.json"
+
+PROFILE_SHA=$(sha256sum "$CANARY/capacity-profile.json" | cut -d' ' -f1)
+AUDIT_SHA=$(sha256sum "$B1K_CATALOG_AUDIT" | cut -d' ' -f1)
+"$PY" scripts/run_background_collection.py build \
+  --output-root "$RUN" --python "$PY" \
+  --b1k-data-root "$B1K_DATA_ROOT" \
+  --b1k-source-manifest "$B1K_SOURCE_MANIFEST" \
+  --b1k-catalog-audit "$B1K_CATALOG_AUDIT" \
+  --b1k-catalog-audit-sha256 "$AUDIT_SHA" \
+  --capacity-profile "$CANARY/capacity-profile.json" \
+  --capacity-profile-sha256 "$PROFILE_SHA" --rounds 20
+
+nohup "$PY" scripts/run_background_collection.py run \
+  --manifest "$RUN/controller/manifest.json" \
+  > "$RUN/controller/nohup.log" 2>&1 &
+
+"$PY" scripts/run_background_collection.py status \
+  --manifest "$RUN/controller/manifest.json"
 ```
 
-If your HM3D root is different, update:
-
-```text
-egoconseq/config.py
-scripts/generate_o5.py
-```
-
-### `review.html` Exists but the Browser Cannot Open It
-
-The generated HTML references images by relative paths. Start a static server:
+Stop through the controller rather than killing workers directly:
 
 ```bash
-python -m http.server 8765 --bind 0.0.0.0 --directory data/demo/o5
+"$PY" scripts/run_background_collection.py stop \
+  --manifest "$RUN/controller/manifest.json"
 ```
 
-Open:
+The controller schedules train-seen scenes only, carries accepted-pose
+exclusions across catalog passes (1.5 m / 45 degrees), and publishes global QA
+checkpoints. Reaching a per-dataset target is a floor, not permission to hide a
+global capacity shortfall.
 
-```text
-http://127.0.0.1:8765/review.html
-```
+## 8. Compile, inspect, and evaluate
 
-If `curl http://127.0.0.1:8765/review.html` fails, the server is not running or
-the port is not forwarded.
-
-### Images Do Not Show in the Review Page
-
-Serve the page from `data/demo/o5`, not from the repository root. The HTML uses:
-
-```text
-img/...
-topdown/...
-```
-
-### Habitat Logs Are Noisy
-
-Use:
+Background checkpoints already contain compiled QA and a browser. To append
+the separate A4 diagnostic to a run browser:
 
 ```bash
-MAGNUM_LOG=quiet HABITAT_SIM_LOG=quiet <command>
+CHECKPOINT="$RUN/artifacts/global/<checkpoint>"
+"$PY" scripts/build_checkpoint_direction.py \
+  --run-root "$RUN" --output "$CHECKPOINT/candidate_qa/diagnostics/checkpoint_direction.v1" \
+  --update-report "$CHECKPOINT/candidate_qa_report/index.html"
 ```
 
----
+Serve a static report from the repository root:
 
-## Development Rules
+```bash
+"$PY" -m http.server 8789 --directory "$P_BENCH_ROOT"
+# Open http://127.0.0.1:8789/data/candidate_pool/<run>/artifacts/global/<checkpoint>/candidate_qa_report/index.html
+```
 
-- Keep generated artifacts under `data/demo/`; this directory is git-ignored.
-- Do not treat `d_safe nav` as GT. It is a cross-check only.
-- Do not expose depth, pose, navmesh, or oracle evidence to the VLM.
-- Do not mention robot height in O5 prompts. Height is fixed by the simulator.
-- O5 must keep the physical horizon `H` fixed across body sizes.
-- O5 prompts should describe one robot per question, not compare two robots in
-  the same prompt.
-- Before VLM evaluation, inspect `data/demo/o5/review.html` manually.
+Evaluation needs an external source-authority manifest; the artifact's private
+source map cannot authorize itself:
 
----
+```bash
+BENCH="$RUN/artifacts/global/<checkpoint>/candidate_qa"
+"$PY" scripts/eval_benchmark.py --benchmark "$BENCH" \
+  --source-authority-manifest /path/to/source-authority.json \
+  --gt-as-pred
+```
 
-## References
+For a real model, replace `--gt-as-pred` with `--predictions predictions.jsonl`.
 
-- Habitat-Sim: https://github.com/facebookresearch/habitat-sim
-- Habitat-Lab: https://github.com/facebookresearch/habitat-lab
-- Habitat paper: https://arxiv.org/abs/1904.01201
-- HM3D paper: https://arxiv.org/abs/2109.08238
+## Data diversity and partitions
+
+- Training collection is restricted to the frozen `train_seen` scene list.
+- Future benchmark collection uses separate `test_unseen` scene families.
+- Scene families, not individual frames, are the split boundary.
+- Cross-pass pose exclusions prevent repeated nearby camera poses.
+- The compiler applies deterministic per-frame/per-task diversity selection;
+  exact source-frame SHA is the image identity.
+- Action shortlists cover lengths L1-L6 and dynamic distance strata before
+  physical certification. Failed individual tasks withhold only those tasks;
+  they do not require an otherwise useful frame to satisfy all six heads.
+
+See `pipeline/README.md` for module ownership and `docs/runs.json` for retained
+artifact provenance.
+
+## Troubleshooting
+
+- **B1K launches the wrong Python:** set `EGOCONSEQ_B1K_PYTHON` to the Python
+  inside the official BEHAVIOR environment.
+- **A scene is missing:** check the frozen partition and the authenticated
+  source manifest; do not add an unregistered scene by globbing.
+- **Resume rejects a run:** resume is intentionally same-revision and
+  same-contract only. Start a new output directory after code or contract
+  changes.
+- **No B target or too few C1 neighbours:** those are typed per-task
+  withholds; the frame may still publish other valid tasks.
+- **A candidate artifact says non-headline:** this is expected for the current
+  candidate protocol.
+
+## Licensing
+
+This checkout does not declare a project-wide license. Simulator code and raw
+assets remain subject to the Habitat, Matterport3D, Habitat-GS, InteriorGS,
+SAGE-3D, Isaac Sim, OmniGibson, BDDL, and BEHAVIOR-1K licenses and access terms.
+Do not redistribute restricted assets through this repository.

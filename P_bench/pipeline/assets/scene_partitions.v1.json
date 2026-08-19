@@ -1,0 +1,723 @@
+{
+  "datasets": {
+    "b1k": {
+      "Beechwood_0_garden": {
+        "family": "Beechwood",
+        "partition": "train_seen"
+      },
+      "Beechwood_0_int": {
+        "family": "Beechwood",
+        "partition": "train_seen"
+      },
+      "Beechwood_1_int": {
+        "family": "Beechwood",
+        "partition": "train_seen"
+      },
+      "Benevolence_0_int": {
+        "family": "Benevolence",
+        "partition": "train_seen"
+      },
+      "Benevolence_1_int": {
+        "family": "Benevolence",
+        "partition": "train_seen"
+      },
+      "Benevolence_2_int": {
+        "family": "Benevolence",
+        "partition": "train_seen"
+      },
+      "Ihlen_0_int": {
+        "family": "Ihlen",
+        "partition": "train_seen"
+      },
+      "Ihlen_1_int": {
+        "family": "Ihlen",
+        "partition": "train_seen"
+      },
+      "Merom_0_garden": {
+        "family": "Merom",
+        "partition": "test_unseen"
+      },
+      "Merom_0_int": {
+        "family": "Merom",
+        "partition": "test_unseen"
+      },
+      "Merom_1_int": {
+        "family": "Merom",
+        "partition": "test_unseen"
+      },
+      "Pomaria_0_garden": {
+        "family": "Pomaria",
+        "partition": "train_seen"
+      },
+      "Pomaria_0_int": {
+        "family": "Pomaria",
+        "partition": "train_seen"
+      },
+      "Pomaria_1_int": {
+        "family": "Pomaria",
+        "partition": "train_seen"
+      },
+      "Pomaria_2_int": {
+        "family": "Pomaria",
+        "partition": "train_seen"
+      },
+      "Rs_garden": {
+        "family": "Rs_garden",
+        "partition": "train_seen"
+      },
+      "Rs_int": {
+        "family": "Rs_int",
+        "partition": "train_seen"
+      },
+      "Wainscott_0_garden": {
+        "family": "Wainscott",
+        "partition": "train_seen"
+      },
+      "Wainscott_0_int": {
+        "family": "Wainscott",
+        "partition": "train_seen"
+      },
+      "Wainscott_1_int": {
+        "family": "Wainscott",
+        "partition": "train_seen"
+      },
+      "gates_bedroom": {
+        "family": "gates_bedroom",
+        "partition": "train_seen"
+      },
+      "grocery_store_asian": {
+        "family": "grocery_store_asian",
+        "partition": "train_seen"
+      },
+      "grocery_store_cafe": {
+        "family": "grocery_store_cafe",
+        "partition": "train_seen"
+      },
+      "grocery_store_convenience": {
+        "family": "grocery_store_convenience",
+        "partition": "test_unseen"
+      },
+      "grocery_store_half_stocked": {
+        "family": "grocery_store_half_stocked",
+        "partition": "test_unseen"
+      },
+      "hall_arch_wood": {
+        "family": "hall_arch_wood",
+        "partition": "train_seen"
+      },
+      "hall_conference_large": {
+        "family": "hall_conference_large",
+        "partition": "train_seen"
+      },
+      "hall_glass_ceiling": {
+        "family": "hall_glass_ceiling",
+        "partition": "train_seen"
+      },
+      "hall_train_station": {
+        "family": "hall_train_station",
+        "partition": "train_seen"
+      },
+      "hotel_gym_spa": {
+        "family": "hotel_gym_spa",
+        "partition": "test_unseen"
+      },
+      "hotel_suite_large": {
+        "family": "hotel_suite_large",
+        "partition": "excluded_unavailable"
+      },
+      "hotel_suite_small": {
+        "family": "hotel_suite_small",
+        "partition": "train_seen"
+      },
+      "house_double_floor_lower": {
+        "family": "house_double_floor",
+        "partition": "train_seen"
+      },
+      "house_double_floor_upper": {
+        "family": "house_double_floor",
+        "partition": "train_seen"
+      },
+      "house_single_floor": {
+        "family": "house_single_floor",
+        "partition": "train_seen"
+      },
+      "office_bike": {
+        "family": "office_bike",
+        "partition": "test_unseen"
+      },
+      "office_cubicles_left": {
+        "family": "office_cubicles",
+        "partition": "train_seen"
+      },
+      "office_cubicles_right": {
+        "family": "office_cubicles",
+        "partition": "train_seen"
+      },
+      "office_large": {
+        "family": "office_large",
+        "partition": "train_seen"
+      },
+      "office_vendor_machine": {
+        "family": "office_vendor_machine",
+        "partition": "test_unseen"
+      },
+      "restaurant_asian": {
+        "family": "restaurant_asian",
+        "partition": "test_unseen"
+      },
+      "restaurant_brunch": {
+        "family": "restaurant_brunch",
+        "partition": "test_unseen"
+      },
+      "restaurant_cafeteria": {
+        "family": "restaurant_cafeteria",
+        "partition": "train_seen"
+      },
+      "restaurant_diner": {
+        "family": "restaurant_diner",
+        "partition": "train_seen"
+      },
+      "restaurant_hotel": {
+        "family": "restaurant_hotel",
+        "partition": "train_seen"
+      },
+      "restaurant_urban": {
+        "family": "restaurant_urban",
+        "partition": "train_seen"
+      },
+      "school_biology": {
+        "family": "school",
+        "partition": "train_seen"
+      },
+      "school_chemistry": {
+        "family": "school",
+        "partition": "train_seen"
+      },
+      "school_computer_lab_and_infirmary": {
+        "family": "school",
+        "partition": "train_seen"
+      },
+      "school_geography": {
+        "family": "school",
+        "partition": "train_seen"
+      },
+      "school_gym": {
+        "family": "school",
+        "partition": "train_seen"
+      }
+    },
+    "gs": {
+      "interior_0007_840137": {
+        "family": "interior_0007_840137",
+        "partition": "train_seen"
+      },
+      "interior_0022_840117": {
+        "family": "interior_0022_840117",
+        "partition": "train_seen"
+      },
+      "interior_0032_839877": {
+        "family": "interior_0032_839877",
+        "partition": "train_seen"
+      },
+      "interior_0034_839886": {
+        "family": "interior_0034_839886",
+        "partition": "train_seen"
+      },
+      "interior_0036_839878": {
+        "family": "interior_0036_839878",
+        "partition": "train_seen"
+      },
+      "interior_0039_839888": {
+        "family": "interior_0039_839888",
+        "partition": "train_seen"
+      },
+      "interior_0040_839882": {
+        "family": "interior_0040_839882",
+        "partition": "train_seen"
+      },
+      "interior_0042_839881": {
+        "family": "interior_0042_839881",
+        "partition": "test_unseen"
+      },
+      "interior_0044_839926": {
+        "family": "interior_0044_839926",
+        "partition": "test_unseen"
+      },
+      "interior_0045_839925": {
+        "family": "interior_0045_839925",
+        "partition": "train_seen"
+      },
+      "interior_0047_839892": {
+        "family": "interior_0047_839892",
+        "partition": "train_seen"
+      },
+      "interior_0048_839893": {
+        "family": "interior_0048_839893",
+        "partition": "train_seen"
+      },
+      "interior_0049_839890": {
+        "family": "interior_0049_839890",
+        "partition": "train_seen"
+      },
+      "interior_0086_839945": {
+        "family": "interior_0086_839945",
+        "partition": "train_seen"
+      },
+      "interior_0088_839961": {
+        "family": "interior_0088_839961",
+        "partition": "train_seen"
+      },
+      "interior_0093_839966": {
+        "family": "interior_0093_839966",
+        "partition": "train_seen"
+      },
+      "interior_0100_839971": {
+        "family": "interior_0100_839971",
+        "partition": "train_seen"
+      },
+      "interior_0103_839980": {
+        "family": "interior_0103_839980",
+        "partition": "train_seen"
+      },
+      "interior_0104_839982": {
+        "family": "interior_0104_839982",
+        "partition": "train_seen"
+      },
+      "interior_0107_839992": {
+        "family": "interior_0107_839992",
+        "partition": "train_seen"
+      },
+      "interior_0108_839984": {
+        "family": "interior_0108_839984",
+        "partition": "train_seen"
+      },
+      "interior_0113_839991": {
+        "family": "interior_0113_839991",
+        "partition": "test_unseen"
+      },
+      "interior_0121_840013": {
+        "family": "interior_0121_840013",
+        "partition": "train_seen"
+      },
+      "interior_0122_840008": {
+        "family": "interior_0122_840008",
+        "partition": "train_seen"
+      },
+      "interior_0123_840023": {
+        "family": "interior_0123_840023",
+        "partition": "train_seen"
+      },
+      "interior_0124_840027": {
+        "family": "interior_0124_840027",
+        "partition": "train_seen"
+      },
+      "interior_0126_840028": {
+        "family": "interior_0126_840028",
+        "partition": "train_seen"
+      },
+      "interior_0134_840039": {
+        "family": "interior_0134_840039",
+        "partition": "train_seen"
+      },
+      "interior_0135_840032": {
+        "family": "interior_0135_840032",
+        "partition": "train_seen"
+      },
+      "interior_0141_840177": {
+        "family": "interior_0141_840177",
+        "partition": "test_unseen"
+      },
+      "interior_0170_840084": {
+        "family": "interior_0170_840084",
+        "partition": "train_seen"
+      },
+      "interior_0175_840149": {
+        "family": "interior_0175_840149",
+        "partition": "test_unseen"
+      },
+      "interior_0179_840114": {
+        "family": "interior_0179_840114",
+        "partition": "train_seen"
+      },
+      "interior_0184_840116": {
+        "family": "interior_0184_840116",
+        "partition": "train_seen"
+      },
+      "interior_0185_840107": {
+        "family": "interior_0185_840107",
+        "partition": "train_seen"
+      },
+      "interior_0191_840178": {
+        "family": "interior_0191_840178",
+        "partition": "test_unseen"
+      },
+      "interior_0196_840121": {
+        "family": "interior_0196_840121",
+        "partition": "train_seen"
+      },
+      "interior_0204_840158": {
+        "family": "interior_0204_840158",
+        "partition": "test_unseen"
+      },
+      "interior_0206_840163": {
+        "family": "interior_0206_840163",
+        "partition": "train_seen"
+      },
+      "interior_0207_840167": {
+        "family": "interior_0207_840167",
+        "partition": "test_unseen"
+      },
+      "interior_0289_840757": {
+        "family": "interior_0289_840757",
+        "partition": "train_seen"
+      },
+      "interior_0393_840188": {
+        "family": "interior_0393_840188",
+        "partition": "train_seen"
+      },
+      "interior_0395_840187": {
+        "family": "interior_0395_840187",
+        "partition": "train_seen"
+      },
+      "interior_0399_840130": {
+        "family": "interior_0399_840130",
+        "partition": "train_seen"
+      },
+      "interior_0402_840115": {
+        "family": "interior_0402_840115",
+        "partition": "test_unseen"
+      },
+      "interior_0404_840155": {
+        "family": "interior_0404_840155",
+        "partition": "train_seen"
+      },
+      "interior_0405_840145": {
+        "family": "interior_0405_840145",
+        "partition": "train_seen"
+      },
+      "interior_0407_840140": {
+        "family": "interior_0407_840140",
+        "partition": "test_unseen"
+      },
+      "interior_0408_840112": {
+        "family": "interior_0408_840112",
+        "partition": "test_unseen"
+      },
+      "interior_0415_840048": {
+        "family": "interior_0415_840048",
+        "partition": "train_seen"
+      },
+      "interior_0418_840024": {
+        "family": "interior_0418_840024",
+        "partition": "train_seen"
+      },
+      "interior_0420_840007": {
+        "family": "interior_0420_840007",
+        "partition": "train_seen"
+      },
+      "interior_0425_839987": {
+        "family": "interior_0425_839987",
+        "partition": "train_seen"
+      },
+      "interior_0433_839891": {
+        "family": "interior_0433_839891",
+        "partition": "test_unseen"
+      },
+      "interior_0505_839970": {
+        "family": "interior_0505_839970",
+        "partition": "excluded_damaged"
+      }
+    },
+    "r2r": {
+      "17DRP5sb8fy": {
+        "family": "17DRP5sb8fy",
+        "partition": "train_seen"
+      },
+      "1LXtFkjw3qL": {
+        "family": "1LXtFkjw3qL",
+        "partition": "train_seen"
+      },
+      "1pXnuDYAj8r": {
+        "family": "1pXnuDYAj8r",
+        "partition": "train_seen"
+      },
+      "29hnd4uzFmX": {
+        "family": "29hnd4uzFmX",
+        "partition": "train_seen"
+      },
+      "2azQ1b91cZZ": {
+        "family": "2azQ1b91cZZ",
+        "partition": "test_unseen"
+      },
+      "2n8kARJN3HM": {
+        "family": "2n8kARJN3HM",
+        "partition": "train_seen"
+      },
+      "5LpN3gDmAk7": {
+        "family": "5LpN3gDmAk7",
+        "partition": "train_seen"
+      },
+      "5q7pvUzZiYa": {
+        "family": "5q7pvUzZiYa",
+        "partition": "train_seen"
+      },
+      "759xd9YjKW5": {
+        "family": "759xd9YjKW5",
+        "partition": "train_seen"
+      },
+      "7y3sRwLe3Va": {
+        "family": "7y3sRwLe3Va",
+        "partition": "train_seen"
+      },
+      "8194nk5LbLH": {
+        "family": "8194nk5LbLH",
+        "partition": "test_unseen"
+      },
+      "82sE5b5pLXE": {
+        "family": "82sE5b5pLXE",
+        "partition": "train_seen"
+      },
+      "8WUmhLawc2A": {
+        "family": "8WUmhLawc2A",
+        "partition": "train_seen"
+      },
+      "B6ByNegPMKs": {
+        "family": "B6ByNegPMKs",
+        "partition": "train_seen"
+      },
+      "D7G3Y4RVNrH": {
+        "family": "D7G3Y4RVNrH",
+        "partition": "train_seen"
+      },
+      "D7N2EKCX4Sj": {
+        "family": "D7N2EKCX4Sj",
+        "partition": "train_seen"
+      },
+      "E9uDoFAP3SH": {
+        "family": "E9uDoFAP3SH",
+        "partition": "train_seen"
+      },
+      "EDJbREhghzL": {
+        "family": "EDJbREhghzL",
+        "partition": "train_seen"
+      },
+      "EU6Fwq7SyZv": {
+        "family": "EU6Fwq7SyZv",
+        "partition": "test_unseen"
+      },
+      "GdvgFV5R1Z5": {
+        "family": "GdvgFV5R1Z5",
+        "partition": "train_seen"
+      },
+      "HxpKQynjfin": {
+        "family": "HxpKQynjfin",
+        "partition": "train_seen"
+      },
+      "JF19kD82Mey": {
+        "family": "JF19kD82Mey",
+        "partition": "train_seen"
+      },
+      "JeFG25nYj2p": {
+        "family": "JeFG25nYj2p",
+        "partition": "train_seen"
+      },
+      "JmbYfDe2QKZ": {
+        "family": "JmbYfDe2QKZ",
+        "partition": "train_seen"
+      },
+      "PX4nDJXEHrG": {
+        "family": "PX4nDJXEHrG",
+        "partition": "train_seen"
+      },
+      "Pm6F8kyY3z2": {
+        "family": "Pm6F8kyY3z2",
+        "partition": "train_seen"
+      },
+      "PuKPg4mmafe": {
+        "family": "PuKPg4mmafe",
+        "partition": "train_seen"
+      },
+      "QUCTc6BB5sX": {
+        "family": "QUCTc6BB5sX",
+        "partition": "test_unseen"
+      },
+      "S9hNv5qa7GM": {
+        "family": "S9hNv5qa7GM",
+        "partition": "train_seen"
+      },
+      "SN83YJsR3w2": {
+        "family": "SN83YJsR3w2",
+        "partition": "train_seen"
+      },
+      "TbHJrupSAjP": {
+        "family": "TbHJrupSAjP",
+        "partition": "test_unseen"
+      },
+      "ULsKaCPVFJR": {
+        "family": "ULsKaCPVFJR",
+        "partition": "train_seen"
+      },
+      "Uxmj2M2itWa": {
+        "family": "Uxmj2M2itWa",
+        "partition": "train_seen"
+      },
+      "V2XKFyX4ASd": {
+        "family": "V2XKFyX4ASd",
+        "partition": "train_seen"
+      },
+      "VFuaQ6m2Qom": {
+        "family": "VFuaQ6m2Qom",
+        "partition": "train_seen"
+      },
+      "VLzqgDo317F": {
+        "family": "VLzqgDo317F",
+        "partition": "train_seen"
+      },
+      "VVfe2KiqLaN": {
+        "family": "VVfe2KiqLaN",
+        "partition": "train_seen"
+      },
+      "Vvot9Ly1tCj": {
+        "family": "Vvot9Ly1tCj",
+        "partition": "train_seen"
+      },
+      "VzqfbhrpDEA": {
+        "family": "VzqfbhrpDEA",
+        "partition": "train_seen"
+      },
+      "X7HyMhZNoso": {
+        "family": "X7HyMhZNoso",
+        "partition": "test_unseen"
+      },
+      "XcA2TqTSSAj": {
+        "family": "XcA2TqTSSAj",
+        "partition": "train_seen"
+      },
+      "YmJkqBEsHnH": {
+        "family": "YmJkqBEsHnH",
+        "partition": "train_seen"
+      },
+      "Z6MFQCViBuw": {
+        "family": "Z6MFQCViBuw",
+        "partition": "test_unseen"
+      },
+      "ZMojNkEp431": {
+        "family": "ZMojNkEp431",
+        "partition": "train_seen"
+      },
+      "aayBHfsNo7d": {
+        "family": "aayBHfsNo7d",
+        "partition": "train_seen"
+      },
+      "ac26ZMwG7aT": {
+        "family": "ac26ZMwG7aT",
+        "partition": "train_seen"
+      },
+      "b8cTxDM8gDG": {
+        "family": "b8cTxDM8gDG",
+        "partition": "train_seen"
+      },
+      "cV4RVeZvu5T": {
+        "family": "cV4RVeZvu5T",
+        "partition": "train_seen"
+      },
+      "dhjEzFoUFzH": {
+        "family": "dhjEzFoUFzH",
+        "partition": "train_seen"
+      },
+      "e9zR4mvMWw7": {
+        "family": "e9zR4mvMWw7",
+        "partition": "train_seen"
+      },
+      "gTV8FGcVJC9": {
+        "family": "gTV8FGcVJC9",
+        "partition": "train_seen"
+      },
+      "gZ6f7yhEvPG": {
+        "family": "gZ6f7yhEvPG",
+        "partition": "train_seen"
+      },
+      "i5noydFURQK": {
+        "family": "i5noydFURQK",
+        "partition": "train_seen"
+      },
+      "jh4fc5c5qoQ": {
+        "family": "jh4fc5c5qoQ",
+        "partition": "train_seen"
+      },
+      "kEZ7cmS4wCh": {
+        "family": "kEZ7cmS4wCh",
+        "partition": "train_seen"
+      },
+      "mJXqzFtmKg4": {
+        "family": "mJXqzFtmKg4",
+        "partition": "train_seen"
+      },
+      "oLBMNvg9in8": {
+        "family": "oLBMNvg9in8",
+        "partition": "test_unseen"
+      },
+      "p5wJjkQkbXX": {
+        "family": "p5wJjkQkbXX",
+        "partition": "train_seen"
+      },
+      "pLe4wQe7qrG": {
+        "family": "pLe4wQe7qrG",
+        "partition": "test_unseen"
+      },
+      "pRbA3pwrgk9": {
+        "family": "pRbA3pwrgk9",
+        "partition": "train_seen"
+      },
+      "qoiz87JEwZ2": {
+        "family": "qoiz87JEwZ2",
+        "partition": "train_seen"
+      },
+      "r1Q1Z4BcV1o": {
+        "family": "r1Q1Z4BcV1o",
+        "partition": "train_seen"
+      },
+      "r47D5H71a5s": {
+        "family": "r47D5H71a5s",
+        "partition": "train_seen"
+      },
+      "rPc6DW4iMge": {
+        "family": "rPc6DW4iMge",
+        "partition": "train_seen"
+      },
+      "s8pcmisQ38h": {
+        "family": "s8pcmisQ38h",
+        "partition": "train_seen"
+      },
+      "sKLMLpTHeUy": {
+        "family": "sKLMLpTHeUy",
+        "partition": "train_seen"
+      },
+      "sT4fr6TAbpF": {
+        "family": "sT4fr6TAbpF",
+        "partition": "train_seen"
+      },
+      "uNb9QFRL6hY": {
+        "family": "uNb9QFRL6hY",
+        "partition": "train_seen"
+      },
+      "ur6pFq6Qu1A": {
+        "family": "ur6pFq6Qu1A",
+        "partition": "train_seen"
+      },
+      "vyrNrziPKCB": {
+        "family": "vyrNrziPKCB",
+        "partition": "train_seen"
+      },
+      "x8F5xyUWy9e": {
+        "family": "x8F5xyUWy9e",
+        "partition": "test_unseen"
+      },
+      "zsNo4HB9uLZ": {
+        "family": "zsNo4HB9uLZ",
+        "partition": "test_unseen"
+      }
+    }
+  },
+  "schema": "egoconseq.scene-partitions.v1"
+}

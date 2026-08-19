@@ -1,0 +1,24 @@
+{
+  "schema": "future-view-gate.v1",
+  "status": "calibrated",
+  "calibration_source": "oracle_only",
+  "metric": "block-l1.v1",
+  "block_size_px": 8,
+  "lower_pair_distance": {
+    "numerator": 17324924,
+    "denominator": 235008000
+  },
+  "upper_correct_distractor_distance": {
+    "numerator": 32798718,
+    "denominator": 235008000
+  },
+  "match_buckets": {
+    "planned_forward_distance_m": 2.0,
+    "net_yaw_deg": 90.0,
+    "realized_displacement_m": 2.0,
+    "initial_appearance": {
+      "numerator": 1,
+      "denominator": 10
+    }
+  }
+}

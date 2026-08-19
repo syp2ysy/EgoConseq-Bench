@@ -1,0 +1,26 @@
+name: egoconseq-habitat
+channels:
+  - aihabitat
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.9.23
+  - habitat-sim=0.2.4
+  - headless
+  - scipy=1.13.1
+  - pip
+  - pip:
+      - habitat-lab==0.2.420230405
+      - numpy==1.26.4
+      - numpy-quaternion==2023.0.3
+      - Pillow==11.0.0
+      - opencv-python==4.9.0.80
+      - plyfile==1.1.3
+      - trimesh==4.12.2
+      - shapely==2.0.7
+      - rtree==1.4.1
+      - networkx==3.2.1
+      - torch==2.5.1
+      - gsplat==1.5.3
+      - pytest==8.4.2
+      - huggingface-hub==0.36.0

@@ -12,9 +12,15 @@ march along the current heading.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import math
 from dataclasses import dataclass
-from typing import List, Sequence, Tuple, Union
+from typing import Dict, List, Sequence, Tuple, TypeVar, Union
+
+import numpy as np
+
+from pipeline import config
 
 
 # --------------------------------------------------------------------------
@@ -24,7 +30,6 @@ from typing import List, Sequence, Tuple, Union
 @dataclass(frozen=True)
 class Turn:
     deg: float
-
     def to_dict(self) -> dict:
         return {"type": "turn", "deg": float(self.deg)}
 
@@ -32,13 +37,22 @@ class Turn:
 @dataclass(frozen=True)
 class Forward:
     m: float
-
     def to_dict(self) -> dict:
         return {"type": "forward", "m": float(self.m)}
 
 
 Action = Union[Turn, Forward]
 ActionSeq = List[Action]
+
+
+@dataclass(frozen=True)
+class ForwardLegLocation:
+    """Metric location within the ordered Forward legs of an action program."""
+    action_index: int
+    forward_leg_number: int
+    cumulative_before_leg_m: float
+    distance_into_leg_m: float
+    leg_length_m: float
 
 
 def parse_actions(raw: Sequence[dict]) -> ActionSeq:
@@ -60,6 +74,37 @@ def actions_to_dicts(actions: Sequence[Action]) -> List[dict]:
 
 
 # --------------------------------------------------------------------------
+# Canonical action digests
+#
+# Two digests of the same program exist and they are NOT interchangeable.  Each
+# has exactly one definition, in the layer that owns it:
+#
+#   actions.canonical_actions_sha256   hashes the bare list.  Its first twelve
+#                                      hex digits are the candidate tag, which
+#                                      reaches action_group_id -> outcome_id ->
+#                                      the published QA's oracle_ref.
+#   record.action_program_sha256       hashes {"actions": [...]} as a record
+#                                      atom.  That is the value published as
+#                                      terminal_rgb_asset.binding.action_sha256
+#                                      and the key C1 families and the QA choice
+#                                      descriptors join on.
+#
+# Merging them would move one published identifier or the other, so they stay
+# distinct until a deliberate re-freeze.  The record-atom one cannot live here:
+# it needs the record layer's json normaliser, and pipeline.record imports this
+# module, so defining it here would create the import cycle that
+# tests/test_pl_module_structure.py forbids.
+# --------------------------------------------------------------------------
+
+def canonical_actions_sha256(actions: Sequence[Action]) -> str:
+    """Digest of the bare canonical action list (candidate-tag domain)."""
+    encoded = json.dumps(
+        actions_to_dicts(list(actions)), sort_keys=True,
+        separators=(",", ":")).encode()
+    return hashlib.sha256(encoded).hexdigest()
+
+
+# --------------------------------------------------------------------------
 # Scalar summaries
 # --------------------------------------------------------------------------
 
@@ -67,6 +112,38 @@ def wrap_deg(d: float) -> float:
     """Wrap an angle in degrees to (-180, 180]."""
     r = (d + 180.0) % 360.0 - 180.0
     return 180.0 if r == -180.0 else r
+
+
+def planar_distance_m(x_m: float, z_m: float) -> float:
+    """Ground-plane distance from the origin, identical in every interpreter.
+
+    ``math.hypot`` looks like the obvious call and is the wrong one for any
+    number that reaches a content hash. It is implemented inside CPython and
+    its last bit changed in 3.10, so the same two coordinates give
+    1.3989663259659064 under 3.9 and ...66 under 3.11. The B1K route straddles
+    exactly that boundary -- the collector runs under the simulator's
+    interpreter, its supervisor validates under the pipeline's -- so a family
+    hashed on one side could not be re-derived on the other, and a shard whose
+    data was entirely sound failed its own completeness check.
+
+    Multiplication, addition and ``sqrt`` are correctly rounded by IEEE-754, so
+    this agrees bit for bit everywhere a conforming double exists.
+    """
+    x = float(x_m)
+    z = float(z_m)
+    return math.sqrt(x * x + z * z)
+
+
+def bearing_sector(bearing_deg: float) -> str:
+    """Map an egocentric bearing to the public four-sector label."""
+    bearing = wrap_deg(float(bearing_deg))
+    if -45.0 <= bearing < 45.0:
+        return "front"
+    if 45.0 <= bearing < 135.0:
+        return "right"
+    if -135.0 < bearing < -45.0:
+        return "left"
+    return "rear"
 
 
 def net_turn_deg(actions: Sequence[Action]) -> float:
@@ -82,9 +159,34 @@ def total_forward_m(actions: Sequence[Action]) -> float:
 # Poses
 # --------------------------------------------------------------------------
 
+def _primitive_duration_s(action: Action) -> float:
+    if isinstance(action, Turn):
+        return abs(float(action.deg)) / float(config.ANGULAR_SPEED_DEG_S)
+    return abs(float(action.m)) / float(config.LINEAR_SPEED_M_S)
+
+
+def _action_amounts_at_progress(
+    actions: Sequence[Action], progress: float,
+) -> List[float]:
+    durations = [_primitive_duration_s(action) for action in actions]
+    total_time_s = sum(durations)
+    remaining = min(1.0, max(0.0, float(progress))) * total_time_s
+    amounts = []
+    for duration in durations:
+        if duration <= 0.0:
+            amount = 1.0 if remaining > 0.0 else 0.0
+        elif remaining >= duration:
+            amount = 1.0
+            remaining -= duration
+        else:
+            amount = remaining / duration
+            remaining = 0.0
+        amounts.append(float(amount))
+    return amounts
+
+
 def _fold(actions: Sequence[Action], arc_limit: float) -> Tuple[float, float, float, float]:
     """Walk the path, stopping when cumulative forward arc reaches arc_limit.
-
     Returns (x, z, heading_rad, arc). When arc_limit is reached mid- (or at
     end-of) a forward leg, we stop immediately without applying any later
     action (the agent has physically stopped there).
@@ -117,13 +219,186 @@ def pose_at_arc(actions: Sequence[Action], arc: float) -> Tuple[float, float, fl
     return x, z, wrap_deg(math.degrees(h))
 
 
+def pose_at_progress(actions: Sequence[Action], progress: float) -> Tuple[float, float, float]:
+    """Pose at normalized elapsed time under the configured constant speeds."""
+    x = z = h = 0.0
+    for action, amount in zip(actions, _action_amounts_at_progress(actions, progress)):
+        if amount <= 0:
+            break
+        if isinstance(action, Turn):
+            h += math.radians(action.deg * amount)
+        else:
+            d = action.m * amount
+            x += d * math.sin(h)
+            z += d * math.cos(h)
+    return x, z, wrap_deg(math.degrees(h))
+
+
+def arc_at_progress(actions: Sequence[Action], progress: float) -> float:
+    """Forward arc executed at normalized physical elapsed time."""
+    return float(sum(
+        action.m * amount
+        for action, amount in zip(
+            actions, _action_amounts_at_progress(actions, progress))
+        if isinstance(action, Forward)
+    ))
+
+
+def program_progress_at_contact(actions: Sequence[Action], action_index: int,
+                                local_arc_m: float) -> float:
+    """Map a Forward contact to normalized physical elapsed time."""
+    if not actions or not (0 <= action_index < len(actions)):
+        raise ValueError("contact action index out of range")
+    action = actions[action_index]
+    if not isinstance(action, Forward) or action.m <= 0:
+        raise ValueError("contact must lie in a positive Forward primitive")
+    local_arc = min(float(action.m), max(0.0, float(local_arc_m)))
+    elapsed = sum(_primitive_duration_s(value) for value in actions[:action_index])
+    elapsed += local_arc / float(config.LINEAR_SPEED_M_S)
+    total = sum(_primitive_duration_s(value) for value in actions)
+    return float(elapsed / total)
+
+
+def inside_initial_fov(actions: Sequence[Action], half_fov_deg: float, *,
+                       max_arc_m: float = None,
+                       radius_m: float = 0.0) -> bool:
+    """Whether the swept body stays inside the initial view cone.
+
+    ``max_arc_m`` limits the check to the prefix actually executed. A colliding
+    program never runs its nominal remainder, so requiring the full nominal path
+    to stay in view would reject candidates the physical oracle would accept --
+    the formal corridor gate truncates at first contact for the same reason.
+
+    Near the origin the camera cannot see both sides of a finite-radius body;
+    that frozen horizontal blind strip is exempt exactly as in corridor
+    coverage. Beyond it, both lateral disc edges must remain in view. Passing
+    the default zero radius preserves the historical centerline predicate.
+    """
+    radius = float(radius_m)
+    half_fov = float(half_fov_deg)
+    if not math.isfinite(radius) or radius < 0.0:
+        raise ValueError("body radius must be finite and nonnegative")
+    half_fov_rad = math.radians(half_fov)
+    horizontal_near_field = (
+        radius / max(math.tan(half_fov_rad), 1e-9)
+        if radius > 0.0 and 0.0 < half_fov < 90.0 else 0.0)
+    for x, z, heading, arc in sample_path(actions, config.MARCH_STEP_M):
+        if arc <= 0:
+            continue
+        if max_arc_m is not None and float(arc) > float(max_arc_m) + 1e-9:
+            break
+        if z <= 0 or abs(math.degrees(math.atan2(x, z))) > half_fov + 1e-9:
+            return False
+        if radius <= 0.0 or math.hypot(x, z) <= horizontal_near_field + 1e-9:
+            continue
+        for lateral in (-radius, radius):
+            px = x + lateral * math.cos(heading)
+            pz = z - lateral * math.sin(heading)
+            if (pz <= 0.0 or
+                    abs(math.degrees(math.atan2(px, pz))) > half_fov + 1e-9):
+                return False
+    return True
+
+
+_inside_initial_fov = inside_initial_fov
+
+
+def _random_action(rng: np.random.Generator, previous: Action = None, *,
+                   turns=tuple(config.GEN_TURNS_DEG),
+                   forwards=tuple(config.GEN_FORWARDS_M)) -> Action:
+    choose_turn = (bool(rng.integers(0, 2)) if previous is None
+                   else isinstance(previous, Forward))
+    if not choose_turn:
+        return Forward(float(rng.choice(forwards)))
+    return Turn(float(rng.choice(turns)))
+
+
+def validate_alternating_actions(actions: Sequence[Action]) -> None:
+    """Raise when adjacent primitives have the same action type."""
+    for index, (previous, current) in enumerate(zip(actions, actions[1:]), start=1):
+        if isinstance(previous, Turn) == isinstance(current, Turn):
+            raise ValueError(
+                f"actions {index} and {index + 1} must alternate Turn/Forward")
+
+
+def validate_physics_actions(
+    actions: Sequence[Action], *,
+    turns=tuple(config.GEN_TURNS_DEG),
+    forwards=tuple(config.GEN_FORWARDS_M),
+) -> None:
+    """Validate one physical program against the registered main vocabulary."""
+    validate_alternating_actions(actions)
+    allowed_turns = {float(value) for value in turns}
+    allowed_forwards = {float(value) for value in forwards}
+    if not any(isinstance(action, Forward) for action in actions):
+        raise ValueError("physics action program must contain a forward primitive")
+    for action in actions:
+        if isinstance(action, Turn):
+            value = float(action.deg)
+            if not math.isfinite(value) or value not in allowed_turns:
+                raise ValueError(f"turn value {value!r} is outside the main vocabulary")
+        else:
+            value = float(action.m)
+            if (not math.isfinite(value) or value <= 0.0 or
+                    value not in allowed_forwards):
+                raise ValueError(
+                    f"forward value {value!r} is outside the positive main vocabulary")
+
+
+def _action_key(actions: Sequence[Action]) -> tuple:
+    return tuple(("turn", action.deg) if isinstance(action, Turn)
+                 else ("forward", action.m) for action in actions)
+
+
+def balanced_action_pool(rng: np.random.Generator,
+                         lengths=config.GEN_LENGTHS,
+                         pool_per_length: int = None,
+                         half_fov_deg: float = config.HFOV_DEG / 2.0,
+                         max_attempts: int = None, *,
+                         turns=tuple(config.GEN_TURNS_DEG),
+                         forwards=tuple(config.GEN_FORWARDS_M),
+                         require_initial_fov: bool = True) -> Dict[int, List[ActionSeq]]:
+    """Randomly draw benchmark programs and keep paths in the initial FOV.
+    Adjacent primitives strictly alternate between Turn and Forward. Duplicate
+    and out-of-view programs are rejected.
+    """
+    if pool_per_length is None:
+        pool_per_length = config.KEEP_PER_LENGTH * config.POOL_FACTOR
+    pools: Dict[int, List[ActionSeq]] = {}
+    for length in lengths:
+        candidates: List[ActionSeq] = []
+        seen = set()
+        attempts = 0
+        limit = max_attempts or max(
+            1000, int(pool_per_length) * config.ACTION_REJECTION_FACTOR)
+        while len(candidates) < int(pool_per_length) and attempts < limit:
+            attempts += 1
+            seq: ActionSeq = []
+            for _ in range(int(length)):
+                seq.append(_random_action(
+                    rng, seq[-1] if seq else None,
+                    turns=turns, forwards=forwards))
+            validate_alternating_actions(seq)
+            key = _action_key(seq)
+            if (key in seen or not any(isinstance(a, Forward) for a in seq) or
+                    (require_initial_fov and
+                     not _inside_initial_fov(seq, float(half_fov_deg)))):
+                continue
+            seen.add(key)
+            candidates.append(seq)
+        pools[int(length)] = candidates
+    return pools
+
+
+_T = TypeVar("_T")
+
+
 # --------------------------------------------------------------------------
 # Path sampling (for collision march & view-exit)
 # --------------------------------------------------------------------------
 
 def sample_path(actions: Sequence[Action], step: float) -> List[Tuple[float, float, float, float]]:
     """Dense centreline samples of the path.
-
     Returns a list of (x, z, heading_rad, arc) tuples. Sample 0 is always the
     origin (0, 0, 0, 0). Each forward leg emits samples at k*step plus the
     exact leg endpoint. Turns emit no sample (zero arc length).
@@ -155,7 +430,6 @@ def sample_path(actions: Sequence[Action], step: float) -> List[Tuple[float, flo
 
 def contact_action_index(actions: Sequence[Action], arc: float):
     """Which action a collision at cumulative forward `arc` happens during.
-
     Turns consume no arc, so a collision always lands inside a Forward leg.
     Returns (idx, local_arc) — `idx` is the 0-based index in `actions` of that
     Forward, `local_arc` how far into it (m). Returns (None, None) if `arc` is
@@ -169,3 +443,36 @@ def contact_action_index(actions: Sequence[Action], arc: float):
             return i, float(arc - cum)
         cum += a.m
     return None, None
+
+
+def forward_leg_location(actions: Sequence[Action],
+                         arc_m: float) -> ForwardLegLocation:
+    """Locate a cumulative forward arc in a program's 1-based Forward stages.
+    An arc exactly at a Forward endpoint belongs to that closing leg. Turns
+    consume no arc and therefore never define a termination stage.
+    """
+    arc = float(arc_m)
+    total = total_forward_m(actions)
+    if not math.isfinite(arc) or arc < 0.0 or arc > total + 1e-9:
+        raise ValueError(
+            f"forward arc {arc_m!r} is outside [0, {total:g}]")
+    cumulative = 0.0
+    leg_number = 0
+    for action_index, action in enumerate(actions):
+        if isinstance(action, Turn):
+            continue
+        if action.m <= 0.0:
+            raise ValueError("forward legs must have positive length")
+        leg_number += 1
+        endpoint = cumulative + float(action.m)
+        if arc <= endpoint + 1e-9:
+            local = min(float(action.m), max(0.0, arc - cumulative))
+            return ForwardLegLocation(
+                action_index=int(action_index),
+                forward_leg_number=int(leg_number),
+                cumulative_before_leg_m=float(cumulative),
+                distance_into_leg_m=float(local),
+                leg_length_m=float(action.m),
+            )
+        cumulative = endpoint
+    raise ValueError("forward arc cannot be located in an empty action program")

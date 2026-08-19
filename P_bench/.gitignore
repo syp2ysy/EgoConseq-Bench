@@ -1,5 +1,11 @@
-data/demo/
+data/
 __pycache__/
 *.pyc
 .pytest_cache/
-data/
+.agents/
+.aris/
+.claude/
+.codex/
+.superpowers/
+.worktrees/
+.env.local

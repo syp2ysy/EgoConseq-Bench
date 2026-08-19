@@ -1,290 +1,526 @@
-"""judge(frame, body, actions, nav) -> Consequence (dict of all GT elements).
-
-Pure geometry over a prebuilt Frame. `nav` is duck-typed and optional:
-    nav.d_safe(actions, radius) -> arc (m) to first non-navigable, or d_max
-    nav.geodesic(a_local_xz, b_local_xz) -> float | None
-When nav is None, nav_check and all geodesic fields are null. No Habitat import.
-"""
+"""Public structured consequence judge for the existing pipeline."""
 
 from __future__ import annotations
 
+import copy
+from collections import Counter
 import math
-from typing import List, Optional, Tuple
 
 import numpy as np
 
-from pipeline import config, actions as A, objects as OBJ, perception
+from pipeline import (
+    actions as A, config, dataset_contracts, gs_semantic, objects as OBJ,
+    perception, record as record_fields,
+)
+from pipeline.consensus import (
+    R2R_A_STABILITY_PERTURBATIONS, build_a_stability_certificate,
+    oracle_consensus,
+)
+from pipeline import rollout
 
 
-FOV_HALF = config.FOV_HALF_DEG
+_A_STABILITY_BATCH_DIAGNOSTICS = Counter()
 
 
-# --------------------------------------------------------------------------
-# small helpers
-# --------------------------------------------------------------------------
-
-def _in_frame(uv, shape) -> bool:
-    if uv is None:
-        return False
-    H, W = shape
-    u, v = uv
-    return 0 <= u < W and 0 <= v < H
+def _reset_a_stability_batch_diagnostics() -> None:
+    _A_STABILITY_BATCH_DIAGNOSTICS.clear()
 
 
-_in_cone = perception.in_cone          # (x, z) -> bool, within horizontal FOV cone
-_bearing_dist = perception.bearing_dist  # (x, z) -> (bearing deg, distance)
+def _a_stability_batch_diagnostics() -> dict:
+    """Return execution-only pose-batching counters, never record content."""
+    return dict(_A_STABILITY_BATCH_DIAGNOSTICS)
 
 
-# --------------------------------------------------------------------------
-# collision
-# --------------------------------------------------------------------------
-
-def march_collision(vf, path, radius, min_support=config.MIN_SUPPORT_VOXELS):
-    """First contact along path. Returns (collided, arc, (x,z)) or (False, None, None)."""
-    for i, (x, z, _h, arc) in enumerate(path):
-        if i == 0:
-            continue
-        if vf.support_count((x, z), radius) >= min_support:
-            return True, arc, (x, z)
-    return False, None, None
-
-
-# --------------------------------------------------------------------------
-# view exit
-# --------------------------------------------------------------------------
-
-def compute_view_exit(acts, frame, pose_full) -> dict:
-    ex, ez, _heading = pose_full
-    step = config.MARCH_STEP_M
-
-    # path first-exit arc
-    exit_arc = None
-    for i, (x, z, _h, arc) in enumerate(A.sample_path(acts, step)):
-        if i == 0:
-            continue
-        if not _in_cone(x, z):
-            exit_arc = arc
-            break
-
-    end_bearing, end_dist = _bearing_dist(ex, ez)
-    if end_dist < 1e-9:                       # in-place end: convention
-        end_in_fov, end_bearing = True, 0.0
-    else:
-        end_in_fov = _in_cone(ex, ez)
-
-    pt = (ex, frame.floor_y + 0.5, ez)
-    uv = perception.project_ground(pt, frame.K)
-    in_frame = _in_frame(uv, frame.depth.shape)
-    end_visible = False
-    if in_frame and ez > 0:
-        u, v = int(round(uv[0])), int(round(uv[1]))
-        u = min(u, frame.depth.shape[1] - 1)
-        v = min(v, frame.depth.shape[0] - 1)
-        end_visible = float(frame.depth[v, u]) + config.END_VISIBLE_DEPTH_TOL_M >= ez
-
+def _full_contact_attribution(frame, contact) -> dict:
+    world_point = contact.get("world_point")
+    semantic_index = getattr(frame, "semantic_index", None)
+    if (world_point is None or semantic_index is None or
+            not hasattr(semantic_index, "assign")):
+        return {"instance_id": None, "category": None, "unattributed": True}
+    point = np.asarray(world_point, dtype=np.float64)
+    if point.shape != (3,) or not np.isfinite(point).all():
+        return {"instance_id": None, "category": None, "unattributed": True}
+    point_local = perception.local_from_world(
+        point[None, :], frame.position, frame.yaw_rad)[0]
+    low, high = config.GROUND_OBSTACLE_BAND_M
+    heights = np.linspace(
+        low, high, config.CONTACT_ATTRIBUTION_PROBE_COUNT)
+    probes_local = np.repeat(point_local[None, :], len(heights), axis=0)
+    floor_y = frame.floor_plane.y_at(point_local[0], point_local[2])
+    normal_y = frame.floor_plane.normal_local[1]
+    probes_local[:, 1] = floor_y + heights / normal_y
+    probes = perception.world_from_local(
+        probes_local, frame.position, frame.yaw_rad)
+    ids = np.asarray(semantic_index.assign(probes), dtype=np.int64)
+    valid = []
+    for value in ids:
+        category = frame.predicate_category(int(value)).lower()
+        if (int(value) != 0 and
+                config.is_contact_obstacle_category(category)):
+            valid.append(int(value))
+    if not valid:
+        return {"instance_id": None, "category": None, "unattributed": True}
+    values, counts = np.unique(valid, return_counts=True)
+    full_id = int(values[np.argmax(counts)])
     return {
-        "path_exit_arc_m": exit_arc,
-        "end_in_fov": bool(end_in_fov),
-        "end_bearing_deg": end_bearing,
-        "end_dist_m": end_dist,
-        "end_pixel": list(uv) if uv is not None else None,
-        "end_pixel_in_frame": bool(in_frame),
-        "end_visible": bool(end_visible),
-        "end_heading_offset_deg": A.wrap_deg(A.net_turn_deg(acts)),
+        "instance_id": full_id,
+        "category": frame.id_to_cat.get(full_id, "unknown"),
+        "unattributed": False,
     }
 
 
-# --------------------------------------------------------------------------
-# object relations
-# --------------------------------------------------------------------------
-
-def _relation_at(obj, endpos, heading_deg, nav, geodesic) -> dict:
-    px, pz = endpos
-    h = math.radians(heading_deg)
-    cos_h, sin_h = math.cos(h), math.sin(h)
-
-    def transform(tx, tz):
-        dx, dz = tx - px, tz - pz
-        xp = dx * cos_h - dz * sin_h
-        zp = dx * sin_h + dz * cos_h
-        return xp, zp
-
-    cx, cz = obj["ground_xy_centroid"]
-    xp, zp = transform(cx, cz)
-    bearing = math.degrees(math.atan2(xp, zp))
-    in_fov = zp > 1e-9 and abs(bearing) <= FOV_HALF
-    dist_c = math.hypot(cx - px, cz - pz)
-
-    pts = obj["_points_xz"]
-    dn = np.hypot(pts[:, 0] - px, pts[:, 1] - pz)
-    dist_n = float(dn.min())
-
-    do_geo = nav is not None and geodesic
-    geo = nav.geodesic((0.0, 0.0), (cx, cz)) if do_geo else None
-    geo_end = nav.geodesic(endpos, (cx, cz)) if do_geo else None
-
-    return {"bearing_deg": bearing, "dist_centroid_m": dist_c,
-            "dist_nearest_m": dist_n, "dist_geodesic_m": geo_end,
-            "in_fov": bool(in_fov), "_geo_before": geo}
+def _attribute_full_contact(frame, physical):
+    contact = physical.get("contact")
+    if not contact:
+        return
+    # A missing or malformed world point degrades to an explicit
+    # unattributed contact rather than silently omitting the attribution
+    # fields (the GS oracle can return no obstacle geometry).
+    attr = _full_contact_attribution(frame, contact)
+    contact["full_geometry_attribution"] = copy.deepcopy(attr)
+    contact.update(attr)
+    # The contact anchor is the disc centre at the moment of contact, same
+    # as the depth oracle; the obstacle surface point stays in point_3d.
+    center = contact.get("center_local")
+    contact["xy"] = (
+        [float(center[0]), float(center[1])] if center is not None else None)
+    contact["point_3d"] = contact.get("world_point")
+    contact["pixel"] = None
+    contact["pixel_in_frame"] = False
 
 
-def object_relations(frame, pose_exec, pose_full, nav, geodesic=True) -> List[dict]:
-    ex_pos = (pose_exec[0], pose_exec[1])
-    fu_pos = (pose_full[0], pose_full[1])
-    rels = []
-    for obj in frame.objects:
-        exec_r = _relation_at(obj, ex_pos, pose_exec[2], nav, geodesic)
-        full_r = _relation_at(obj, fu_pos, pose_full[2], nav, geodesic)
-        geo_before = full_r.pop("_geo_before")
-        exec_r.pop("_geo_before")
-        d_geo = None
-        if geo_before is not None and full_r["dist_geodesic_m"] is not None:
-            d_geo = full_r["dist_geodesic_m"] - geo_before
-        rels.append({
-            "instance_id": obj["instance_id"], "category": obj["category"],
-            "exec": exec_r, "full": full_r,
-            "delta_full": {
-                "d_centroid_m": full_r["dist_centroid_m"] - obj["dist_centroid_m"],
-                "d_nearest_m": full_r["dist_nearest_m"] - obj["dist_nearest_m"],
-                "d_geodesic_m": d_geo,
-            },
-        })
-    return rels
-
-
-# --------------------------------------------------------------------------
-# visibility of the swept corridor
-# --------------------------------------------------------------------------
-
-def compute_visibility(acts, frame) -> dict:
-    path = A.sample_path(acts, config.MARCH_STEP_M)
-    n, seen = 0, 0
-    for i, (x, z, _h, _arc) in enumerate(path):
-        if i == 0:
-            continue
-        n += 1
-        uv = perception.project_ground((x, frame.floor_y + 0.5, z), frame.K)
-        if _in_frame(uv, frame.depth.shape):
-            u, v = int(round(uv[0])), int(round(uv[1]))
-            u = min(u, frame.depth.shape[1] - 1); v = min(v, frame.depth.shape[0] - 1)
-            if np.isfinite(frame.depth[v, u]) and frame.depth[v, u] > 0:
-                seen += 1
-    vdr = frame.quality.get("valid_depth_ratio", float(
-        (np.isfinite(frame.depth) & (frame.depth > 0)).mean()))
-    ratio = (seen / n) if n else 1.0
-    return {"visible_sweep_ratio": ratio,
-            "valid_depth_ratio": vdr,
-            "depth_hole_ratio": 1.0 - vdr,
-            "occlusion_free_ratio": ratio}
-
-
-# --------------------------------------------------------------------------
-# judge
-# --------------------------------------------------------------------------
-
-def judge(frame, body, acts, nav=None, geodesic=True) -> dict:
-    radius = body.radius_m
-    path = A.sample_path(acts, config.MARCH_STEP_M)
-
-    collided, arc, contact_xz = march_collision(frame.vf, path, radius)
-    pose_full = A.pose_after(acts)
-    pose_exec = A.pose_at_arc(acts, arc) if collided else pose_full
-    contact_ai, contact_local = A.contact_action_index(acts, arc) if collided else (None, None)
-
-    # contact block
-    if collided:
-        attr = OBJ.attribute_contact(frame.pts, frame.pts_sem, contact_xz, radius, frame.id_to_cat)
-        cx, cz = contact_xz
-        pt3d = (cx, frame.floor_y + 0.5, cz)
-        uv = perception.project_ground(pt3d, frame.K)
-        contact = {
-            "xy": [cx, cz], "point_3d": list(pt3d),
-            "pixel": list(uv) if uv is not None else None,
-            "pixel_in_frame": _in_frame(uv, frame.depth.shape),
+def _attribute_depth_contact(frame, body, estimate) -> dict:
+    center = estimate.get("center_local")
+    if center is not None:
+        attr = OBJ.attribute_contact(
+            frame.pts, frame.pts_sem, center, body.radius_m, frame.id_to_cat,
+            predicate_categories=frame.id_to_predicate_cat,
+            height_band=config.GROUND_OBSTACLE_BAND_M,
+            floor_plane=frame.floor_plane)
+        # Band midpoint above the floor *under the contact*, measured along
+        # the plane normal — the same signed-normal convention as the
+        # full-geometry probes — not above the plane's origin and not a
+        # vertical offset: on a tilted floor those are different places.
+        point = (center[0],
+                 frame.floor_plane.y_at(center[0], center[1]) +
+                 config.CONTACT_ATTRIBUTION_HEIGHT_M /
+                 float(frame.floor_plane.normal_local[1]),
+                 center[1])
+        pixel = perception.project_ground(
+            point, frame.K,
+            camera_height=frame.sensor.nominal_camera_offset_m)
+        estimate["contact"] = {
+            "xy": list(center), "point_3d": list(point),
+            "pixel": list(pixel) if pixel is not None else None,
+            "pixel_in_frame": bool(pixel is not None and 0 <= pixel[0] < frame.depth.shape[1]
+                                   and 0 <= pixel[1] < frame.depth.shape[0]),
+            "depth_mask_attribution": copy.deepcopy(attr),
             **attr,
         }
     else:
-        contact = None
+        estimate["contact"] = None
+    return estimate
 
-    view_exit = compute_view_exit(acts, frame, pose_full)
-    rels = object_relations(frame, pose_exec, pose_full, nav, geodesic)
-    vis = compute_visibility(acts, frame)
 
-    # nav cross-check (mesh)
-    nav_check = None
-    if nav is not None:
-        d_nav = nav.d_safe(acts, radius)
-        d_depth = arc if collided else config.D_MAX_M
-        nav_check = _nav_verdict(frame, acts, d_nav, d_depth, radius)
+def _view_estimate(frame, body, acts) -> dict:
+    return _attribute_depth_contact(
+        frame, body, rollout.view_collision_rollout(frame, acts, body.radius_m))
 
+
+def _stability_oracle_row(
+        frame, body, acts, nav, transform, *,
+        require_contact_instance_witness: bool = True) -> dict:
+    """Run the existing full/depth/corridor oracles at one SE(2) offset."""
+    base_pose = (
+        float(transform["x_m"]), float(transform["z_m"]),
+        float(transform["yaw_deg"]),
+    )
+    phase = collect_visible_space_phase(
+        frame, body, acts, nav, base_pose=base_pose,
+        require_contact_instance_witness=require_contact_instance_witness)
     return {
-        "body": body.to_dict(),
-        "actions": A.actions_to_dicts(acts),
-        "total_forward_m": A.total_forward_m(acts),
-        "net_turn_deg": A.net_turn_deg(acts),
-        "pose_end_full": {"x": pose_full[0], "z": pose_full[1], "heading_deg": pose_full[2]},
-        "collided": bool(collided),
-        "first_contact_arc_m": arc,
-        "contact_action_index": contact_ai,
-        "contact_action_local_arc_m": contact_local,
-        "pose_end_exec": {"x": pose_exec[0], "z": pose_exec[1], "heading_deg": pose_exec[2]},
-        "contact": contact,
-        "view_exit": view_exit,
-        "nav_check": nav_check,
-        "visibility": vis,
-        "object_relations": rels,
+        "physical": phase["physical"],
+        "depth_physical": phase["depth_physical"],
+        "corridor_coverage": phase["corridor_coverage"],
     }
 
 
-def _forward_cover(frame) -> float:
-    """Valid-depth fraction in the central-forward image window (where a wall /
-    furniture obstacle in the path would appear). Low => depth hole => can't be
-    sure depth didn't miss a real obstacle. Artifact-free (image-space, no ground
-    projection of close/low points)."""
-    H, W = frame.depth.shape
-    r0, r1 = int(0.25 * H), int(0.90 * H)     # eye-level down to lower band, skip ceiling
-    c0, c1 = int(0.30 * W), int(0.70 * W)     # central columns
-    win = frame.depth[r0:r1, c0:c1]
-    if win.size == 0:
-        return 1.0
-    return float((np.isfinite(win) & (win > 0)).mean())
+def collect_visible_space_phase(
+        frame, body, acts, nav, *, base_pose,
+        require_contact_instance_witness: bool = True) -> dict:
+    """Run one phase with nav physics and the original frame as evidence."""
+    physical_bundle = rollout.physical_rollout(nav, acts)
+    full = physical_bundle["physical"]
+    _attribute_full_contact(frame, full)
+    depth = _attribute_depth_contact(
+        frame, body, rollout.view_collision_rollout(
+            frame, acts, body.radius_m, base_pose=base_pose))
+    if full.get("contact") is not None:
+        full["contact"]["depth_mask_attribution"] = copy.deepcopy(
+            (depth.get("contact") or {}).get("depth_mask_attribution") or {})
+    coverage = rollout.corridor_coverage(
+        frame, acts, body.radius_m, base_pose=base_pose,
+        max_arc_m=rollout.realized_corridor_arc_m(full))
+    return {
+        "actions": A.actions_to_dicts(acts),
+        "execution": physical_bundle["execution"],
+        "checkpoints": physical_bundle["checkpoints"],
+        "physical": full,
+        "depth_physical": depth,
+        "corridor_coverage": float(coverage),
+        "consensus": oracle_consensus(
+            full, depth, coverage,
+            require_contact_instance_witness=
+                bool(require_contact_instance_witness)),
+        "base_pose": {
+            "x_m": float(base_pose[0]), "z_m": float(base_pose[1]),
+            "heading_deg": float(base_pose[2]),
+        },
+    }
 
 
-def _nav_verdict(frame, acts, d_nav, d_depth, radius, tol=config.NAV_AGREE_TOL_M) -> dict:
-    """Depth-vs-navmesh taxonomy for QA (GT collision stays depth-based).
+def _prepare_exact_face_identity_requests(frame, oracle_rows):
+    """Prepare exact A3 requests without crossing the semantic trust boundary."""
+    semantic_index = getattr(frame, "semantic_index", None)
+    confirm_batch = getattr(
+        semantic_index, "confirm_contact_instances", None)
+    identities = [None] * len(oracle_rows)
+    requests = []
+    request_indices = []
+    for index, oracle_inputs in enumerate(oracle_rows):
+        physical = oracle_inputs["physical"]
+        if physical.get("collision") is not True:
+            continue
+        rebuilt = oracle_consensus(
+            physical, oracle_inputs["depth_physical"],
+            oracle_inputs["corridor_coverage"],
+            require_contact_instance_witness=True)
+        instance_id = rebuilt.get("full_contact_instance_id")
+        point = (physical.get("contact") or {}).get("world_point")
+        if (rebuilt.get("accepted") is not True or instance_id is None or
+                point is None or not callable(confirm_batch)):
+            identities[index] = {
+                "confirmed": False,
+                "reason": "contact_face_authority_unavailable",
+                "instance_id": None,
+            }
+            continue
+        request_indices.append(index)
+        geometry_element_index = (
+            physical.get("contact") or {}).get("geometry_element_index")
+        requests.append(
+            (int(instance_id), point, int(geometry_element_index))
+            if geometry_element_index is not None else
+            (int(instance_id), point))
+    return identities, request_indices, requests, confirm_batch
 
-    Uses artifact-free signals: the frame's own obstacle voxel field (same frame
-    as march_collision) and forward-cone valid-depth coverage -- NOT the old
-    pixel-projection of a floor point that spuriously fell below the frame.
 
-    diff = d_depth - d_nav:
-      |diff| <= tol                    -> keep_agree       (green) navmesh ~= depth
-      diff > 0  & forward view covered -> keep_depth        (green) navmesh conservative, trust depth
-      diff > 0  & forward depth hole   -> review_depth_hole (yellow) possible miss -> human check
-      diff < 0  & solid depth obstacle -> keep_visible      (green) depth saw a real obstacle
-      diff < 0  & weak/isolated support-> discard_noise     (red) depth noise -> drop
+def _exact_face_identities_for_oracle_inputs(frame, oracle_rows) -> list:
+    """Legacy one-outcome exact attribution, retained as the fallback."""
+    identities, request_indices, requests, confirm_batch = (
+        _prepare_exact_face_identity_requests(frame, oracle_rows))
+    if not requests:
+        return identities
+    try:
+        confirmed = confirm_batch(requests)
+    except (KeyError, TypeError, ValueError) as error:
+        confirmed = [{
+            "confirmed": False,
+            "reason": "contact_face_query_failed",
+            "instance_id": None,
+            "error": str(error),
+        } for _request in requests]
+    if len(confirmed) != len(requests):
+        raise ValueError("batched contact identity results are misaligned")
+    for index, identity in zip(request_indices, confirmed):
+        identities[index] = identity
+    return identities
+
+
+def collect_a_stability_rows(sim, frame, body, acts,
+                             nominal_outcome: dict, *,
+                             require_contact_instance_witness: bool = True
+                             ) -> list[dict]:
+    """Materialize the seven frozen SE(2) rerollout rows, without A3 lookup.
+
+    The initial RGB-D frame remains the evidence frame for every perturbation.
+    Habitat navmesh physics is rebound to the perturbed world origin; depth and
+    corridor checks use the matching ``base_pose`` against that original frame.
     """
-    diff = d_depth - d_nav
-    fwd_cover = _forward_cover(frame)
-    support = None
+    rows = []
+    for index, perturbation in enumerate(R2R_A_STABILITY_PERTURBATIONS):
+        transform = {
+            "x_m": float(perturbation["x_m"]),
+            "z_m": float(perturbation["z_m"]),
+            "yaw_deg": float(perturbation["yaw_deg"]),
+        }
+        local = np.array([[transform["x_m"], 0.0, transform["z_m"]]])
+        world_position = perception.world_from_local(
+            local, frame.position, frame.yaw_rad)[0]
+        world_yaw = (
+            float(frame.yaw_rad) - math.radians(transform["yaw_deg"]))
+        nav = sim.nav(world_position, world_yaw)
+        oracle_inputs = record_fields.json_value(_stability_oracle_row(
+            frame, body, acts, nav, transform,
+            require_contact_instance_witness=
+                require_contact_instance_witness))
+        if index == 0:
+            nominal_coverage = float(
+                (nominal_outcome.get("evidence") or {}).get(
+                    "physical", {})["coverage"])
+            nominal_physical = record_fields.json_value(
+                nominal_outcome.get("physical") or {})
+            nominal_depth = record_fields.json_value(
+                nominal_outcome.get("depth_physical") or {})
+            if (oracle_inputs["physical"] !=
+                    nominal_physical or
+                    oracle_inputs["depth_physical"] !=
+                    nominal_depth or
+                    abs(oracle_inputs["corridor_coverage"] -
+                        nominal_coverage) > 1e-12):
+                raise ValueError(
+                    "fresh nominal rerollout disagrees with nominal outcome")
+        rows.append({
+            "perturbation_id": str(perturbation["id"]),
+            "transform": transform,
+            **oracle_inputs,
+        })
+    return rows
 
-    if A.total_forward_m(acts) <= 1e-9:             # pure rotation: no translation, trivially safe
-        verdict, keep = "keep_agree", True
-    elif abs(diff) <= tol:
-        verdict, keep = "keep_agree", True
-    elif diff > 0:                                  # navmesh stops earlier than depth
-        if fwd_cover >= config.FWD_COVER_MIN:
-            verdict, keep = "keep_depth", True       # depth observed clear -> trust depth
-        else:
-            verdict, keep = "review_depth_hole", False
-    else:                                           # depth stops earlier (implies collided)
-        hit = A.pose_at_arc(acts, d_depth)
-        support = int(frame.vf.support_count((hit[0], hit[1]), radius))
-        if support >= config.NAV_STRONG_SUPPORT:
-            verdict, keep = "keep_visible", True
-        else:
-            verdict, keep = "discard_noise", False
 
-    return {"d_nav_m": float(d_nav), "d_depth_m": float(d_depth), "diff_m": float(diff),
-            "fwd_cover": float(fwd_cover), "support_at_hit": support,
-            "verdict": verdict, "keep": bool(keep)}
+def deferred_a_stability_certificate(
+        frame, acts, rows, outcome: dict, *,
+        exact_contact_identity: bool = True,
+        require_contact_instance_witness: bool = True) -> dict:
+    """Describe one certificate whose exact A3 identity is pose-batched later."""
+    return {
+        "frame": frame,
+        "actions": A.actions_to_dicts(acts),
+        "rows": rows,
+        "outcome": outcome,
+        "exact_contact_identity": bool(exact_contact_identity),
+        "require_contact_instance_witness": bool(
+            require_contact_instance_witness),
+    }
+
+
+def _runtime_authority_binding(semantic_index):
+    """Type the already-authenticated runtime identity source, if present."""
+    semantic_sha256 = getattr(
+        semantic_index, "_semantic_ply_sha256", None)
+    scene_sha256 = getattr(
+        semantic_index, "_scene_authority_sha256", None)
+    gs_sha256 = getattr(
+        semantic_index, "geometry_authority_sha256", None)
+    gs_semantic_sha256 = getattr(
+        semantic_index, "semantic_source_sha256", None)
+    if semantic_sha256 is not None and scene_sha256 is None:
+        return dataset_contracts.AuthorityBinding(
+            source_dataset="r2r",
+            identity_schema="mp3d-contact-face-identity.v1",
+            authoritative_source_role="semantic",
+            source_sha256=str(semantic_sha256),
+        )
+    if scene_sha256 is not None and semantic_sha256 is None:
+        return dataset_contracts.AuthorityBinding(
+            source_dataset="b1k",
+            identity_schema="b1k-contact-triangle-identity.v1",
+            authoritative_source_role="scene_authority",
+            source_sha256=str(scene_sha256),
+        )
+    if (gs_sha256 is not None and gs_semantic_sha256 is not None and
+            semantic_sha256 is None and scene_sha256 is None):
+        return dataset_contracts.AuthorityBinding(
+            source_dataset="gs",
+            identity_schema=gs_semantic.VISIBLE_CONTACT_IDENTITY_SCHEMA,
+            authoritative_source_role="source_bundle",
+            source_sha256=str(gs_sha256),
+            semantic_source_sha256=str(gs_semantic_sha256),
+        )
+    return None
+
+
+def finalize_a_stability_certificates(pending) -> None:
+    """Resolve exact A3 identities once per semantic index and attach certs.
+
+    The successful path combines requests from every surviving outcome at a
+    pose. If that combined query raises a legacy query exception or returns a
+    misaligned result, each outcome is replayed through the retained legacy
+    helper. This construction preserves the old outcome-wide failure payload
+    and error text while keeping the common path batched.
+    """
+    entries = list(pending)
+    prepared = {}
+    groups = {}
+    for entry_index, entry in enumerate(entries):
+        rows = entry["rows"]
+        if not entry["exact_contact_identity"]:
+            prepared[entry_index] = [None] * len(rows)
+            _A_STABILITY_BATCH_DIAGNOSTICS[
+                "exact_identity_skipped_certificates"] += 1
+            continue
+        identities, request_indices, requests, confirm_batch = (
+            _prepare_exact_face_identity_requests(entry["frame"], rows))
+        prepared[entry_index] = identities
+        if not requests:
+            continue
+        semantic_index = getattr(entry["frame"], "semantic_index", None)
+        key = id(semantic_index)
+        group = groups.setdefault(key, {
+            "confirm": confirm_batch,
+            "members": [],
+            "requests": [],
+            "scatter": [],
+        })
+        member_index = len(group["members"])
+        group["members"].append(entry_index)
+        for row_index, request in zip(request_indices, requests):
+            group["requests"].append(request)
+            group["scatter"].append((member_index, row_index))
+
+    for group in groups.values():
+        requests = group["requests"]
+        _A_STABILITY_BATCH_DIAGNOSTICS["combined_query_batches"] += 1
+        _A_STABILITY_BATCH_DIAGNOSTICS[
+            "combined_query_requests"] += len(requests)
+        try:
+            confirmed = group["confirm"](requests)
+            if len(confirmed) != len(requests):
+                raise ValueError(
+                    "batched contact identity results are misaligned")
+        except (KeyError, TypeError, ValueError):
+            # The old helper is both the differential reference and the exact
+            # error-semantics fallback. One bad outcome cannot poison siblings.
+            _A_STABILITY_BATCH_DIAGNOSTICS[
+                "combined_query_fallbacks"] += 1
+            _A_STABILITY_BATCH_DIAGNOSTICS[
+                "legacy_outcome_replays"] += len(group["members"])
+            for entry_index in group["members"]:
+                entry = entries[entry_index]
+                prepared[entry_index] = (
+                    _exact_face_identities_for_oracle_inputs(
+                        entry["frame"], entry["rows"]))
+            continue
+        for (member_index, row_index), identity in zip(
+                group["scatter"], confirmed):
+            entry_index = group["members"][member_index]
+            prepared[entry_index][row_index] = identity
+
+    for entry_index, entry in enumerate(entries):
+        for row, identity in zip(entry["rows"], prepared[entry_index]):
+            row["exact_contact_identity"] = identity
+        entry["outcome"]["shared_oracle_stability"] = (
+            build_a_stability_certificate(
+                entry["actions"], entry["rows"],
+                authority_binding=_runtime_authority_binding(
+                    entry["frame"].semantic_index),
+                require_contact_instance_witness=entry[
+                    "require_contact_instance_witness"]))
+        _A_STABILITY_BATCH_DIAGNOSTICS[
+            "certificates_finalized"] += 1
+
+
+def collect_a_stability_certificate(sim, frame, body, acts,
+                                    nominal_outcome: dict, *,
+                                    exact_contact_identity: bool = True,
+                                    require_contact_instance_witness: bool = True
+                                    ) -> dict:
+    """Compatibility wrapper for callers that materialize one certificate.
+
+    ``exact_contact_identity=False`` skips the complete-face A3 attribution.
+    That pass feeds only ``contact_instance_*`` in the summary; A1/A2 stability
+    still comes from all seven rerollouts. Such a certificate is diagnostic and
+    must not be published as A3 ground truth.
+    """
+    rows = collect_a_stability_rows(
+        sim, frame, body, acts, nominal_outcome,
+        require_contact_instance_witness=require_contact_instance_witness)
+    outcome = {}
+    finalize_a_stability_certificates([
+        deferred_a_stability_certificate(
+            frame, acts, rows, outcome,
+            exact_contact_identity=exact_contact_identity,
+            require_contact_instance_witness=
+                require_contact_instance_witness)
+    ])
+    return outcome["shared_oracle_stability"]
+
+
+def judge(frame, body, acts, nav=None, *, target_ids=None,
+          cached_physical=None, cached_depth_physical=None,
+          cached_corridor_coverage=None,
+          cached_oracle_consensus=None,
+          require_contact_instance_witness: bool = False) -> dict:
+    """Predict structured consequences for one body-action query."""
+    targets = (OBJ.eligible_target_ids(frame) if target_ids is None
+               else list(target_ids))
+    physical = copy.deepcopy(cached_physical) if cached_physical is not None \
+        else rollout.physical_rollout(nav, acts)
+    _attribute_full_contact(frame, physical["physical"])
+    checkpoints = physical["checkpoints"]
+    future_view = rollout.future_view_rollout(frame, checkpoints, targets)
+    execution = physical["execution"]
+    view_estimate = (copy.deepcopy(cached_depth_physical)
+                     if cached_depth_physical is not None else
+                     _view_estimate(frame, body, acts))
+    if cached_depth_physical is not None:
+        _attribute_depth_contact(frame, body, view_estimate)
+    view_collision = view_estimate["collision"]
+    full_contact = physical["physical"].get("contact")
+    depth_contact = view_estimate.get("contact")
+    if full_contact is not None:
+        full_contact["depth_mask_attribution"] = copy.deepcopy(
+            (depth_contact or {}).get("depth_mask_attribution") or {})
+    coverage = (float(cached_corridor_coverage)
+                if cached_corridor_coverage is not None else
+                rollout.corridor_coverage(
+                    frame, acts, body.radius_m,
+                    max_arc_m=rollout.realized_corridor_arc_m(
+                        physical["physical"])))
+    # A precheck runs before semantic attribution. Under the frozen R2R v16
+    # contract it therefore cannot authorize a collision candidate: rebuild
+    # the final consensus after both attribution paths have been materialized.
+    if require_contact_instance_witness:
+        consensus = oracle_consensus(
+            physical["physical"], view_estimate, coverage,
+            require_contact_instance_witness=True)
+    elif cached_oracle_consensus is not None:
+        consensus = copy.deepcopy(cached_oracle_consensus)
+    else:
+        consensus = oracle_consensus(
+            physical["physical"], view_estimate, coverage)
+    evidence = {
+        "physical": {
+            "status": "sufficient" if coverage >= config.EVIDENCE_COVERAGE_MIN else "insufficient",
+            "coverage": coverage,
+            "coverage_protocol": rollout.EVIDENCE_PROTOCOL_VERSION,
+            "view_collision_estimate": view_collision,
+        },
+        "future_view": {
+            "status": (
+                "not_computed" if future_view["status"] != "computed" else
+                "insufficient" if future_view.get("objects_entering_view") or
+                not future_view.get("initial_depth_reprojection_agrees", False)
+                else "sufficient"),
+            "source_frame": "initial",
+        },
+    }
+    result = {
+        "body": body.to_dict(),
+        "actions": A.actions_to_dicts(acts),
+        "execution": execution,
+        "checkpoints": checkpoints,
+        "physical": physical["physical"],
+        "depth_physical": view_estimate,
+        "oracle_consensus": consensus,
+        "future_view": future_view,
+        "evidence": evidence,
+        "provenance": {
+            "physical_oracle": physical["physical"]["authority"],
+            "sensor_profile": frame.sensor.to_dict(),
+            "camera_height_above_visible_floor_m":
+                frame.camera_height_above_visible_floor_m,
+            "checkpoint_progress": list(config.CHECKPOINT_PROGRESS),
+        },
+    }
+    return result

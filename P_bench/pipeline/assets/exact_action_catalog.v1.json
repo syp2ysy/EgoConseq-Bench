@@ -1,0 +1,18 @@
+{
+  "schema": "exact-action-catalog.v1",
+  "anchors": [
+    {"tag": "K1-00", "actions": [{"type": "forward", "m": 1.5}]},
+    {"tag": "K1-01", "actions": [{"type": "forward", "m": 3.0}]},
+    {"tag": "K1-02", "actions": [{"type": "forward", "m": 2.0}]},
+    {"tag": "K2-01", "actions": [{"type": "forward", "m": 2.5}, {"type": "turn", "deg": 15.0}]},
+    {"tag": "K2-02", "actions": [{"type": "forward", "m": 2.0}, {"type": "turn", "deg": -30.0}]},
+    {"tag": "K3-01", "actions": [{"type": "forward", "m": 2.0}, {"type": "turn", "deg": 30.0}, {"type": "forward", "m": 3.0}]},
+    {"tag": "K3-02", "actions": [{"type": "forward", "m": 2.5}, {"type": "turn", "deg": -45.0}, {"type": "forward", "m": 0.5}]},
+    {"tag": "K4-02", "actions": [{"type": "forward", "m": 3.0}, {"type": "turn", "deg": 45.0}, {"type": "forward", "m": 2.0}, {"type": "turn", "deg": -30.0}]},
+    {"tag": "K5-01", "actions": [{"type": "forward", "m": 3.0}, {"type": "turn", "deg": -45.0}, {"type": "forward", "m": 1.0}, {"type": "turn", "deg": 45.0}, {"type": "forward", "m": 1.0}]},
+    {"tag": "K5-02", "actions": [{"type": "forward", "m": 1.0}, {"type": "turn", "deg": -30.0}, {"type": "forward", "m": 1.5}, {"type": "turn", "deg": -30.0}, {"type": "forward", "m": 0.5}]},
+    {"tag": "K5-03", "actions": [{"type": "forward", "m": 1.5}, {"type": "turn", "deg": -15.0}, {"type": "forward", "m": 1.5}, {"type": "turn", "deg": 30.0}, {"type": "forward", "m": 1.0}]},
+    {"tag": "K6-00", "actions": [{"type": "forward", "m": 2.5}, {"type": "turn", "deg": 15.0}, {"type": "forward", "m": 2.0}, {"type": "turn", "deg": -30.0}, {"type": "forward", "m": 0.5}, {"type": "turn", "deg": 30.0}]},
+    {"tag": "K6-02", "actions": [{"type": "forward", "m": 2.5}, {"type": "turn", "deg": -15.0}, {"type": "forward", "m": 1.5}, {"type": "turn", "deg": 30.0}, {"type": "forward", "m": 2.0}, {"type": "turn", "deg": -45.0}]}
+  ]
+}

@@ -1,0 +1,122 @@
+{
+  "schema": "egoconseq.golden-manifest.v1",
+  "status": "superseded",
+  "superseded_by": "docs/golden/2026-08-05-r2r-abc-v10-24qa.json",
+  "superseded_reason": "Its three input shards are conseq.v9. The active record schema is conseq.v10, whose validator rejects the retired v9 fields outright rather than adapting them, so this manifest can no longer be rebuilt or re-validated. Kept as the provenance record for the artifact that was frozen on 2026-08-04.",
+  "name": "r2r-abc-45qa",
+  "frozen_at": "2026-08-05T04:14:05-04:00",
+  "purpose": "Superseded provenance record. This is NOT a runnable gate: rebuilding it fails at check_records with 'validation context schema version is unsupported'. Candidate-v2 normalization gate. Any later cleanup batch must recompile the complete registered output inventory byte-identically from these inputs.",
+  "git": {
+    "master": "ebe50a0360c2b444bd63f7fb9e79d0d7e0e28b7a",
+    "master_subject": "Merge ABC-only R2R candidate pipeline (v16)",
+    "merged_branch_tip": "b642517620a1553865cdfd8fbcd938b025b5a4da",
+    "d_prototype_tag": "014ca7cecc3d822720547817464f1bd0746a1e55",
+    "wip_archive": {
+      "tag": "archive/viewer-paper-taxonomy-wip-2026-08-04",
+      "commit": "037f252b199768871528e43d512d4f4dfee67da6"
+    }
+  },
+  "inputs": [
+    {
+      "shard": "data/candidate_pool/v16_vertical_slice_20260804_9bd8894/records/r2r/main-safe-r00",
+      "records.jsonl": "b810b4330177da400cd8ce74d5ec8ab800269f2f61c0ec56f30ee91a177d5539",
+      "run_meta.json": "9e6f9fea1acf3a3abd07f15d37c8fec170896c14344861557bdc06fe94c03d73",
+      "collection_funnel.json": "d83df5fbdddac952d9fe8c119fd19099c07191ae9e101eccdb2a1db332abcec2",
+      "record_count": 1
+    },
+    {
+      "shard": "data/candidate_pool/v16_targeted_preview_20260804_9bd8894/records/r2r/main-a3-visible-r01",
+      "records.jsonl": "ee9795f1a1c0193a493df5beaf16e89dc61cb40a0bb27d8f8b11bf2332a68472",
+      "run_meta.json": "ed7a797083036bace28fc6e14ade6fb2d566c1797eb47bcac38bd94abfe64524",
+      "collection_funnel.json": "8f2d02b7460f9514325a60c9ecfdb25caa3bdc74f43c8e59838e6423b856dfb1",
+      "record_count": 1
+    },
+    {
+      "shard": "data/candidate_pool/v16_targeted_preview_20260804_9bd8894/records/r2r/main-c1-known-endturn-matched-r00",
+      "records.jsonl": "db96c94bf8b09c16a2621dda9dbd60338c36a6782fda890dbeb3255b192c9538",
+      "run_meta.json": "0cf3e105e48e52f06c9c5b8961452df381d8367294e6872c2d6301b8fdc0df6b",
+      "collection_funnel.json": "4830bbbd3ac7fcfa5f265159f177305a84253b9938190348173ec923fd27ebdb",
+      "record_count": 1
+    }
+  ],
+  "run_dir": "data/candidate_pool/v16_abc_preview_20260804_clean_r04",
+  "outputs_sha256": {
+    "candidate_qa/benchmark.json": "a4f81ed6df7bf5ca41ee83ec03891127a21a840fcd6f61374098bc6bf0795693",
+    "candidate_qa/private/answers.jsonl": "0f0043358b0cbfd0bc79af7281f34c65a3f64908c02190346b734a316d2524b1",
+    "candidate_qa/private/atoms.jsonl": "50cf176ec3b996fb4d7475577d0172916ce82477646150778f9e5aa236e01be4",
+    "candidate_qa/private/manifest.json": "f1e3ba3dd898d7af6da9c44e79ae23ef07c7142c00253caa1764814e48eee99a",
+    "candidate_qa/private/record_contexts.jsonl": "01234c430df3c7f2d3982437be71c51488c6296f4c817efb81c96f33c8d59cf0",
+    "candidate_qa/private/source_map.json": "f003bc71c39c19a4179be3f7edf47d5fc6a307fd6a40ee8f0f4a0ca8dc89efe3",
+    "candidate_qa/public/images/0e9fbb4ac1cd74f1eb0105f3476d8fb8f26b603521b36d4bf0e921e36e4accfc.png": "0e9fbb4ac1cd74f1eb0105f3476d8fb8f26b603521b36d4bf0e921e36e4accfc",
+    "candidate_qa/public/images/24ddaced30c60e52ca8ddbb8bdf88df616e44370fb6be68ffb0cb00379392de2.png": "24ddaced30c60e52ca8ddbb8bdf88df616e44370fb6be68ffb0cb00379392de2",
+    "candidate_qa/public/images/6a842f498e7ef3c29f0badd0652b3fe66ef5e87273d99235d6fc1d1d768891b3.png": "6a842f498e7ef3c29f0badd0652b3fe66ef5e87273d99235d6fc1d1d768891b3",
+    "candidate_qa/public/images/754a7d464fb98c8bb6a1c44109968b9a49dd156c95fb0cc5b233494f7d7380ea.png": "754a7d464fb98c8bb6a1c44109968b9a49dd156c95fb0cc5b233494f7d7380ea",
+    "candidate_qa/public/images/a1837d835ce51a71814f0ebbd58a92154a30768e634286c60284b8ea68aa54e4.png": "a1837d835ce51a71814f0ebbd58a92154a30768e634286c60284b8ea68aa54e4",
+    "candidate_qa/public/images/adc1f6bb1ffe5694d664ca78da710a5fd8658532bc2aae79887f72a36f199ab7.png": "adc1f6bb1ffe5694d664ca78da710a5fd8658532bc2aae79887f72a36f199ab7",
+    "candidate_qa/public/images/d8bf1199e724dfb180101bcfb1440528c97d28007e825f037d0c59a0273724c3.png": "d8bf1199e724dfb180101bcfb1440528c97d28007e825f037d0c59a0273724c3",
+    "candidate_qa/public/images/f20ba952cdb07a1dc25d9ddb840c538ed2c60969dae7c5415ddc29d36d1ff9d9.png": "f20ba952cdb07a1dc25d9ddb840c538ed2c60969dae7c5415ddc29d36d1ff9d9",
+    "candidate_qa/public/images/f8f04adf99ac6101a0e710e2e164497ee23998db2bfd626b90bdaabb0d9a9625.png": "f8f04adf99ac6101a0e710e2e164497ee23998db2bfd626b90bdaabb0d9a9625",
+    "candidate_qa/public/items.jsonl": "21c38f83b794a978b24c6866b16e339c69907352133a6ef980ce876d2bfdb49e",
+    "candidate_qa/public/manifest.json": "6ab95a2fda8d3dd075b33c2b8315f0d6389f63228f46c5ccf4be2c3948c57124",
+    "candidate_qa/report.json": "61fe75155930770ad34a3bf3fce11ddc7834a7b5c962d59565fd45c45066c4b9",
+    "candidate_qa_report/index.html": "8ea4ddddaf33a7bb9cc46ab88b0c8b3b736a0fbc684ab73664d7cd03fb65e485"
+  },
+  "coverage": {
+    "A1_collision": 18,
+    "A2_collision_step_grounding": 7,
+    "A3_contact_object": 8,
+    "B1_endpoint_distance": 2,
+    "B2_endpoint_direction": 4,
+    "C1_future_view_selection": 6
+  },
+  "total_items": 45,
+  "candidate_only": true,
+  "headline_eligible": false,
+  "gt_as_pred": {
+    "overall": 1.0,
+    "num_items": 45,
+    "verified_on": "ebe50a0360c2b444bd63f7fb9e79d0d7e0e28b7a"
+  },
+  "verify_commands": [
+    "python scripts/eval_benchmark.py --benchmark data/candidate_pool/v16_abc_preview_20260804_clean_r04/candidate_qa --gt-as-pred   # overall must be 1.0",
+    "python -m pytest -q",
+    "python -m compileall -q pipeline scripts"
+  ],
+  "known_gaps": [
+    "report.json records collection_funnel: null because the original r04 build did not pass --collection-funnel. The per-shard collection_funnel.json digests are frozen under inputs instead. Future runs should pass the flag.",
+    "scripts/build_v16_candidate_preview.py derives expected_sha256 from the gate file itself, so the explicit --future-view-gate path is self-certifying. Scheduled for the threat-model convergence stage: add a mandatory --future-view-gate-sha256."
+  ],
+  "required_gate": {
+    "path": "docs/golden/assets/c1_future_view_gate.oracle-demo.v1.json",
+    "sha256": "25eada1b051df22fdec156096ab5fdb45fbe466f9714d76263d499bb6fd30398",
+    "note": "Tracked copy of the oracle-only calibrated C1 appearance gate. The original lived under data/ which .gitignore excludes, so the golden gate depended on a file any cleanup could delete."
+  },
+  "build_argv": [
+    "python",
+    "scripts/build_v16_candidate_preview.py",
+    "--records",
+    "data/candidate_pool/v16_vertical_slice_20260804_9bd8894/records/r2r/main-safe-r00/records.jsonl",
+    "--run-meta-sha256",
+    "9e6f9fea1acf3a3abd07f15d37c8fec170896c14344861557bdc06fe94c03d73",
+    "--records",
+    "data/candidate_pool/v16_targeted_preview_20260804_9bd8894/records/r2r/main-a3-visible-r01/records.jsonl",
+    "--run-meta-sha256",
+    "ed7a797083036bace28fc6e14ade6fb2d566c1797eb47bcac38bd94abfe64524",
+    "--records",
+    "data/candidate_pool/v16_targeted_preview_20260804_9bd8894/records/r2r/main-c1-known-endturn-matched-r00/records.jsonl",
+    "--run-meta-sha256",
+    "0cf3e105e48e52f06c9c5b8961452df381d8367294e6872c2d6301b8fdc0df6b",
+    "--output",
+    "<OUT>/candidate_qa",
+    "--report",
+    "<OUT>/candidate_qa_report",
+    "--future-view-gate",
+    "docs/golden/assets/c1_future_view_gate.oracle-demo.v1.json"
+  ],
+  "build_argv_note": "--records / --run-meta-sha256 are positional-order-sensitive and must be repeated in exactly this order. --main-max-items-per-task is NOT used. --collection-funnel is NOT used, which is why report.json records collection_funnel: null.",
+  "reproduction": {
+    "verified_at": "2026-08-04T12:06:04-04:00",
+    "verified_on_commit": "5b7d11d7bb2dd37dfec1cf74630b4b2c58c088b4",
+    "result": "19/19 output files byte-identical; coverage 18/7/8/2/4/6 reproduced"
+  }
+}

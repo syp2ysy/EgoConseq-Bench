@@ -1,0 +1,127 @@
+{
+  "build_argv": [
+    "python",
+    "scripts/build_v16_candidate_preview.py",
+    "--records",
+    "data/candidate_pool/v10_abc_golden_20260805_f52ea66/records/r2r/main-safe-r00/records.jsonl",
+    "--run-meta-sha256",
+    "70d80450c673312faca4d5cd04473e58f7f8ea280f135ae246d25a6ae10f20ca",
+    "--records",
+    "data/candidate_pool/v10_abc_golden_20260805_f52ea66/records/r2r/main-a3-visible-r01/records.jsonl",
+    "--run-meta-sha256",
+    "159e0ee93112bcf99718d76dc9cf9a83cbf47ce954d57c92020fe6faaeeb4c36",
+    "--records",
+    "data/candidate_pool/v10_abc_golden_20260805_f52ea66/records/r2r/main-b-visible-r00/records.jsonl",
+    "--run-meta-sha256",
+    "c21fc7f81a558cc20f2736731064dcd64abbe04710751b69b6e2a98ff3ffa6eb",
+    "--records",
+    "data/candidate_pool/v10_abc_golden_20260805_f52ea66/records/r2r/main-c1-known-endturn-matched-r00/records.jsonl",
+    "--run-meta-sha256",
+    "61f5ebc396d0d8a84a22195106580788bd33374eeab49ecb4f3ee8a6a74c9eeb",
+    "--output",
+    "<OUT>/candidate_qa",
+    "--report",
+    "<OUT>/candidate_qa_report",
+    "--collection-funnel",
+    "data/candidate_pool/v10_abc_golden_20260805_f52ea66/records/r2r/main-safe-r00/collection_funnel.json",
+    "--future-view-gate",
+    "docs/golden/assets/c1_future_view_gate.oracle-demo.v1.json"
+  ],
+  "build_argv_note": "Records and run-meta digests are positional-order-sensitive. The representative safe-shard funnel is embedded in report.json; all four authoritative funnel digests are frozen under inputs.",
+  "candidate_only": true,
+  "collection_inputs_sha256": {
+    "data/candidate_pool/v10_abc_golden_20260805_f52ea66/a3_visible_contact_actions.json": "75f4fe3c5bbf681f1030485dc1866760d9f9e43bfe25fb60f651b1319dc9df04",
+    "data/candidate_pool/v10_abc_golden_20260805_f52ea66/b_pose_exclusions.json": "e654850d43c454378bb3c1d28022501073f5dd19ae2633495ad00a23c6cc81e8",
+    "data/candidate_pool/v10_abc_golden_20260805_f52ea66/b_target_actions.json": "dddd4b452455858b7dad8ddd9973fc51922aad0ba534ee0b47990257d94be4f5",
+    "data/candidate_pool/v10_abc_golden_20260805_f52ea66/c1_endturn_actions.json": "852ee16ca5c29a5fa587a1b024f765c85aaac43f7f76c92be28cf52190c1d175",
+    "data/candidate_pool/v10_abc_golden_20260805_f52ea66/pose_pool/r2r/a3/pose_pool_manifest.json": "41dfb04ae3cf8b96e6411a58537a4164ea5e8281eae5704da1e2a50b0758dcdc",
+    "data/candidate_pool/v10_abc_golden_20260805_f52ea66/pose_pool/r2r/safe-c1/pose_pool_manifest.json": "0116c7f6c51236f3263b3e0d676a19f8e2fca79f5964bca37ec5ca9d02782f7a"
+  },
+  "coverage": {
+    "A1_collision": 10,
+    "A2_collision_step_grounding": 2,
+    "A3_contact_object": 2,
+    "B1_endpoint_distance": 2,
+    "B2_endpoint_direction": 2,
+    "C1_future_view_selection": 6
+  },
+  "frozen_at": "2026-08-05T05:18:22-04:00",
+  "git": {
+    "pre_d_removal_tag": "abc-only-checkpoint-2026-08-05",
+    "record_code_revision": "f52ea66c7400a8653b463fc59a4eefd6a9917e58",
+    "record_code_subject": "fix: enforce authenticated setting policy"
+  },
+  "gt_as_pred": {
+    "num_items": 24,
+    "overall": 1.0,
+    "verified_on": "f52ea66c7400a8653b463fc59a4eefd6a9917e58"
+  },
+  "headline_eligible": false,
+  "inputs": [
+    {
+      "collection_funnel.json": "47bf8fda59f1533ccb2e3a764783e03869b78c4160d130255f0198ef8f089872",
+      "record_count": 1,
+      "records.jsonl": "a6296d1c4646066cc6a5eb7243d61a28c4ba1fba9f0ccb02e83a92b7d335019d",
+      "run_meta.json": "70d80450c673312faca4d5cd04473e58f7f8ea280f135ae246d25a6ae10f20ca",
+      "shard": "data/candidate_pool/v10_abc_golden_20260805_f52ea66/records/r2r/main-safe-r00"
+    },
+    {
+      "collection_funnel.json": "0744211fa1d7c5327cb46c312ef351d7b0d5f5adf08b50621d30c146e21e1b39",
+      "record_count": 1,
+      "records.jsonl": "c7a2c369fbe7c9a219c87033ffa6d29a9f2e3acba2c54e48d9c0601f718861f1",
+      "run_meta.json": "159e0ee93112bcf99718d76dc9cf9a83cbf47ce954d57c92020fe6faaeeb4c36",
+      "shard": "data/candidate_pool/v10_abc_golden_20260805_f52ea66/records/r2r/main-a3-visible-r01"
+    },
+    {
+      "collection_funnel.json": "4bd6aebf24d5e481b0350e97b36ca1dd1b8c183bc57494c71246022f798c14b5",
+      "record_count": 1,
+      "records.jsonl": "8885509abad9580bbbdc645704e8c2006c57a678155cea7c62d2ce1db5c61a1e",
+      "run_meta.json": "c21fc7f81a558cc20f2736731064dcd64abbe04710751b69b6e2a98ff3ffa6eb",
+      "shard": "data/candidate_pool/v10_abc_golden_20260805_f52ea66/records/r2r/main-b-visible-r00"
+    },
+    {
+      "collection_funnel.json": "4118dd8f1e395759e80c538d614dbc562ae95c01cbfb78542d95e7e91e0ea286",
+      "record_count": 1,
+      "records.jsonl": "a558d46326d84094bc1b00321990661882853d7e4c52df9a86bfb42a85ec6972",
+      "run_meta.json": "61f5ebc396d0d8a84a22195106580788bd33374eeab49ecb4f3ee8a6a74c9eeb",
+      "shard": "data/candidate_pool/v10_abc_golden_20260805_f52ea66/records/r2r/main-c1-known-endturn-matched-r00"
+    }
+  ],
+  "name": "r2r-abc-v10-24qa",
+  "outputs_sha256": {
+    "candidate_qa/benchmark.json": "f288f1adcb5211dd76d1efe6b2367f9ea7ff06e0aabc05d0882b290aeef8deb2",
+    "candidate_qa/private/answers.jsonl": "78831dc55591f6a648ad91d2696d181bf4507f524ba641bfca06996f4794c6b3",
+    "candidate_qa/private/atoms.jsonl": "448d8e6573ddc0128a239e607d63678e76cd9f4f981ea6d67ac42f9aaaf017d9",
+    "candidate_qa/private/manifest.json": "797ab4d3216ad1bde3043be7c8a25e2ec8280da2e8a0f82d5b4d935289c1f55f",
+    "candidate_qa/private/record_contexts.jsonl": "fe80e0b5ce8e369f7bf83ba3dfe999951680abf09e334f763a77d363bdf31ab4",
+    "candidate_qa/private/source_map.json": "62c29f4fd75dca456aa30d552e913932b426436cb01b5fb0a40b3556799c2c2d",
+    "candidate_qa/public/images/0e9fbb4ac1cd74f1eb0105f3476d8fb8f26b603521b36d4bf0e921e36e4accfc.png": "0e9fbb4ac1cd74f1eb0105f3476d8fb8f26b603521b36d4bf0e921e36e4accfc",
+    "candidate_qa/public/images/24ddaced30c60e52ca8ddbb8bdf88df616e44370fb6be68ffb0cb00379392de2.png": "24ddaced30c60e52ca8ddbb8bdf88df616e44370fb6be68ffb0cb00379392de2",
+    "candidate_qa/public/images/6a842f498e7ef3c29f0badd0652b3fe66ef5e87273d99235d6fc1d1d768891b3.png": "6a842f498e7ef3c29f0badd0652b3fe66ef5e87273d99235d6fc1d1d768891b3",
+    "candidate_qa/public/images/754a7d464fb98c8bb6a1c44109968b9a49dd156c95fb0cc5b233494f7d7380ea.png": "754a7d464fb98c8bb6a1c44109968b9a49dd156c95fb0cc5b233494f7d7380ea",
+    "candidate_qa/public/images/a1837d835ce51a71814f0ebbd58a92154a30768e634286c60284b8ea68aa54e4.png": "a1837d835ce51a71814f0ebbd58a92154a30768e634286c60284b8ea68aa54e4",
+    "candidate_qa/public/images/adc1f6bb1ffe5694d664ca78da710a5fd8658532bc2aae79887f72a36f199ab7.png": "adc1f6bb1ffe5694d664ca78da710a5fd8658532bc2aae79887f72a36f199ab7",
+    "candidate_qa/public/images/d8bf1199e724dfb180101bcfb1440528c97d28007e825f037d0c59a0273724c3.png": "d8bf1199e724dfb180101bcfb1440528c97d28007e825f037d0c59a0273724c3",
+    "candidate_qa/public/images/f20ba952cdb07a1dc25d9ddb840c538ed2c60969dae7c5415ddc29d36d1ff9d9.png": "f20ba952cdb07a1dc25d9ddb840c538ed2c60969dae7c5415ddc29d36d1ff9d9",
+    "candidate_qa/public/images/f8f04adf99ac6101a0e710e2e164497ee23998db2bfd626b90bdaabb0d9a9625.png": "f8f04adf99ac6101a0e710e2e164497ee23998db2bfd626b90bdaabb0d9a9625",
+    "candidate_qa/public/items.jsonl": "8a7de66ea6afc48d260cab44792aaaf873774e0108034fe6cf80d165bd728009",
+    "candidate_qa/public/manifest.json": "88f4e8d214c2795b134c175f6e350071c79cfd7fa286fa64d14a85fa25701cf6",
+    "candidate_qa/report.json": "3a46a07f0df777a657c832cf4140a2deb67d9e2436faf4a8399c3a3a750793e4",
+    "candidate_qa_report/index.html": "50a472e9eb949c7934f7156a64194c90ae47354f1499ec10654bb3f49e9fa60b"
+  },
+  "purpose": "Strict conseq.v10 recollection gate for the six active ABC tasks after removal of D, Q-family, generic projection, probe, and review-only record branches.",
+  "reproduction": {
+    "result": "Two independent rebuilds: 19/19 output files byte-identical; coverage 10/2/2/2/2/6; four shards clean; gt-as-pred 1.0",
+    "verified_at": "2026-08-05T05:22:47-04:00"
+  },
+  "required_gate": {
+    "path": "docs/golden/assets/c1_future_view_gate.oracle-demo.v1.json",
+    "sha256": "25eada1b051df22fdec156096ab5fdb45fbe466f9714d76263d499bb6fd30398"
+  },
+  "run_dir": "data/candidate_pool/v10_abc_golden_20260805_f52ea66",
+  "schema": "egoconseq.golden-manifest.v1",
+  "status": "superseded",
+  "superseded_by": "docs/golden/2026-08-05-r2r-abc-v11-24qa.json",
+  "superseded_reason": "conseq.v11 retired the v10 selection shape: the per-run action_bank_sha256 became a per-pose materialized_action_bank_sha256, and the action-sampling policy is now authorized by the run contract. These records cannot be revalidated without an adapter, which the project does not carry.",
+  "total_items": 24
+}

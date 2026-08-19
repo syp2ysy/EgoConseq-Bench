@@ -1,0 +1,99 @@
+{
+  "status": "superseded",
+  "superseded_by": "docs/golden/2026-08-14-r2r-gs-b1k-abc-golden.json",
+  "superseded_reason": "Replaced by the compact three-dataset six-task regression gate.",
+  "build_argv": [
+    "python",
+    "scripts/build_v16_candidate_preview.py",
+    "--records",
+    "data/candidate_pool/r2r_counterfactual_c1_golden_20260811/records/r2r/main-r00/records.jsonl",
+    "--run-meta-sha256",
+    "86f61f4d291888133e3eb3eb63af7ae14539d1de92b30e611786d3de6352cabc",
+    "--output",
+    "<OUT>/candidate_qa",
+    "--report",
+    "<OUT>/candidate_qa_report",
+    "--source-authority-manifest",
+    "docs/golden/2026-08-11-r2r-abc-v11-counterfactual-c1-47qa.json"
+  ],
+  "build_argv_note": "The active replay uses two current-format R2R records whose ordinary outcome bank covers A1/A2/A3/B1/B2 and whose independently certified counterfactual neighbors produce C1. No strict/matched selector or future-view gate participates.",
+  "candidate_only": true,
+  "collection_inputs_sha256": {},
+  "coverage": {
+    "A1_collision": 4,
+    "A2_collision_step_grounding": 9,
+    "A3_contact_object": 22,
+    "B1_endpoint_distance": 6,
+    "B2_endpoint_direction": 5,
+    "C1_future_view_selection": 1
+  },
+  "frozen_at": "2026-08-12T19:31:02-04:00",
+  "git": {
+    "builder_code_revision": "5cbcca106c10f11accb7f4ff41ae20b2a7b7d1bc",
+    "builder_code_subject": "feat: finalize GS collision catalog smoke path",
+    "builder_worktree_dirty": true,
+    "builder_worktree_note": "Reviewed authority, provenance, controller-recovery, and public B target-geometry protocol fixes staged atop b514f7a",
+    "record_code_revision": "f18b801afdb0b6ebf6661755c1fb915fd522435e"
+  },
+  "gt_as_pred": {
+    "num_items": 47,
+    "overall": 1.0,
+    "six_task_macro": 1.0,
+    "verified_on": "2026-08-12T19:31:02-04:00"
+  },
+  "headline_eligible": false,
+  "inputs": [
+    {
+      "collection_funnel.json": "7badd5d6c69d2e6325a20eb78378ebfc7a4ab2a1661a7e76b0fa1cfdfaaa5cff",
+      "record_count": 2,
+      "records.jsonl": "6ef3eb1f60b251fffc8ec5d6e62dc81bd35dfd9dcefd9d21f334708696b56c85",
+      "run_meta.json": "86f61f4d291888133e3eb3eb63af7ae14539d1de92b30e611786d3de6352cabc",
+      "shard": "data/candidate_pool/r2r_counterfactual_c1_golden_20260811/records/r2r/main-r00"
+    }
+  ],
+  "name": "r2r-abc-v11-counterfactual-c1-v2-20260812",
+  "outputs_sha256": {
+    "candidate_qa/benchmark.json": "675a56d67df4ca9e6610fb2451a053fbe8cff63e387cd665d19316d005a4353e",
+    "candidate_qa/private/answers.jsonl": "567d7248e275d83f96d924b42b7cb5f1abf411a3f7596d02b86eb5604989004d",
+    "candidate_qa/private/atoms.jsonl": "0f5a8d8c01d0bd3d1346f31c6570c013e7ea2660c3a5561a5ba9365c72dd2533",
+    "candidate_qa/private/manifest.json": "8301fdb7aa41ff99767eb79b98d1bfcacf05d565e21d4f518101b5533883a7e2",
+    "candidate_qa/private/record_contexts.jsonl": "97a55decd19ec3e7c8f6830330fced2d2d2c5df0ab727327bcdfda7252de9db4",
+    "candidate_qa/private/source_map.json": "5abf4e9d1fe86d270c7d5229687dbe62cf1af6ccd282a2ff905bc36b2c2b2579",
+    "candidate_qa/public/images/0401bd79b46be74655d3344504dba5f9c3b1f9cc0349dbe5749bf6c64fa51ce6.png": "0401bd79b46be74655d3344504dba5f9c3b1f9cc0349dbe5749bf6c64fa51ce6",
+    "candidate_qa/public/images/0e4b20d8877e6af3e85b5bb25528d927d2a3d236854958acbb899fe3bef44358.png": "0e4b20d8877e6af3e85b5bb25528d927d2a3d236854958acbb899fe3bef44358",
+    "candidate_qa/public/images/a581ab9fa9351be34df9e53d25c57a61c0038faa23628d9faab0f6e70ac302ad.png": "a581ab9fa9351be34df9e53d25c57a61c0038faa23628d9faab0f6e70ac302ad",
+    "candidate_qa/public/images/bb843ebf606d16a34721b3db1a01e8b8776d06a1b28dbb9522de1f5019f1613c.png": "bb843ebf606d16a34721b3db1a01e8b8776d06a1b28dbb9522de1f5019f1613c",
+    "candidate_qa/public/images/bd3182f9865a92445908f64da45ebd19177c24d651c79229041b42a24366cecc.png": "bd3182f9865a92445908f64da45ebd19177c24d651c79229041b42a24366cecc",
+    "candidate_qa/public/images/c4bc793ba8e07390c9140c7c09a6f1d03c1f692a6cd5187f76140c68e2b8c6bd.png": "c4bc793ba8e07390c9140c7c09a6f1d03c1f692a6cd5187f76140c68e2b8c6bd",
+    "candidate_qa/public/items.jsonl": "58231d923fce584a30f8d60988faa3f8b6edaf9004b333e07c2f78f503147860",
+    "candidate_qa/public/manifest.json": "badde0d1c6f6ced4c25a1fa4a2e3af2b672aca2572d1ecda5436d695b40c04a0",
+    "candidate_qa/report.json": "b036791fbb29b17cf00ae649cd4a021cb2b51f44ad9957e9bb397f3af13b1cd0",
+    "candidate_qa_report/index.html": "cd0add8aa47576da46ba761c3414178d25b0d5d678b917e8ee8a4b539d22ad1f"
+  },
+  "purpose": "Active deterministic regression gate for all six ABC1 tasks with counterfactual C1 v2 and an explicit public target-geometry protocol on B items. This two-record fixture is not a sampling source and does not establish C1 scientific readiness; appearance and motion shortcut quality remain separately audited.",
+  "reproduction": {
+    "result": "The active source-bound rebuild contains 47 items over all six tasks, discloses each B target-geometry protocol, uses counterfactual C1 v2 with generator provenance and query-conditioned generator priority, and replays at gt-as-pred 1.0 with six-task macro 1.0.",
+    "verified_at": "2026-08-12T19:31:02-04:00"
+  },
+  "run_dir": "data/candidate_pool/r2r_counterfactual_c1_golden_20260811",
+  "schema": "egoconseq.golden-manifest.v1",
+  "semantic_diff_from_superseded": {
+    "changed_non_image_outputs": [
+      "candidate_qa/benchmark.json",
+      "candidate_qa/private/answers.jsonl",
+      "candidate_qa/private/manifest.json",
+      "candidate_qa/public/items.jsonl",
+      "candidate_qa/public/manifest.json"
+    ],
+    "details": [
+      "Each public B item now names the target_geometry_protocol used to derive its answer, so R2R/B1K complete-source geometry and GS visible-depth anchors cannot be mistaken for one authority.",
+      "Private input audit paths now use record-relative or deterministic derivative identities, so rebuilding the same source in another checkout produces identical bytes.",
+      "Answer labels, private GT atoms, images, actions, task coverage, source bindings, and the collection funnel remain unchanged."
+    ],
+    "image_outputs_changed": false,
+    "superseded_manifest": "docs/golden/2026-08-11-r2r-abc-v11-counterfactual-c1-v2-b-protocol-superseded.json",
+    "superseded_manifest_sha256": "7f1918dad37dd256ea38b09964364e2cd6b475ddfa1665c89dfb658ab4f056fe",
+    "unchanged_output_count": 11
+  },
+  "total_items": 47
+}

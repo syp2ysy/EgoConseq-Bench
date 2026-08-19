@@ -1,10 +1,67 @@
 """Object extraction + contact attribution tests (pure numpy)."""
 
+import dataclasses
+
 import numpy as np
+import pytest
 
 from pipeline import config, perception, objects
+from pipeline.gs_semantic import BboxSemanticIndex
+from tests._synthetic import LEVEL_FLOOR, make_frame
 
 K = config.intrinsics()
+
+
+class _OverheadOnlyTargetIndex:
+    def instance_points(self, instance_id: int) -> np.ndarray:
+        if int(instance_id) != 7:
+            return np.empty((0, 3), dtype=np.float64)
+        return np.array([
+            [0.0, 1.00, -2.0],
+            [0.2, 1.10, -2.0],
+        ], dtype=np.float64)
+
+
+def _gs_target_frame(category="chair"):
+    frame = make_frame()
+    target = dict(frame.objects[0], category=category, mask_area_px=20)
+    surface_points = np.array([
+        [-0.20, 0.10, -2.00],
+        [-0.10, 0.15, -2.00],
+        [0.00, 0.20, -2.00],
+        [0.10, 0.25, -2.00],
+        [0.20, 0.30, -2.00],
+    ], dtype=np.float64)
+    index = BboxSemanticIndex(
+        mins=np.array([[-0.5, 0.05, -2.2]]),
+        maxs=np.array([[0.5, 0.30, -1.8]]),
+        ids=np.array([7]),
+        id_to_cat={7: category},
+        surface_points=surface_points,
+    )
+    return dataclasses.replace(
+        frame, semantic_index=index, objects=[target])
+
+
+def test_eligible_target_requires_full_scene_ground_support_points():
+    frame = make_frame()
+    target = dict(frame.objects[0], mask_area_px=20)
+    frame = dataclasses.replace(
+        frame, semantic_index=_OverheadOnlyTargetIndex(), objects=[target])
+
+    assert objects.eligible_target_ids(frame) == []
+
+
+def test_eligible_target_accepts_gs_index_with_full_ground_support_points():
+    assert objects.eligible_target_ids(_gs_target_frame()) == [7]
+
+
+@pytest.mark.parametrize(
+    "category",
+    ["misc", " MISC ", "unknown", "unlabeled", "other", "objects"],
+)
+def test_eligible_target_rejects_non_specific_semantic_categories(category):
+    assert objects.eligible_target_ids(_gs_target_frame(category)) == []
 
 
 def _synth_frame_arrays(semantic):
@@ -85,3 +142,137 @@ def test_attribute_ignores_unlabelled_zero():
     sem = np.array([0] * 20 + [9] * 5)
     r = objects.attribute_contact(pts, sem, (0.0, 1.0), radius=0.1, id_to_cat={9: "lamp"})
     assert r["instance_id"] == 9
+
+
+def test_attribute_height_band_excludes_floor_and_overhang():
+    # Contact disk at (0,1): 20 floor points (y=0), 3 knee-height obstacle points
+    # (y=0.3), 2 table-top overhang points (y=1.0). All inside the xz disk.
+    floor = np.tile([0.0, 0.0, 1.0], (20, 1))     # id 3
+    obstacle = np.tile([0.0, 0.3, 1.0], (3, 1))   # id 7
+    overhang = np.tile([0.0, 1.0, 1.0], (2, 1))   # id 11
+    pts = np.vstack([floor, obstacle, overhang])
+    sem = np.array([3] * 20 + [7] * 3 + [11] * 2)
+    id_to_cat = {3: "floor", 7: "chair", 11: "table"}
+
+    # No band (legacy default): floor points win by count -> wrong attribution.
+    no_band = objects.attribute_contact(pts, sem, (0.0, 1.0), radius=0.1, id_to_cat=id_to_cat)
+    assert no_band["instance_id"] == 3
+
+    # Tall body band (0.05, 1.5): floor excluded, real obstacle wins.
+    tall = objects.attribute_contact(pts, sem, (0.0, 1.0), radius=0.1,
+                                     id_to_cat=id_to_cat, height_band=(0.05, 1.5),
+                                     floor_plane=LEVEL_FLOOR)
+    assert tall["instance_id"] == 7
+
+    # Short body band top 0.5: the 1.0 m table overhang is out of reach and excluded.
+    short = objects.attribute_contact(pts, sem, (0.0, 1.0), radius=0.1,
+                                      id_to_cat=id_to_cat, height_band=(0.05, 0.5),
+                                      floor_plane=LEVEL_FLOOR)
+    assert short["instance_id"] == 7
+    assert "11" not in short["votes"]
+
+
+def test_attribute_height_band_ignores_non_blocking_ground_coverings():
+    pts = np.array([
+        [0.0, 0.08, 1.0],
+        [0.01, 0.08, 1.0],
+        [0.0, 0.18, 1.02],
+    ])
+    sem = np.array([4, 4, 7])
+
+    result = objects.attribute_contact(
+        pts, sem, (0.0, 1.0), radius=0.1,
+        id_to_cat={4: "rug", 7: "chair"},
+        height_band=config.GROUND_OBSTACLE_BAND_M,
+        floor_plane=LEVEL_FLOOR)
+
+    assert result["instance_id"] == 7
+    assert result["category"] == "chair"
+
+
+def test_b1k_raw_categories_drive_predicates_but_machine_labels_are_stored():
+    """Catches WordNet synsets bypassing raw structural/contact exclusions."""
+    pts = np.array([
+        [0.00, 0.10, 1.00], [0.02, 0.10, 1.00],
+        [0.00, 0.10, 1.20], [0.02, 0.10, 1.20],
+    ])
+    uv = np.array([[1, 1], [2, 1], [1, 2], [2, 2]])
+    sem = np.array([3, 3, 7, 7])
+    machine = {3: "floor.n.01", 7: "chair.n.01"}
+    raw = {3: "floor", 7: "straight_chair"}
+
+    extracted = objects.extract_objects(
+        pts, uv, sem, machine, predicate_categories=raw,
+        min_area_px=1, min_valid=1)
+
+    assert [value["category"] for value in extracted] == [
+        "floor.n.01", "chair.n.01"]
+    assert [value["is_structural"] for value in extracted] == [True, False]
+    assert [value["_predicate_category"] for value in extracted] == [
+        "floor", "straight_chair"]
+    attributed = objects.attribute_contact(
+        pts, sem, (0.01, 1.0), 0.1, machine,
+        predicate_categories=raw, height_band=(0.05, 0.30),
+        floor_plane=LEVEL_FLOOR)
+    assert attributed["instance_id"] == 7
+    assert attributed["category"] == "chair.n.01"
+    assert "3" not in attributed["votes"]
+
+
+def test_partial_predicate_category_map_falls_back_per_instance():
+    """Catches one raw-label entry erasing unrelated machine categories."""
+    points = np.array([[0.0, 0.15, 1.0], [0.01, 0.15, 1.0]])
+    result = objects.attribute_contact(
+        points, np.array([7, 7]), (0.0, 1.0), 0.1,
+        {7: "chair.n.01"}, predicate_categories={3: "floor"},
+        height_band=config.GROUND_OBSTACLE_BAND_M,
+        floor_plane=LEVEL_FLOOR)
+
+    assert result["instance_id"] == 7
+    assert result["category"] == "chair.n.01"
+
+
+def test_initial_visible_entity_inventory_marks_only_duplicate_categories():
+    """Catches unique entities being marked or duplicate names being ambiguous."""
+    record = {
+        "objects": [
+            {"instance_id": 9, "category": "chair", "centroid_px": [90, 20]},
+            {"instance_id": 3, "category": "table", "centroid_px": [30, 40]},
+            {"instance_id": 7, "category": "chair", "centroid_px": [70, 25]},
+        ],
+    }
+
+    assert objects.initial_visible_entity_inventory(record) == [
+        {
+            "choice_id": "entity_7", "instance_id": 7,
+            "category": "chair", "name": "chair 1",
+            "marker": {"kind": "numbered_dot", "number": 1,
+                       "center_xy": [70.0, 25.0]},
+        },
+        {
+            "choice_id": "entity_9", "instance_id": 9,
+            "category": "chair", "name": "chair 2",
+            "marker": {"kind": "numbered_dot", "number": 2,
+                       "center_xy": [90.0, 20.0]},
+        },
+        {
+            "choice_id": "entity_3", "instance_id": 3,
+            "category": "table", "name": "table", "marker": None,
+        },
+    ]
+
+
+def test_initial_visible_entity_inventory_is_deterministic_and_gt_blind():
+    """Catches candidate order being inherited from an answer-aware caller."""
+    first = {
+        "objects": [
+            {"instance_id": 11, "category": "chair", "centroid_px": [1, 2]},
+            {"instance_id": 5, "category": "chair", "centroid_px": [3, 4]},
+        ],
+    }
+    second = {"objects": list(reversed(first["objects"]))}
+
+    assert objects.initial_visible_entity_inventory(first) == \
+        objects.initial_visible_entity_inventory(second)
+    assert [value["instance_id"] for value in
+            objects.initial_visible_entity_inventory(first)] == [5, 11]
