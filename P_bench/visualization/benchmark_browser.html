@@ -1,0 +1,1449 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>EgoConseq Benchmark Atlas</title>
+  <style>
+    :root {
+      --paper: #f4f3ef;
+      --surface: #ffffff;
+      --ink: #182028;
+      --muted: #64707b;
+      --line: #d9dcd9;
+      --line-strong: #aeb5b6;
+      --a: #245c99;
+      --a-open: #e8f0f8;
+      --b: #a66b12;
+      --b-open: #f8eedb;
+      --c: #60783b;
+      --c-open: #eef2e7;
+      --focus: #1b65a6;
+      --mono: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+      --sans: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+        "Segoe UI", sans-serif;
+    }
+
+    * { box-sizing: border-box; }
+    html { color-scheme: light; }
+    body {
+      margin: 0;
+      background: var(--paper);
+      color: var(--ink);
+      font: 14px/1.5 var(--sans);
+    }
+    button, input, select { font: inherit; }
+    button { color: inherit; }
+    button:focus-visible, input:focus-visible, select:focus-visible {
+      outline: 3px solid rgba(27, 101, 166, .25);
+      outline-offset: 2px;
+    }
+    .visually-hidden {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      white-space: nowrap;
+      border: 0;
+    }
+
+    .topbar {
+      position: sticky;
+      top: 0;
+      z-index: 20;
+      display: grid;
+      grid-template-columns: minmax(260px, 1fr) auto minmax(260px, 1fr);
+      align-items: center;
+      min-height: 68px;
+      padding: 0 32px;
+      background: rgba(255, 255, 255, .96);
+      border-bottom: 1px solid var(--line);
+    }
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      min-width: 0;
+    }
+    .brand-mark {
+      display: grid;
+      grid-template-columns: repeat(3, 6px);
+      gap: 3px;
+      flex: none;
+    }
+    .brand-mark i { width: 6px; height: 6px; background: var(--line-strong); }
+    .brand-mark i:nth-child(1), .brand-mark i:nth-child(4) { background: var(--a); }
+    .brand-mark i:nth-child(5), .brand-mark i:nth-child(8) { background: var(--b); }
+    .brand-mark i:nth-child(3), .brand-mark i:nth-child(9) { background: var(--c); }
+    .brand strong { display: block; font-size: 15px; letter-spacing: -.01em; }
+    .brand span { display: block; color: var(--muted); font-size: 12px; }
+    .tabs { display: flex; align-self: stretch; }
+    .tab {
+      position: relative;
+      min-width: 104px;
+      padding: 0 18px;
+      border: 0;
+      background: transparent;
+      color: var(--muted);
+      cursor: pointer;
+      font-weight: 600;
+    }
+    .tab::after {
+      content: "";
+      position: absolute;
+      right: 18px;
+      bottom: -1px;
+      left: 18px;
+      height: 3px;
+      background: transparent;
+    }
+    .tab[aria-selected="true"] { color: var(--ink); }
+    .tab[aria-selected="true"]::after { background: var(--a); }
+    .mode-wrap { justify-self: end; }
+    .mode-button {
+      padding: 8px 12px;
+      border: 1px solid var(--line-strong);
+      background: var(--surface);
+      cursor: pointer;
+      font-size: 12px;
+      font-weight: 650;
+    }
+    body.is-review .mode-button { border-color: var(--a); color: var(--a); }
+
+    main { max-width: 1440px; margin: 0 auto; padding: 34px 32px 72px; }
+    .split-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin-bottom: 24px; }
+    .split-bar[hidden] { display: none; }
+    .split-controls { display: flex; flex-wrap: wrap; gap: 6px; }
+    .split-button { padding: 8px 13px; border: 1px solid var(--line-strong); background: var(--surface); cursor: pointer; }
+    .split-button[aria-pressed="true"] { background: var(--a); border-color: var(--a); color: white; }
+    .split-note { color: var(--muted); font-size: 12px; }
+    .qa-links { display: flex; flex-wrap: wrap; gap: 12px; }
+    .view[hidden] { display: none; }
+    .view-heading {
+      display: flex;
+      align-items: end;
+      justify-content: space-between;
+      gap: 24px;
+      margin-bottom: 22px;
+    }
+    h1, h2, h3, p { margin-top: 0; }
+    h1 { margin-bottom: 4px; font-size: clamp(25px, 3vw, 38px); letter-spacing: -.035em; }
+    h2 { margin-bottom: 14px; font-size: 18px; letter-spacing: -.015em; }
+    h3 { margin-bottom: 4px; font-size: 14px; }
+    .lede { max-width: 760px; margin-bottom: 0; color: var(--muted); }
+    .data-link { color: var(--a); font-family: var(--mono); font-size: 12px; }
+
+    .kpis {
+      display: grid;
+      grid-template-columns: repeat(6, minmax(0, 1fr));
+      margin-bottom: 28px;
+      background: var(--surface);
+      border: 1px solid var(--line);
+    }
+    .kpi { min-width: 0; padding: 17px 20px; border-right: 1px solid var(--line); }
+    .kpi:last-child { border-right: 0; }
+    .kpi-value {
+      display: block;
+      font: 700 clamp(22px, 2.4vw, 32px)/1.1 var(--mono);
+      letter-spacing: -.04em;
+    }
+    .kpi-label { display: block; margin-top: 6px; color: var(--muted); font-size: 12px; }
+
+    .evidence-grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1.25fr) minmax(320px, .75fr);
+      gap: 18px;
+      margin-bottom: 18px;
+    }
+    #direction-coverage { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    #direction-coverage .matrix { min-width: 0; }
+    .panel {
+      min-width: 0;
+      padding: 20px;
+      background: var(--surface);
+      border: 1px solid var(--line);
+    }
+    .panel-head {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 16px;
+      margin-bottom: 16px;
+    }
+    .panel-head h2 { margin-bottom: 0; }
+    .denominator { color: var(--muted); font: 11px var(--mono); }
+
+    .matrix-wrap { overflow-x: auto; }
+    .matrix {
+      width: 100%;
+      min-width: 520px;
+      border-collapse: separate;
+      border-spacing: 4px;
+    }
+    .matrix th { padding: 4px 7px; color: var(--muted); font-size: 11px; font-weight: 650; }
+    .matrix th:first-child { text-align: left; }
+    .matrix-cell {
+      width: 100%;
+      min-height: 43px;
+      border: 1px solid rgba(36, 92, 153, .18);
+      background: var(--cell, #eef2f5);
+      cursor: pointer;
+      font: 650 12px var(--mono);
+    }
+    .matrix-task {
+      border: 0;
+      background: transparent;
+      cursor: pointer;
+      font-weight: 750;
+    }
+    .family-a { color: var(--a); }
+    .family-b { color: var(--b); }
+    .family-c { color: var(--c); }
+    .domain-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 18px; margin-bottom: 28px; }
+    .domain-card { text-align: left; cursor: pointer; border-top: 3px solid var(--family-color); }
+    .domain-card:hover { background: #fafbf9; }
+    .domain-card h2 { margin-bottom: 4px; }
+    .domain-description { margin: 4px 0 10px; color: var(--muted); font-size: 12px; }
+    .domain-count { color: var(--family-color); font: 700 12px var(--mono); }
+    .benchmark-intro { max-width: 1040px; margin-bottom: 24px; }
+    .benchmark-intro p { margin-bottom: 10px; }
+    .guide-group { margin-bottom: 18px; border-top: 3px solid var(--family-color); }
+    .guide-row { display: grid; grid-template-columns: 220px minmax(0, 1fr) 110px; gap: 22px; padding: 18px 0; border-top: 1px solid var(--line); }
+    .guide-row p { margin: 5px 0 0; }
+    .guide-name { padding: 0; border: 0; background: none; text-align: left; color: var(--family-color); font-weight: 750; cursor: pointer; }
+    .guide-answer, .guide-english { color: var(--muted); font-size: 12px; }
+    .guide-count { text-align: right; font: 650 13px/1.8 var(--mono); }
+    .section-heading { margin: 30px 0 18px; }
+    .parameter-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 18px; margin-bottom: 18px; }
+
+    .bar-list { display: grid; gap: 10px; }
+    .bar-row {
+      display: grid;
+      grid-template-columns: minmax(80px, 160px) 1fr 108px;
+      align-items: center;
+      gap: 10px;
+      width: 100%;
+      padding: 0;
+      border: 0;
+      background: transparent;
+      text-align: left;
+    }
+    button.bar-row { cursor: pointer; }
+    .bar-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .bar-track { height: 9px; background: #edf0ef; }
+    .bar-fill { display: block; height: 100%; background: var(--a); }
+    .bar-value { text-align: right; font: 12px var(--mono); }
+    .scene-list { max-height: 364px; overflow: auto; padding-right: 4px; }
+    .scene-list .bar-row { grid-template-columns: minmax(120px, 230px) 1fr 108px; }
+    .scene-list .bar-fill { background: #77848c; }
+
+    .checkpoint-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 24px;
+    }
+    .checkpoint-grid h3 { margin-bottom: 11px; color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .05em; }
+    .process-explainer { display: grid; gap: 12px; }
+    .process-step { display: grid; grid-template-columns: 30px 1fr; gap: 10px; align-items: start; }
+    .process-step strong { display: grid; place-items: center; width: 26px; height: 26px; background: var(--a-open); color: var(--a); font: 700 11px var(--mono); }
+    .process-step span { color: var(--muted); font-size: 12px; }
+
+    .notes {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 1px;
+      margin-top: 18px;
+      border: 1px solid var(--line);
+      background: var(--line);
+    }
+    .note { min-height: 90px; padding: 16px; background: var(--surface); }
+    .note strong { display: block; margin-bottom: 5px; font-size: 13px; }
+    .note span { color: var(--muted); font-size: 12px; }
+
+    .family-section { margin: 0 0 34px; }
+    .family-heading {
+      display: grid;
+      grid-template-columns: 56px 1fr;
+      align-items: baseline;
+      padding-bottom: 10px;
+      border-bottom: 2px solid var(--family-color);
+    }
+    .family-letter { color: var(--family-color); font: 750 28px var(--mono); }
+    .family-heading h2 { margin: 0; font-size: 20px; }
+    .taxonomy-row {
+      display: grid;
+      grid-template-columns: 220px minmax(0, 1fr);
+      gap: 22px;
+      padding: 22px 0;
+      border-bottom: 1px solid var(--line);
+    }
+    .task-id { color: var(--family-color); font: 750 24px var(--mono); }
+    .task-count { color: var(--muted); font: 12px var(--mono); }
+    .task-copy p { margin: 7px 0; color: var(--muted); }
+    .task-meta { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px; }
+    .chip {
+      display: inline-flex;
+      align-items: center;
+      min-height: 25px;
+      padding: 3px 8px;
+      border: 1px solid var(--line);
+      background: #f8f9f7;
+      color: #4e5962;
+      font: 11px var(--mono);
+    }
+    .examples { display: grid; grid-column: 1 / -1; grid-template-columns: repeat(3, minmax(0, 1fr)); align-items: start; gap: 14px; }
+
+    .filters {
+      position: sticky;
+      top: 68px;
+      z-index: 10;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin: 0 -1px 20px;
+      padding: 12px;
+      background: rgba(244, 243, 239, .96);
+      border: 1px solid var(--line);
+    }
+    .filter-control { min-width: 128px; max-width: 100%; }
+    .filter-control label { display: block; margin: 0 0 3px 1px; color: var(--muted); font-size: 10px; }
+    .filter-control select, .search {
+      width: 100%;
+      height: 34px;
+      padding: 5px 9px;
+      border: 1px solid var(--line-strong);
+      border-radius: 0;
+      background: var(--surface);
+    }
+    .search-wrap { flex: 1 1 250px; }
+    .reset-button {
+      align-self: end;
+      height: 34px;
+      padding: 0 12px;
+      border: 1px solid var(--line-strong);
+      background: transparent;
+      cursor: pointer;
+    }
+    .result-line {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 16px;
+      margin-bottom: 12px;
+    }
+    .result-count { font: 13px var(--mono); }
+    .page-note { color: var(--muted); font-size: 12px; }
+    .case-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); align-items: start; gap: 14px; }
+    .case-card {
+      min-width: 0;
+      overflow: hidden;
+      background: var(--surface);
+      border: 1px solid var(--line);
+      border-top: 3px solid var(--family-color);
+    }
+    .case-image-button { display: block; width: 100%; padding: 0; border: 0; background: #e9ebea; cursor: pointer; }
+    .case-image-button img { display: block; width: 100%; aspect-ratio: 4/3; object-fit: cover; }
+    .case-body { padding: 14px; }
+    .case-top { display: flex; align-items: start; justify-content: space-between; gap: 12px; }
+    .case-task { color: var(--family-color); font: 750 13px var(--mono); }
+    .case-source { color: var(--muted); font: 10px var(--mono); text-transform: uppercase; overflow-wrap: anywhere; }
+    .case-domain { margin: 4px 0; color: var(--family-color); font-size: 11px; }
+    .case-id { margin: 4px 0 10px; color: var(--muted); font: 10px var(--mono); overflow-wrap: anywhere; }
+    .case-question {
+      margin-bottom: 12px;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+    }
+    .case-actions {
+      margin: 0 0 12px;
+      color: var(--ink);
+      font: 11px/1.55 var(--mono);
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+    }
+    .case-meta { display: flex; flex-wrap: wrap; gap: 5px; }
+    .answer {
+      display: none;
+      margin-top: 12px;
+      padding: 10px 12px;
+      border-left: 3px solid var(--family-color, var(--a));
+      background: #f5f7f8;
+    }
+    .field-label, .answer-label { display: block; margin-bottom: 2px; color: var(--muted); font: 650 9px var(--mono); letter-spacing: .06em; text-transform: uppercase; }
+    .answer-value { color: var(--ink); font-weight: 750; white-space: pre-wrap; overflow-wrap: anywhere; }
+    .review-only { display: none; }
+    body.is-review .answer, body.is-review .review-only { display: block; }
+    .open-button {
+      width: 100%;
+      margin-top: 12px;
+      padding: 8px 10px;
+      border: 1px solid var(--line-strong);
+      background: transparent;
+      cursor: pointer;
+      font-weight: 650;
+    }
+    .pagination { display: flex; justify-content: center; align-items: center; gap: 10px; margin-top: 24px; }
+    .pagination button { padding: 8px 13px; border: 1px solid var(--line-strong); background: var(--surface); cursor: pointer; }
+    .pagination button:disabled { opacity: .4; cursor: default; }
+    .empty { padding: 64px 24px; background: var(--surface); border: 1px solid var(--line); text-align: center; color: var(--muted); }
+
+    dialog {
+      width: min(1120px, calc(100vw - 32px));
+      max-height: calc(100vh - 32px);
+      padding: 0;
+      border: 1px solid var(--line-strong);
+      background: var(--surface);
+      color: var(--ink);
+    }
+    dialog::backdrop { background: rgba(20, 27, 32, .68); }
+    .dialog-head {
+      position: sticky;
+      top: 0;
+      z-index: 2;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 14px 18px;
+      background: var(--surface);
+      border-bottom: 1px solid var(--line);
+    }
+    .dialog-title { font: 700 14px var(--mono); }
+    .dialog-close { width: 34px; height: 34px; border: 1px solid var(--line); background: transparent; cursor: pointer; font-size: 20px; }
+    .dialog-content { padding: 20px; }
+    .dialog-images { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin-bottom: 22px; }
+    .dialog-image:first-child { grid-column: span 2; grid-row: span 2; }
+    .dialog-image { position: relative; aspect-ratio: 4 / 3; background: #e9ebea; }
+    .dialog-image img { display: block; width: 100%; height: 100%; min-height: 150px; object-fit: contain; }
+    .image-label { position: absolute; top: 7px; left: 7px; padding: 3px 6px; background: rgba(255,255,255,.94); font: 700 10px var(--mono); }
+    body.is-review .dialog-image.is-correct { box-shadow: inset 0 0 0 4px var(--c); }
+    .correct-badge { position: absolute; right: 7px; bottom: 7px; padding: 4px 7px; background: var(--c); color: white; font: 750 10px var(--mono); }
+    .dialog-grid { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(280px, .75fr); gap: 24px; }
+    .prompt {
+      max-height: 420px;
+      overflow: auto;
+      margin: 0;
+      padding: 15px;
+      background: #f5f6f4;
+      border: 1px solid var(--line);
+      white-space: pre-wrap;
+      font: 12px/1.6 var(--mono);
+    }
+    .dialog-answer { padding: 14px; border-left: 3px solid var(--a); background: var(--a-open); }
+    .action-card { margin: 12px 0; padding: 12px; background: #f5f6f4; border: 1px solid var(--line); }
+    .action-card strong { display: block; margin-bottom: 5px; color: var(--muted); font: 750 10px var(--mono); text-transform: uppercase; }
+    .action-card p { margin: 0; font: 12px/1.55 var(--mono); }
+    .process-card { margin-top: 14px; padding: 14px; border: 1px solid rgba(36, 92, 153, .28); background: var(--a-open); }
+    .semantic-card { margin-top: 14px; padding: 14px; border: 1px solid var(--line); background: #f5f6f4; }
+    .semantic-card dl { margin: 8px 0 0; }
+    .semantic-card div { display: grid; grid-template-columns: 105px 1fr; gap: 8px; padding: 4px 0; }
+    .semantic-card dt { color: var(--muted); }
+    .semantic-card dd { margin: 0; overflow-wrap: anywhere; }
+    .process-card strong { display: block; margin-bottom: 4px; color: var(--a); font: 750 11px var(--mono); text-transform: uppercase; }
+    .process-checkpoint { margin-bottom: 5px; font: 750 15px var(--mono); }
+    .process-basis { margin: 0; color: var(--muted); font-size: 12px; }
+    .provenance { display: none; margin-top: 18px; }
+    body.is-review .provenance { display: block; }
+    .provenance dl { margin: 0; }
+    .provenance div { display: grid; grid-template-columns: 110px 1fr; gap: 10px; padding: 7px 0; border-bottom: 1px solid var(--line); }
+    .provenance dt { color: var(--muted); }
+    .provenance dd { margin: 0; font: 11px/1.5 var(--mono); overflow-wrap: anywhere; }
+
+    .status { max-width: 680px; margin: 90px auto; padding: 24px; background: var(--surface); border: 1px solid var(--line); text-align: center; }
+    .status code { font-family: var(--mono); }
+
+    @media (max-width: 1050px) {
+      .topbar { grid-template-columns: 1fr auto; padding: 0 18px; }
+      .tabs { order: 3; grid-column: 1 / -1; height: 44px; justify-content: center; border-top: 1px solid var(--line); }
+      .filters { top: 112px; }
+      .taxonomy-row { grid-template-columns: 160px 1fr; }
+      .examples { grid-column: 1 / -1; }
+      .case-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    }
+    @media (max-width: 760px) {
+      main { padding: 24px 16px 56px; }
+      .topbar { padding: 0 12px; }
+      .brand > span > span { display: none; }
+      .mode-button { padding: 7px 8px; }
+      .tab { min-width: 90px; padding: 0 10px; }
+      .split-button { padding: 8px 10px; font-size: 12px; }
+      .view-heading { flex-direction: column; align-items: start; gap: 10px; }
+      .kpis { grid-template-columns: repeat(2, 1fr); }
+      .kpi { border-bottom: 1px solid var(--line); }
+      .evidence-grid { grid-template-columns: 1fr; }
+      #direction-coverage { grid-template-columns: 1fr; }
+      .checkpoint-grid { grid-template-columns: 1fr; }
+      .notes { grid-template-columns: 1fr; }
+      .domain-grid { grid-template-columns: 1fr; }
+      .guide-row, .parameter-grid { grid-template-columns: 1fr; }
+      .guide-row { gap: 8px; }
+      .guide-count { text-align: left; }
+      .taxonomy-row { grid-template-columns: 1fr; }
+      .examples { grid-column: auto; grid-template-columns: 1fr; }
+      .case-grid { grid-template-columns: 1fr; }
+      .filters { position: static; }
+      .dialog-images { grid-template-columns: repeat(2, 1fr); }
+      .dialog-image:first-child { grid-column: span 2; grid-row: auto; }
+      .dialog-grid { grid-template-columns: 1fr; }
+    }
+    @media (prefers-reduced-motion: reduce) { * { scroll-behavior: auto !important; } }
+  </style>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true">
+        <i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i>
+      </span>
+      <span><strong>EgoConseq Benchmark Atlas</strong><span id="benchmark-subtitle">Egocentric Action Reasoning</span></span>
+    </div>
+    <nav class="tabs" aria-label="Benchmark views">
+      <button class="tab" data-view="overview" aria-selected="true">Overview</button>
+      <button class="tab" data-view="taxonomy" aria-selected="false">Taxonomy</button>
+      <button class="tab" data-view="cases" aria-selected="false">Cases</button>
+    </nav>
+    <div class="mode-wrap">
+      <button id="mode-button" class="mode-button" type="button" aria-pressed="true">Hide GT</button>
+    </div>
+  </header>
+
+  <main>
+    <h1 class="visually-hidden">EgoConseq Benchmark Atlas</h1>
+    <div id="loading" class="status">Loading benchmark cases…</div>
+    <div id="error" class="status" hidden></div>
+    <div id="split-bar" class="split-bar" hidden>
+      <div id="split-controls" class="split-controls" role="group" aria-label="Scene split"></div>
+      <span id="split-note" class="split-note" aria-live="polite"></span>
+    </div>
+
+    <section id="overview" class="view" hidden>
+      <div class="view-heading">
+        <div>
+          <h1>自我中心动作推理</h1>
+          <p class="lede">Egocentric Action Reasoning · Predict motion using the initial view, body geometry, camera height and FOV, and ordered actions.</p>
+        </div>
+        <div id="qa-links" class="qa-links"></div>
+      </div>
+      <div class="benchmark-intro">
+        <p>如果大模型是机器人的大脑，它能否从自己的视角出发，理解给定动作在物理空间中意味着什么？EgoConseq 提供初始相机图像、圆形机体半径、相机相对高度、HFOV / VFOV，以及按顺序执行的 Forward / Turn 动作，测试模型能否预测碰撞、更新目标的相对空间关系，并辨别运动后的视图。</p>
+        <p class="lede">场景和标记点保持静止，机器人按题目动作移动或原地转向，不重新规划避障；普通地板支撑接触不计为碰撞。高度使用配置的局部地面参考偏移。所有题目只使用保存的图像和动作条件。</p>
+      </div>
+      <div id="kpis" class="kpis"></div>
+      <div id="capability-domains" class="domain-grid" aria-label="Reasoning dimensions"></div>
+      <div class="section-heading"><h2>分类与子任务 · What each task measures</h2><p class="lede">三个评测维度、八种任务设置。A4 / B2 测方向更新，B3 / B1 测距离更新；每对分别查询中途和终点。原任务 ID 保留，不代表新的大类归属。</p></div>
+      <div id="task-guide"></div>
+      <p class="lede">方向采用 8 个水平方向 × 上方／同高／下方，共 24 类；GT 没有上下词时表示同高。方向与距离均以相机光心为参考，目标是标记圆点中心对应的固定三维表面点。空间关系题和 C1 使用安全动作；GS 不提供 A3、B1、B3。</p>
+      <div class="section-heading"><h2>当前发布分布 · Published distributions</h2><p id="distribution-scope" class="lede"></p></div>
+      <div class="evidence-grid" id="direction-coverage"></div>
+      <details class="panel">
+        <summary>Closest initial-image pairs (DINO cosine)</summary>
+        <p id="visual-summary" class="lede"></p>
+        <div id="nearest-pairs" class="evidence-grid"></div>
+      </details>
+      <div class="evidence-grid">
+        <section class="panel">
+          <div class="panel-head"><h2>任务 × 数据集</h2><span class="denominator">数量 · 任务内占比</span></div>
+          <div id="task-dataset"></div>
+        </section>
+        <section class="panel">
+          <div class="panel-head"><h2>Action sequence length</h2><span class="denominator">QA items</span></div>
+          <div id="action-lengths" class="bar-list"></div>
+        </section>
+      </div>
+      <div class="evidence-grid">
+        <section class="panel"><div class="panel-head"><h2>各任务 L1–L6</h2><span class="denominator">数量 · 任务内占比</span></div><div id="task-lengths"></div></section>
+        <section class="panel"><div class="panel-head"><h2>起手动作多样性</h2><span class="denominator">数量 · 任务内占比</span></div><div id="task-starts"></div><p class="guide-answer">A2 只使用 L3–L6；L3 为 Forward-first。交替动作仍保留起手类型与碰撞位置奇偶性的结构关系。</p></section>
+      </div>
+      <div class="parameter-grid">
+        <section class="panel"><h2>圆形机体半径 · m</h2><div id="body-radii" class="bar-list"></div></section>
+        <section class="panel"><h2>相机相对高度 · m</h2><div id="camera-heights" class="bar-list"></div></section>
+        <section class="panel"><h2>视野 · HFOV / VFOV</h2><div id="camera-fovs" class="bar-list"></div></section>
+      </div>
+      <div class="evidence-grid">
+        <section class="panel">
+          <div class="panel-head"><h2>Named scene coverage</h2><span class="denominator">dataset / scene</span></div>
+          <div id="scenes" class="bar-list scene-list"></div>
+        </section>
+        <section class="panel">
+          <div class="panel-head"><h2>Dataset composition</h2><span class="denominator">QA items</span></div>
+          <div id="datasets" class="bar-list"></div>
+        </section>
+      </div>
+      <div class="evidence-grid">
+        <section class="panel"><h2>A1 碰撞 / 安全答案</h2><div id="a1-answers" class="checkpoint-grid"></div></section>
+        <section class="panel"><h2>C1 正确选项分布</h2><div id="c1-answers" class="bar-list"></div></section>
+      </div>
+      <div class="evidence-grid">
+        <section class="panel"><h2>A3 首次接触类别</h2><div id="a3-answers" class="bar-list scene-list"></div></section>
+        <section class="panel"><h2>A2 首次碰撞的动作位置</h2><div id="a2-indices" class="bar-list"></div><p class="guide-answer">这里按完整动作列表编号，包含 Forward 和 Turn；下方另列碰撞 Forward 的序数及距离排名。</p></section>
+      </div>
+      <div class="evidence-grid">
+        <section class="panel">
+          <div class="panel-head"><h2>A2 collision-action design</h2><span class="denominator">selected A2 items</span></div>
+          <div class="checkpoint-grid">
+            <div><h3>Collision Forward ordinal</h3><div id="a2-ordinals" class="bar-list"></div></div>
+            <div><h3>Collision Forward distance rank</h3><div id="a2-ranks" class="bar-list"></div></div>
+          </div>
+        </section>
+        <section class="panel">
+          <div class="panel-head"><h2>How A2 shortcuts are controlled</h2><span class="denominator">rank-conditioned coverage</span></div>
+          <div class="process-explainer">
+            <div class="process-step"><strong>01</strong><span>Use two or three Forward actions and give the collision Forward an unambiguous distance rank.</span></div>
+            <div class="process-step"><strong>02</strong><span>Respect the collision ordinal supported by the fixed pose, cover every ordinal, and diversify whether that Forward is shortest, middle, or longest.</span></div>
+            <div class="process-step"><strong>03</strong><span>Use certified dual-oracle labels. Report accuracy conditioned on the first primitive; alternating sequences retain a structural parity prior.</span></div>
+          </div>
+        </section>
+      </div>
+      <div class="evidence-grid">
+        <section class="panel">
+          <div class="panel-head"><h2>A4 direction checkpoints</h2><span class="denominator">in-progress QA items</span></div>
+          <div class="checkpoint-grid">
+            <div><h3>Progress within Forward</h3><div id="a4-fractions" class="bar-list"></div></div>
+            <div><h3>Action in sequence</h3><div id="a4-actions" class="bar-list"></div></div>
+          </div>
+          <div class="panel-head"><h2>B3 distance checkpoints</h2><span class="denominator">in-progress QA items</span></div>
+          <div class="checkpoint-grid">
+            <div><h3>Progress within Forward</h3><div id="b3-fractions" class="bar-list"></div></div>
+            <div><h3>Action in sequence</h3><div id="b3-actions" class="bar-list"></div></div>
+          </div>
+        </section>
+        <section class="panel">
+          <div class="panel-head"><h2>How intermediate ground truth is formed</h2><span class="denominator">direction or distance</span></div>
+          <div class="process-explainer">
+            <div class="process-step"><strong>01</strong><span>Select an interior point of a Forward action from the public sequence.</span></div>
+            <div class="process-step"><strong>02</strong><span>Propagate the robot pose through the preceding actions to that checkpoint.</span></div>
+            <div class="process-step"><strong>03</strong><span>Measure the fixed surface point at the dot's center relative to the camera at that moment.</span></div>
+          </div>
+        </section>
+      </div>
+      <div id="notes" class="notes"></div>
+    </section>
+
+    <section id="taxonomy" class="view" hidden>
+      <div class="view-heading">
+        <div>
+          <h1>任务分类 · Task taxonomy</h1>
+          <p class="lede">三个评测维度，八种任务设置。保留原任务 ID；方向和距离均覆盖中途与终点。示例直接展示完整 Q / A、动作与机器人参数。</p>
+        </div>
+      </div>
+      <div id="taxonomy-content"></div>
+    </section>
+
+    <section id="cases" class="view" hidden>
+      <div class="view-heading">
+        <div>
+          <h1>Benchmark cases</h1>
+          <p class="lede">Questions and ground-truth answers are shown in full, without opening a case. Images load only for the current page.</p>
+        </div>
+      </div>
+      <div class="filters" aria-label="Case filters">
+        <div class="filter-control"><label for="filter-family">评测维度 · Dimension</label><select id="filter-family"></select></div>
+        <div class="filter-control"><label for="filter-task">Task</label><select id="filter-task"></select></div>
+        <div class="filter-control"><label for="filter-dataset">Dataset</label><select id="filter-dataset"></select></div>
+        <div class="filter-control"><label for="filter-scene">Scene</label><select id="filter-scene"></select></div>
+        <div class="filter-control"><label for="filter-length">Action length</label><select id="filter-length"></select></div>
+        <div class="filter-control"><label for="filter-start">First action</label><select id="filter-start"></select></div>
+        <div class="filter-control"><label for="filter-radius">Body radius</label><select id="filter-radius"></select></div>
+        <div class="filter-control"><label for="filter-height">Relative camera height</label><select id="filter-height"></select></div>
+        <div class="filter-control"><label for="filter-hfov">HFOV</label><select id="filter-hfov"></select></div>
+        <div class="filter-control"><label for="filter-direction">Direction (24)</label><select id="filter-direction"></select></div>
+        <div class="filter-control search-wrap"><label for="filter-search">Search ID, scene, question, or answer</label><input id="filter-search" class="search" type="search" autocomplete="off"></div>
+        <button id="reset-filters" class="reset-button" type="button">Reset</button>
+      </div>
+      <div class="result-line"><span id="result-count" class="result-count"></span><span id="page-note" class="page-note"></span></div>
+      <div id="case-grid" class="case-grid"></div>
+      <div id="pagination" class="pagination"></div>
+    </section>
+  </main>
+
+  <dialog id="case-dialog">
+    <div class="dialog-head"><span id="dialog-title" class="dialog-title"></span><button id="dialog-close" class="dialog-close" aria-label="Close case">×</button></div>
+    <div id="dialog-content" class="dialog-content"></div>
+  </dialog>
+
+  <!-- BENCHMARK_DATA -->
+  <script>
+    "use strict";
+
+    const TASK_ORDER = ["A1", "A2", "A3", "A4", "B2", "B3", "B1", "C1"];
+    const FAMILIES = {
+      A: {
+        name: "机体约束下的运动推理",
+        english: "Body-Aware Motion Reasoning",
+        description: "考虑机体占用空间，判断是否碰撞、首次碰撞动作与目标类别。"
+      },
+      B: {
+        name: "自我中心空间更新",
+        english: "Egocentric Spatial Updating",
+        description: "预测固定目标在指定中途时刻或终点，相对相机的方向与三维距离。"
+      },
+      C: {
+        name: "自运动视图预测",
+        english: "Egomotion-Conditioned View Prediction",
+        description: "根据自身移动与转向，辨别动作执行后的终点相机视图。"
+      }
+    };
+    const FILTER_KEYS = ["family", "task", "dataset", "scene", "length", "start", "radius", "height", "hfov", "direction", "search"];
+    const state = {
+      data: null,
+      allData: null,
+      split: "",
+      view: "overview",
+      review: true,
+      page: 1,
+      selectedCase: "",
+      filters: Object.fromEntries(FILTER_KEYS.map(key => [key, ""]))
+    };
+
+    const byId = id => document.getElementById(id);
+    const make = (tag, className, text) => {
+      const element = document.createElement(tag);
+      if (className) element.className = className;
+      if (text !== undefined) element.textContent = text;
+      return element;
+    };
+    const family = task => state.data.taxonomy[task].family.toLowerCase();
+    const familyColor = task => `var(--${family(task)})`;
+    const format = value => Number(value).toLocaleString("en-US");
+    const imageUrl = (path, version = "", thumbnail = false) => {
+      const url = new URL(state.data.image_base + path, location.href);
+      if (version) url.searchParams.set("v", version);
+      if (thumbnail && location.protocol !== "file:") url.searchParams.set("thumbnail", "1");
+      return url.href;
+    };
+    const imageVersion = (item, index = 0) => index === 0
+      ? (item.image_version || item.ground_truth_evidence?.marked_image_sha256 || item.provenance?.initial_image_sha256 || "")
+      : "";
+    const caseScene = item => `${item.dataset}/${item.scene_id}`;
+    const caseKey = item => item.key || item.id;
+
+    function fillSelect(id, values, label, formatter = value => value) {
+      const select = byId(id);
+      select.replaceChildren();
+      const all = make("option", "", `All ${label}`);
+      all.value = "";
+      select.append(all);
+      values.forEach(value => {
+        const option = make("option", "", formatter(value));
+        option.value = String(value);
+        select.append(option);
+      });
+    }
+
+    function parseHash() {
+      const params = new URLSearchParams(location.hash.slice(1));
+      const view = params.get("view");
+      if (["overview", "taxonomy", "cases"].includes(view)) state.view = view;
+      state.review = params.get("review") !== "0";
+      state.page = Math.max(1, Number(params.get("page")) || 1);
+      state.selectedCase = params.get("case") || "";
+      state.split = params.get("split") || "";
+      FILTER_KEYS.forEach(key => { state.filters[key] = params.get(key) || ""; });
+    }
+
+    function writeHash() {
+      const params = new URLSearchParams();
+      params.set("view", state.view);
+      if (!state.review) params.set("review", "0");
+      if (state.page > 1) params.set("page", String(state.page));
+      if (state.selectedCase) params.set("case", state.selectedCase);
+      if (state.split) params.set("split", state.split);
+      FILTER_KEYS.forEach(key => {
+        if (state.filters[key]) params.set(key, state.filters[key]);
+      });
+      history.replaceState(null, "", `#${params.toString()}`);
+    }
+
+    function applySplit() {
+      const scope = state.allData.splits?.[state.split];
+      if (!scope) state.split = "";
+      state.data = scope ? {
+        ...state.allData, ...scope,
+        items: state.allData.items.filter(item => item.split === state.split)
+      } : state.allData;
+      document.querySelectorAll(".split-button").forEach(button => {
+        button.setAttribute("aria-pressed", String(button.dataset.split === state.split));
+      });
+      byId("split-note").textContent = `${scope?.label || "All scenes"} · ${format(state.data.summary.qa_items)} QA`;
+      renderOverview();
+      renderTaxonomy();
+      populateFilters();
+      if (state.view === "cases") renderCases();
+    }
+
+    function initializeSplits() {
+      const splits = state.allData.splits;
+      if (!splits) return;
+      byId("benchmark-subtitle").textContent = "Seen + Unseen · one benchmark";
+      byId("split-bar").hidden = false;
+      const choices = [["", "All", state.allData.summary.qa_items],
+        ...Object.entries(splits).map(([key, scope]) => [key, scope.label, scope.summary.qa_items])];
+      byId("split-controls").replaceChildren(...choices.map(([key, label, count]) => {
+        const button = make("button", "split-button", `${label} · ${format(count)}`);
+        button.type = "button";
+        button.dataset.split = key;
+        button.addEventListener("click", () => {
+          state.split = key;
+          state.page = 1;
+          state.selectedCase = "";
+          FILTER_KEYS.forEach(filter => { state.filters[filter] = ""; });
+          applySplit();
+          writeHash();
+        });
+        return button;
+      }));
+    }
+
+    function setView(view, update = true) {
+      state.view = view;
+      document.querySelectorAll(".view").forEach(section => {
+        section.hidden = section.id !== view;
+      });
+      document.querySelectorAll(".tab").forEach(tab => {
+        tab.setAttribute("aria-selected", String(tab.dataset.view === view));
+      });
+      if (view === "cases") renderCases();
+      if (update) writeHash();
+      window.scrollTo({top: 0, behavior: "smooth"});
+    }
+
+    function setReview(enabled) {
+      state.review = enabled;
+      document.body.classList.toggle("is-review", enabled);
+      byId("mode-button").textContent = enabled ? "Hide GT" : "Show GT";
+      byId("mode-button").setAttribute("aria-pressed", String(enabled));
+      writeHash();
+    }
+
+    function openCases(filters = {}) {
+      if (filters.task) filters.family = state.data.taxonomy[filters.task].family;
+      Object.assign(state.filters, filters);
+      state.page = 1;
+      syncFilterControls();
+      setView("cases");
+    }
+
+    function renderKpis() {
+      const summary = state.data.summary;
+      const values = [
+        [summary.qa_items, "QA items"],
+        [summary.records, "独立 records"],
+        [summary.unique_initial_observations, "Unique initial observations"],
+        [summary.c1_candidates, "C1 candidate images"],
+        [summary.scenes, "Dataset-scoped scenes"],
+        [summary.tasks, "Task settings · 3 dimensions"]
+      ];
+      byId("kpis").replaceChildren(...values.map(([value, label]) => {
+        const item = make("div", "kpi");
+        item.append(make("span", "kpi-value", format(value)), make("span", "kpi-label", label));
+        return item;
+      }));
+    }
+
+    function renderTaskMatrix(id, datasets, counts, filter, label = value => value.toUpperCase()) {
+      const maximum = Math.max(...TASK_ORDER.flatMap(task => datasets.map(dataset => counts[task]?.[dataset] || 0)));
+      const table = make("table", "matrix");
+      const head = make("tr");
+      head.append(make("th", "", "Task"));
+      datasets.forEach(dataset => head.append(make("th", "", label(dataset))));
+      table.append(make("thead"));
+      table.tHead.append(head);
+      const body = make("tbody");
+      TASK_ORDER.forEach(task => {
+        const row = make("tr");
+        const header = make("th");
+        const taskButton = make("button", `matrix-task family-${family(task)}`, task);
+        taskButton.addEventListener("click", () => openCases({task}));
+        header.append(taskButton);
+        row.append(header);
+        datasets.forEach(dataset => {
+          const value = counts[task]?.[dataset] || 0;
+          const ratio = maximum ? value / maximum : 0;
+          const total = state.data.taxonomy[task].count;
+          const button = make("button", "matrix-cell", `${format(value)} · ${total ? (100 * value / total).toFixed(1) : "0.0"}%`);
+          if (id === "task-dataset" && dataset === "gs" && ["A3", "B1", "B3"].includes(task)) {
+            button.textContent = "不适用";
+            button.disabled = true;
+          }
+          const alpha = .08 + ratio * .82;
+          button.style.setProperty("--cell", `rgba(36, 92, 153, ${alpha})`);
+          if (ratio > .56) button.style.color = "white";
+          button.title = `${task} · ${label(dataset)}: ${format(value)} / ${format(total)} QA`;
+          button.addEventListener("click", () => openCases({task, ...filter(dataset)}));
+          const cell = make("td");
+          cell.append(button);
+          row.append(cell);
+        });
+        body.append(row);
+      });
+      table.append(body);
+      const wrap = make("div", "matrix-wrap");
+      wrap.append(table);
+      byId(id).replaceChildren(wrap);
+    }
+
+    function barRows(counts, click, numeric = false) {
+      const rows = Object.entries(counts);
+      if (numeric) rows.sort((a, b) => Number(a[0]) - Number(b[0]));
+      const maximum = Math.max(...rows.map(([, value]) => value), 1);
+      const total = rows.reduce((sum, [, value]) => sum + value, 0);
+      return rows.map(([label, value]) => {
+        const button = make(click ? "button" : "div", "bar-row");
+        if (click) button.type = "button";
+        button.title = label;
+        button.append(make("span", "bar-label", label));
+        const track = make("span", "bar-track");
+        const fill = make("span", "bar-fill");
+        fill.style.width = `${100 * value / maximum}%`;
+        track.append(fill);
+        button.append(track, make("span", "bar-value", `${format(value)} · ${total ? (100 * value / total).toFixed(1) : "0.0"}%`));
+        if (click) button.addEventListener("click", () => click(label));
+        return button;
+      });
+    }
+
+    function renderDirections() {
+      const axes = state.data.direction_axes;
+      byId("direction-coverage").replaceChildren(...["A4", "B2"].map(task => {
+        const counts = state.data.counts.directions[task];
+        const values = Object.values(counts);
+        const covered = values.filter(n => n > 0).length;
+        const panel = make("section", "panel");
+        panel.append(make("h2", "", `${task} · ${covered}/24 directions covered`));
+        panel.append(make("p", "lede", `8 horizontal × 3 vertical classes. ${values.reduce((a, b) => a + b, 0)} QA; ${Math.min(...values)}–${Math.max(...values)} per class. Click a cell to inspect its cases.`));
+        const table = make("table", "matrix");
+        const head = make("tr");
+        ["Direction", "Above", "Level", "Below"].forEach(label => head.append(make("th", "", label)));
+        const thead = make("thead"); thead.append(head); table.append(thead);
+        const body = make("tbody");
+        axes.horizontal.forEach(horizontal => {
+          const row = make("tr");
+          row.append(make("th", "", horizontal.replace("rear", "behind")));
+          axes.vertical.forEach(vertical => {
+            const direction = vertical === "level" ? horizontal : `${horizontal}|${vertical}`;
+            const n = counts[direction];
+            const button = make("button", "matrix-cell", String(n));
+            button.style.setProperty("--cell", n ? "#e3eee8" : "#f9dfdb");
+            button.title = `${task}: ${horizontal}, ${vertical} — ${n} QA`;
+            button.addEventListener("click", () => {
+              FILTER_KEYS.forEach(key => { state.filters[key] = ""; });
+              openCases({task, direction});
+            });
+            const cell = make("td"); cell.append(button); row.append(cell);
+          });
+          body.append(row);
+        });
+        table.append(body);
+        const wrap = make("div", "matrix-wrap"); wrap.append(table); panel.append(wrap);
+        return panel;
+      }));
+    }
+
+    function renderTaskGuide() {
+      byId("task-guide").replaceChildren(...Object.entries(FAMILIES).map(([key, domain]) => {
+        const section = make("section", "panel guide-group");
+        section.style.setProperty("--family-color", `var(--${key.toLowerCase()})`);
+        section.append(make("h2", "", domain.name));
+        TASK_ORDER.filter(task => state.data.taxonomy[task].family === key).forEach(task => {
+          const definition = state.data.taxonomy[task];
+          const row = make("article", "guide-row");
+          row.dataset.task = task;
+          const identity = make("div");
+          const link = make("button", "guide-name", `${task} · ${definition.name_zh}`);
+          link.type = "button";
+          link.addEventListener("click", () => openCases({task}));
+          identity.append(link, make("p", "guide-english", definition.name));
+          const description = make("div");
+          description.append(make("p", "", definition.description_zh), make("p", "guide-answer", `答案形式：${definition.answer}`));
+          const share = state.data.summary.qa_items ? 100 * definition.count / state.data.summary.qa_items : 0;
+          row.append(identity, description, make("div", "guide-count", `${format(definition.count)} QA · ${share.toFixed(1)}%`));
+          section.append(row);
+        });
+        return section;
+      }));
+    }
+
+    function renderOverview() {
+      byId("qa-links").replaceChildren(...state.data.qa_links.map(link => {
+        const anchor = make("a", "data-link", link.label);
+        anchor.href = link.path;
+        return anchor;
+      }));
+      renderDirections();
+      renderKpis();
+      renderTaskGuide();
+      byId("distribution-scope").textContent = `统计来源：当前发布的 QA JSON 与私有索引，不是设计配额。范围：${state.split ? state.data.label : "全部场景"}，共 ${format(state.data.summary.qa_items)} QA。切换 All / Seen / Unseen 后下列统计同步更新；百分比以各表标注的任务或面板 QA 数为分母。`;
+      byId("capability-domains").replaceChildren(...Object.entries(FAMILIES).map(([key, definition]) => {
+        const tasks = TASK_ORDER.filter(task => state.data.taxonomy[task].family === key);
+        const count = tasks.reduce((sum, task) => sum + state.data.taxonomy[task].count, 0);
+        const button = make("button", "panel domain-card");
+        button.type = "button";
+        button.style.setProperty("--family-color", `var(--${key.toLowerCase()})`);
+        button.append(make("h2", "", definition.name),
+          make("p", "domain-description", definition.english),
+          make("p", "domain-description", definition.description),
+          make("span", "domain-count", `${format(count)} QA · ${tasks.join(" / ")}`));
+        button.addEventListener("click", () => {
+          FILTER_KEYS.forEach(filter => { state.filters[filter] = ""; });
+          openCases({family: key});
+        });
+        return button;
+      }));
+      renderTaskMatrix("task-dataset", Object.keys(state.data.counts.datasets), state.data.counts.task_dataset, dataset => ({dataset}));
+      renderTaskMatrix("task-lengths", ["L1", "L2", "L3", "L4", "L5", "L6"], state.data.counts.task_lengths, length => ({length: length.slice(1)}));
+      renderTaskMatrix("task-starts", ["forward", "turn"], state.data.counts.task_starts, start => ({start}), start => `${start === "turn" ? "Turn" : "Forward"}-first`);
+      const parameters = state.data.counts.parameters;
+      byId("body-radii").replaceChildren(...barRows(parameters.radius, radius => openCases({radius}), true));
+      byId("camera-heights").replaceChildren(...barRows(parameters.height, height => openCases({height}), true));
+      byId("camera-fovs").replaceChildren(...barRows(parameters.fov));
+      byId("a1-answers").replaceChildren(...["forward", "turn"].map(start => {
+        const group = make("div");
+        group.append(make("h3", "", `${start === "turn" ? "Turn" : "Forward"}-first`));
+        const bars = make("div", "bar-list");
+        bars.append(...barRows(state.data.counts.a1_starts[start] || {}));
+        group.append(bars);
+        return group;
+      }));
+      byId("c1-answers").replaceChildren(...barRows(state.data.counts.answers.C1 || {}));
+      byId("a3-answers").replaceChildren(...barRows(Object.fromEntries(
+        Object.entries(state.data.counts.answers.A3 || {}).sort((a, b) => b[1] - a[1])
+      )));
+      byId("a2-indices").replaceChildren(...barRows(state.data.counts.a2_collision_design.action_indices));
+      byId("action-lengths").replaceChildren(...barRows(
+        state.data.counts.action_lengths,
+        label => openCases({length: label.slice(1)})
+      ));
+      byId("datasets").replaceChildren(...barRows(
+        state.data.counts.datasets,
+        dataset => openCases({dataset})
+      ));
+      byId("a2-ordinals").replaceChildren(...barRows(
+        state.data.counts.a2_collision_design.forward_ordinals,
+        () => openCases({task: "A2"})
+      ));
+      byId("a2-ranks").replaceChildren(...barRows(
+        state.data.counts.a2_collision_design.distance_ranks,
+        () => openCases({task: "A2"})
+      ));
+      byId("a4-fractions").replaceChildren(...barRows(
+        state.data.counts.a4_checkpoints.fractions,
+        () => openCases({task: "A4"})
+      ));
+      byId("a4-actions").replaceChildren(...barRows(
+        state.data.counts.a4_checkpoints.action_indices,
+        () => openCases({task: "A4"})
+      ));
+      byId("b3-fractions").replaceChildren(...barRows(
+        state.data.counts.b3_checkpoints.fractions,
+        () => openCases({task: "B3"})
+      ));
+      byId("b3-actions").replaceChildren(...barRows(
+        state.data.counts.b3_checkpoints.action_indices,
+        () => openCases({task: "B3"})
+      ));
+      const scenes = Object.fromEntries(
+        Object.entries(state.data.counts.scenes).sort((a, b) => b[1] - a[1])
+      );
+      byId("scenes").replaceChildren(...barRows(scenes, scene => openCases({scene})));
+
+      const taskEntries = Object.entries(state.data.counts.tasks).sort((a, b) => b[1] - a[1]);
+      const actionEntries = Object.entries(state.data.counts.action_lengths);
+      const sceneCounts = Object.values(state.data.counts.scenes).sort((a, b) => b - a);
+      const topFiveShare = sceneCounts.slice(0, 5).reduce((sum, value) => sum + value, 0) / state.data.summary.qa_items;
+      const c1Images = state.data.summary.c1_candidates;
+      const notes = [
+        ["Largest task slice", `${taskEntries[0][0]} contains ${format(taskEntries[0][1])} cases.`],
+        ["Action coverage", `${actionEntries.length} sequence lengths are represented, from ${actionEntries[0][0]} to ${actionEntries.at(-1)[0]}.`],
+        ["Scene concentration", `The five largest dataset-scoped scenes contain ${(topFiveShare * 100).toFixed(1)}% of all cases.`],
+        ["Future-view evidence", `C1 contributes ${format(c1Images)} labeled candidate images.`],
+        ["Case access", `All ${format(state.data.summary.qa_items)} cases are indexed and paginated in the Cases view.`],
+        ["Ground truth", "Answers and source bindings are shown by default and can be hidden with the GT control."]
+      ];
+      byId("notes").replaceChildren(...notes.map(([title, text]) => {
+        const note = make("div", "note");
+        note.append(make("strong", "", title), make("span", "", text));
+        return note;
+      }));
+      const visual = state.data.selection?.visual_selection;
+      byId("nearest-pairs").replaceChildren();
+      byId("visual-summary").textContent = state.data.splits
+        ? "Similarity was checked separately within Seen and Unseen, not across splits. Select a split above to inspect its closest pairs."
+        : "No initial-image similarity report is attached to this browser.";
+      if (visual) {
+        const scope = state.split ? `${state.data.label} only. ` : "";
+        byId("visual-summary").textContent = `${scope}${visual.model}; maximum selected cosine ${visual.maximum_cosine.toFixed(4)}; threshold ${visual.cosine_threshold}. Full initial views, before target markers.`;
+        const items = new Map(state.data.items.map(item => [item.id, item]));
+        byId("nearest-pairs").replaceChildren(...visual.nearest_pairs.slice(0, 20).map(pair => {
+          const card = make("div", "panel");
+          card.append(make("p", "", `Cosine ${pair.cosine.toFixed(4)}`));
+          [pair.left, pair.right].forEach(id => {
+            const item = items.get(id);
+            const button = make("button", "");
+            button.style.width = "49%";
+            const image = make("img", "");
+            image.src = imageUrl(item.images[0], imageVersion(item), true);
+            image.alt = `${item.dataset} · ${item.task_id} · ${item.scene_id}`;
+            image.loading = "lazy";
+            image.style.width = "100%";
+            button.append(image);
+            button.addEventListener("click", () => openCase(caseKey(item)));
+            card.append(button);
+          });
+          return card;
+        }));
+      }
+    }
+
+    function representative(task, dataset) {
+      return state.data.items.find(item => item.task_id === task && item.dataset === dataset);
+    }
+
+    function renderTaxonomy() {
+      const root = byId("taxonomy-content");
+      root.replaceChildren();
+      const datasets = Object.keys(state.data.counts.datasets);
+      Object.entries(FAMILIES).forEach(([letter, domain], index) => {
+        const section = make("section", "family-section");
+        section.style.setProperty("--family-color", `var(--${letter.toLowerCase()})`);
+        const heading = make("div", "family-heading");
+        const title = make("div");
+        title.append(make("h2", "", domain.name), make("p", "domain-description", domain.english));
+        heading.append(make("span", "family-letter", `0${index + 1}`), title);
+        section.append(heading);
+        TASK_ORDER.filter(task => state.data.taxonomy[task].family === letter).forEach(task => {
+          const definition = state.data.taxonomy[task];
+          const row = make("article", "taxonomy-row");
+          row.style.setProperty("--family-color", familyColor(task));
+          const identity = make("div");
+          identity.append(make("div", "task-id", task), make("div", "task-count", `${format(definition.count)} cases`));
+          const copy = make("div", "task-copy");
+        copy.append(make("h3", "", `${definition.name_zh} · ${definition.name}`), make("p", "", definition.description_zh));
+          if (definition.ground_truth_basis) {
+            copy.append(make("p", "", `GT basis: ${definition.ground_truth_basis}`));
+          }
+          const meta = make("div", "task-meta");
+          meta.append(make("span", "chip", definition.answer));
+          definition.action_lengths.forEach(length => meta.append(make("span", "chip", `L${length}`)));
+          copy.append(meta);
+          const examples = make("div", "examples");
+          datasets.forEach(dataset => {
+            const item = representative(task, dataset);
+            if (!item) return;
+            examples.append(renderCaseCard(item));
+          });
+          row.append(identity, copy, examples);
+          section.append(row);
+        });
+        root.append(section);
+      });
+    }
+
+    function populateFilters() {
+      const items = state.data.items;
+      fillSelect("filter-family", Object.keys(FAMILIES), "dimensions", key => FAMILIES[key].name);
+      fillSelect("filter-task", TASK_ORDER, "tasks");
+      fillSelect("filter-dataset", [...new Set(items.map(item => item.dataset))].sort(), "datasets", value => value.toUpperCase());
+      fillSelect("filter-scene", [...new Set(items.map(caseScene))].sort(), "scenes");
+      fillSelect("filter-length", [...new Set(items.map(item => item.action_length))].sort((a, b) => a - b), "lengths", value => `L${value}`);
+      fillSelect("filter-start", ["forward", "turn"], "starts", value => `${value === "turn" ? "Turn" : "Forward"}-first`);
+      fillSelect("filter-radius", [...new Set(items.map(item => item.robot.radius_m))].sort((a, b) => a - b), "radii", value => `${value} m`);
+      fillSelect("filter-height", [...new Set(items.map(item => item.camera.height_m))].sort((a, b) => a - b), "heights", value => `${value.toFixed(1)} m`);
+      fillSelect("filter-hfov", [...new Set(items.map(item => item.camera.hfov_deg))].sort((a, b) => a - b), "HFOVs", value => `${value}°`);
+      fillSelect("filter-direction", Object.keys(state.data.counts.directions.A4), "directions", value => value.replace("rear", "behind").replace("|", " · "));
+      syncFilterControls();
+    }
+
+    function initializeFilters() {
+      const ids = {family: "filter-family", task: "filter-task", dataset: "filter-dataset", scene: "filter-scene", length: "filter-length", start: "filter-start", radius: "filter-radius", height: "filter-height", hfov: "filter-hfov", direction: "filter-direction"};
+      Object.entries(ids).forEach(([key, id]) => {
+        byId(id).addEventListener("change", event => {
+          state.filters[key] = event.target.value;
+          if (key === "family") {
+            state.filters.task = "";
+            state.filters.direction = "";
+          }
+          if (key === "task" && event.target.value) {
+            state.filters.family = state.data.taxonomy[event.target.value].family;
+          }
+          state.page = 1;
+          renderCases();
+          writeHash();
+        });
+      });
+      byId("filter-search").addEventListener("input", event => {
+        state.filters.search = event.target.value;
+        state.page = 1;
+        renderCases();
+        writeHash();
+      });
+      byId("reset-filters").addEventListener("click", () => {
+        FILTER_KEYS.forEach(key => { state.filters[key] = ""; });
+        state.page = 1;
+        syncFilterControls();
+        renderCases();
+        writeHash();
+      });
+      syncFilterControls();
+    }
+
+    function syncFilterControls() {
+      const ids = {family: "filter-family", task: "filter-task", dataset: "filter-dataset", scene: "filter-scene", length: "filter-length", start: "filter-start", radius: "filter-radius", height: "filter-height", hfov: "filter-hfov", direction: "filter-direction", search: "filter-search"};
+      Object.entries(ids).forEach(([key, id]) => {
+        const control = byId(id);
+        if (control) control.value = state.filters[key] || "";
+      });
+    }
+
+    function filteredCases() {
+      const f = state.filters;
+      const query = f.search.trim().toLowerCase();
+      return state.data.items.filter(item => {
+        if (f.family && state.data.taxonomy[item.task_id].family !== f.family) return false;
+        if (f.task && item.task_id !== f.task) return false;
+        if (f.dataset && item.dataset !== f.dataset) return false;
+        if (f.scene && caseScene(item) !== f.scene) return false;
+        if (f.length && String(item.action_length) !== f.length) return false;
+        if (f.start && item.starts_with !== f.start) return false;
+        if (f.radius && String(item.robot.radius_m) !== f.radius) return false;
+        if (f.height && String(item.camera.height_m) !== f.height) return false;
+        if (f.hfov && String(item.camera.hfov_deg) !== f.hfov) return false;
+        if (f.direction && item.direction !== f.direction) return false;
+        if (query) {
+          const haystack = [item.id, item.task_id, item.dataset, item.scene_id, item.question, item.prompt, item.answer].join(" ").toLowerCase();
+          if (!haystack.includes(query)) return false;
+        }
+        return true;
+      });
+    }
+
+    function metadataChips(item) {
+      const chips = [
+        `L${item.action_length}`,
+        `r ${item.robot.radius_m} m`,
+        `h ${item.camera.height_m.toFixed(1)} m`,
+        `${item.camera.hfov_deg}° HFOV`,
+        `${Number(item.camera.vfov_deg.toFixed(2))}° VFOV`
+      ];
+      if (item.split) chips.unshift(item.split.toUpperCase());
+      if (item.checkpoint) {
+        chips.push(
+          `Action ${item.checkpoint.action_index}`,
+          `Forward #${item.checkpoint.forward_ordinal}`,
+          `${item.checkpoint.fraction * 100}%`
+        );
+      }
+      return chips;
+    }
+
+    function renderCaseCard(item) {
+      const card = make("article", "case-card");
+      card.style.setProperty("--family-color", familyColor(item.task_id));
+      const imageButton = make("button", "case-image-button");
+      const image = make("img");
+      image.loading = "lazy";
+      image.src = imageUrl(item.images[0], imageVersion(item), true);
+      image.alt = `${item.task_id} initial egocentric observation`;
+      imageButton.append(image);
+      imageButton.addEventListener("click", () => openCase(caseKey(item)));
+      const body = make("div", "case-body");
+      const top = make("div", "case-top");
+      top.append(make("span", "case-task", item.task_id), make("span", "case-source", `${item.dataset} · ${item.scene_id}`));
+      body.append(
+        top,
+        make("div", "case-domain", FAMILIES[state.data.taxonomy[item.task_id].family].name),
+        make("div", "case-id", item.id),
+        make("span", "field-label", "Q · Question"),
+        make("p", "case-question", item.question),
+        make("span", "field-label", "Action sequence"),
+        make("p", "case-actions", item.action_sequence)
+      );
+      const meta = make("div", "case-meta");
+      metadataChips(item).forEach(text => meta.append(make("span", "chip", text)));
+      const answer = make("div", "answer");
+      answer.append(make("span", "answer-label", "A · Ground truth"), make("span", "answer-value", item.answer));
+      body.append(meta, answer);
+      const open = make("button", "open-button", "Open case");
+      open.addEventListener("click", () => openCase(caseKey(item)));
+      body.append(open);
+      card.append(imageButton, body);
+      return card;
+    }
+
+    function renderCases() {
+      if (!state.data) return;
+      syncFilterControls();
+      const items = filteredCases();
+      const pageSize = state.filters.task === "C1" ? 12 : 24;
+      const pageCount = Math.max(1, Math.ceil(items.length / pageSize));
+      state.page = Math.min(state.page, pageCount);
+      const start = (state.page - 1) * pageSize;
+      const pageItems = items.slice(start, start + pageSize);
+      byId("result-count").textContent = `${format(items.length)} cases`;
+      byId("page-note").textContent = items.length ? `Showing ${format(start + 1)}–${format(Math.min(start + pageSize, items.length))}` : "";
+      const grid = byId("case-grid");
+      grid.replaceChildren();
+      if (!pageItems.length) {
+        grid.append(make("div", "empty", "No cases match the current filters."));
+      } else {
+        grid.append(...pageItems.map(renderCaseCard));
+      }
+      const pagination = byId("pagination");
+      pagination.replaceChildren();
+      if (pageCount > 1) {
+        const previous = make("button", "", "Previous");
+        previous.disabled = state.page === 1;
+        previous.addEventListener("click", () => { state.page -= 1; renderCases(); writeHash(); window.scrollTo({top: 0}); });
+        const next = make("button", "", "Next");
+        next.disabled = state.page === pageCount;
+        next.addEventListener("click", () => { state.page += 1; renderCases(); writeHash(); window.scrollTo({top: 0}); });
+        pagination.append(previous, make("span", "page-note", `Page ${state.page} of ${pageCount}`), next);
+      }
+    }
+
+    function openCase(itemId) {
+      const item = state.data.items.find(candidate => caseKey(candidate) === itemId)
+        || state.data.items.find(candidate => candidate.id === itemId);
+      if (!item) return;
+      state.selectedCase = caseKey(item);
+      byId("dialog-title").textContent = [item.split?.toUpperCase(), item.task_id, item.id].filter(Boolean).join(" · ");
+      const content = byId("dialog-content");
+      content.replaceChildren();
+      const images = make("div", "dialog-images");
+      const canonicalChoice = item.task_id === "C1" ? item.answer.trim().toUpperCase() : "";
+      item.images.forEach((path, index) => {
+        const figure = make("div", "dialog-image");
+        const image = make("img");
+        const choiceLabel = index === 0 ? "" : "ABCD"[index - 1];
+        image.src = imageUrl(path, imageVersion(item, index));
+        image.alt = index === 0 ? "Initial egocentric observation" : `Candidate ${choiceLabel}`;
+        figure.append(image, make("span", "image-label", index === 0 ? "INITIAL" : `CHOICE ${choiceLabel}`));
+        if (choiceLabel && choiceLabel === canonicalChoice) {
+          figure.classList.add("is-correct");
+          figure.append(make("span", "correct-badge review-only", "GROUND TRUTH"));
+        }
+        images.append(figure);
+      });
+      const grid = make("div", "dialog-grid");
+      const promptColumn = make("div");
+      promptColumn.append(make("h2", "", "Model input"), make("pre", "prompt", item.prompt));
+      const details = make("aside");
+      details.append(make("h2", "", state.data.taxonomy[item.task_id].name));
+      const actions = make("section", "action-card");
+      actions.append(
+        make("strong", "", "Action sequence"),
+        make("p", "", item.action_sequence)
+      );
+      details.append(actions);
+      const chips = make("div", "case-meta");
+      metadataChips(item).forEach(text => chips.append(make("span", "chip", text)));
+      details.append(chips);
+      if (item.checkpoint) {
+        const process = make("section", "process-card");
+        process.append(
+          make("strong", "", "Process checkpoint"),
+          make("div", "process-checkpoint", `Action ${item.checkpoint.action_index} · Forward #${item.checkpoint.forward_ordinal} · ${item.checkpoint.fraction * 100}%`),
+          make("p", "process-basis", state.data.taxonomy[item.task_id].ground_truth_basis)
+        );
+        details.append(process);
+      }
+      if (item.a2_design) {
+        const design = make("section", "process-card review-only");
+        design.append(
+          make("strong", "", "Verified A2 collision cell"),
+          make("div", "process-checkpoint", `Action ${item.a2_design.collision_action_index} · Forward #${item.a2_design.forward_ordinal} · ${item.a2_design.distance_rank} Forward distance`),
+          make("p", "process-basis", "The full-geometry and depth oracles agree on this first-collision action, and the action index is stable under the benchmark pose perturbations.")
+        );
+        details.append(design);
+      }
+      if (item.ground_truth_evidence) {
+        const semantic = make("section", "semantic-card review-only");
+        semantic.append(make("strong", "", item.task_id === "A3" ? "Verified category" : "Verified surface point"));
+        const semanticList = make("dl");
+        Object.entries(item.ground_truth_evidence).forEach(([key, value]) => {
+          if (key === "marked_image_sha256" || key === "marker") return;
+          const row = make("div");
+          let shown;
+          if (key === "category" && value?.display_name) {
+            shown = `${value.display_name} · source: ${value.source_label}`;
+          } else if (key === "surface_anchor") {
+            shown = `pixel (${value.pixel_xy_px.join(", ")}) · world 3D (${value.world_xyz_m.map(number => Number(number).toFixed(3)).join(", ")}) m`;
+          } else if (key === "relation") {
+            shown = `${value.horizontal_direction} · ${value.vertical_direction}`;
+            if (value.camera_to_target_distance_m !== undefined) {
+              shown += ` · camera-to-point 3D distance ${Number(value.camera_to_target_distance_m).toFixed(3)} m`;
+            }
+          } else {
+            shown = Array.isArray(value) ? value.join(", ") : (value && typeof value === "object" ? JSON.stringify(value) : String(value));
+          }
+          row.append(make("dt", "", key.replaceAll("_", " ")), make("dd", "", shown));
+          semanticList.append(row);
+        });
+        semantic.append(semanticList);
+        details.append(semantic);
+      }
+      const answer = make("div", "dialog-answer review-only");
+      answer.append(make("strong", "", "Ground truth"), make("div", "answer-value", item.answer));
+      details.append(answer);
+      const provenance = make("section", "provenance");
+      provenance.append(make("h2", "", "Source binding"));
+      const list = make("dl");
+      Object.entries(item.provenance).forEach(([key, value]) => {
+        const row = make("div");
+        row.append(make("dt", "", key.replaceAll("_", " ")), make("dd", "", value === null ? "—" : String(value)));
+        list.append(row);
+      });
+      provenance.append(list);
+      details.append(provenance);
+      grid.append(promptColumn, details);
+      content.append(images, grid);
+      const dialog = byId("case-dialog");
+      if (!dialog.open) dialog.showModal();
+      writeHash();
+    }
+
+    function closeCase() {
+      state.selectedCase = "";
+      byId("case-dialog").close();
+      writeHash();
+    }
+
+    function initialize() {
+      parseHash();
+      document.querySelectorAll(".tab").forEach(tab => {
+        tab.addEventListener("click", () => setView(tab.dataset.view));
+      });
+      byId("mode-button").addEventListener("click", () => setReview(!state.review));
+      byId("dialog-close").addEventListener("click", closeCase);
+      byId("case-dialog").addEventListener("cancel", event => {
+        event.preventDefault();
+        closeCase();
+      });
+      byId("case-dialog").addEventListener("click", event => {
+        if (event.target === byId("case-dialog")) closeCase();
+      });
+
+      Promise.resolve(JSON.parse(document.getElementById("benchmark-data").textContent))
+        .then(data => {
+          state.allData = data;
+          byId("loading").hidden = true;
+          initializeSplits();
+          applySplit();
+          initializeFilters();
+          setReview(state.review);
+          setView(state.view, false);
+          if (state.selectedCase) openCase(state.selectedCase);
+        })
+        .catch(error => {
+          byId("loading").hidden = true;
+          const target = byId("error");
+          target.hidden = false;
+          target.textContent = `Could not load the case index (${error.message}). Serve data/benchmark over localhost instead of opening this file directly.`;
+        });
+    }
+
+    initialize();
+  </script>
+</body>
+</html>

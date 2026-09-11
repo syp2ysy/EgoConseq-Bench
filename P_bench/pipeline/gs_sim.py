@@ -87,12 +87,10 @@ def _viewmat(position, yaw: float, cam_h: float) -> np.ndarray:
     return view
 
 
-def render_gs(
+def _rasterize_gs(
         gs: dict, position, yaw: float, intrinsics: np.ndarray, hw,
-        cam_h: float = config.CAMERA_HEIGHT_M,
-        near: float = config.GS_RENDER_NEAR_M,
-        far: float = config.GS_RENDER_FAR_M) -> Tuple[np.ndarray, np.ndarray]:
-    """Render RGB and expected depth with the standard session contract."""
+        *, cam_h: float, near: float, far: float,
+        render_mode: str) -> torch.Tensor:
     height, width = int(hw[0]), int(hw[1])
     device = gs["device"]
     view = torch.from_numpy(
@@ -101,12 +99,35 @@ def render_gs(
         np.asarray(intrinsics, np.float64)[None]).float().to(device)
     output, _alpha, _metadata = rasterization(
         gs["means"], gs["quats"], gs["scales"], gs["opacities"],
-        gs["colors"], view, matrices, width, height, render_mode="RGB+ED",
+        gs["colors"], view, matrices, width, height, render_mode=render_mode,
         near_plane=near, far_plane=far, radius_clip=0.0)
-    image = output[0]
+    return output[0]
+
+
+def render_gs(
+        gs: dict, position, yaw: float, intrinsics: np.ndarray, hw,
+        cam_h: float = config.CAMERA_HEIGHT_M,
+        near: float = config.GS_RENDER_NEAR_M,
+        far: float = config.GS_RENDER_FAR_M) -> Tuple[np.ndarray, np.ndarray]:
+    """Render RGB and expected depth with the standard session contract."""
+    image = _rasterize_gs(
+        gs, position, yaw, intrinsics, hw, cam_h=cam_h,
+        near=near, far=far, render_mode="RGB+ED")
     rgb = (image[..., :3].clamp(0, 1) * 255).byte().cpu().numpy()
     depth = image[..., 3].contiguous().cpu().numpy().astype(np.float32)
     return rgb, depth
+
+
+def render_gs_rgb(
+        gs: dict, position, yaw: float, intrinsics: np.ndarray, hw,
+        cam_h: float = config.CAMERA_HEIGHT_M,
+        near: float = config.GS_RENDER_NEAR_M,
+        far: float = config.GS_RENDER_FAR_M) -> np.ndarray:
+    """Render endpoint RGB without computing expected depth."""
+    image = _rasterize_gs(
+        gs, position, yaw, intrinsics, hw, cam_h=cam_h,
+        near=near, far=far, render_mode="RGB")
+    return (image.clamp(0, 1) * 255).byte().cpu().numpy()
 
 
 class _GroundAlignedPathfinder:
@@ -215,6 +236,15 @@ class GsSimSession:
             rgb=rgb, depth=depth, K=K, sensor=sensor,
             position=np.asarray(position, dtype=np.float64),
             yaw_rad=float(yaw))
+    def render_rgb(self, position, yaw: float,
+                   cam_h: float = None, hfov: float = None,
+                   vfov: float = None) -> np.ndarray:
+        cam_h = self._heights[0] if cam_h is None else float(cam_h)
+        hfov = self._hfov if hfov is None else float(hfov)
+        vfov = self._vfov if vfov is None else float(vfov)
+        return render_gs_rgb(
+            self._gs, position, yaw, config.intrinsics(hfov, vfov),
+            config.hw(), cam_h=cam_h)
     def assign_instances(self, world_points: np.ndarray) -> np.ndarray:
         return self._sem.assign(world_points)
     def frame_semantic_index(

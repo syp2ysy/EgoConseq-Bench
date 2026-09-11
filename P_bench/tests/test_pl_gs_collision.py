@@ -686,7 +686,7 @@ def test_gs_physical_rollout_carries_collision_artifact_digest(tmp_path):
         hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def test_gs_semantics_use_per_frame_visible_depth_for_a3_and_b():
+def test_gs_semantics_use_per_frame_visible_depth_for_a3():
     base = gs_semantic.BboxSemanticIndex(
         mins=np.asarray([[0.5, 0.0, -0.5], [1.5, 0.0, -0.5]]),
         maxs=np.asarray([[1.5, 1.0, 0.5], [2.5, 1.0, 0.5]]),
@@ -709,18 +709,6 @@ def test_gs_semantics_use_per_frame_visible_depth_for_a3_and_b():
     )
 
     assert np.array_equal(view.instance_points(1), chair)
-    geometry = view.target_geometry_atom(
-        1,
-        floor_plane.FloorPlaneEstimate(
-            normal_local=np.asarray([0.0, 1.0, 0.0]), offset_m=0.0),
-        expected_geometry_authority_sha256="a" * 64,
-        pose={"position": [0.0, 0.0, 0.0], "yaw_rad": 0.0},
-    )
-    assert geometry["schema"] == "gs-visible-b-target-geometry.v1"
-    assert geometry["ground_support"]["protocol"] == \
-        "initial-visible-depth-anchor.v1"
-    assert "ellipses_xz_m" not in geometry["ground_support"]
-
     confirmed = view.confirm_contact_instances([(1, [1.0, 0.175, 0.0])])[0]
     assert confirmed["confirmed"] is True
     assert confirmed["schema"] == \

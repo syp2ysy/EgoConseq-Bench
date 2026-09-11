@@ -16,7 +16,7 @@ import numpy as np
 
 from pipeline import config, perception
 from pipeline import actions as A
-from pipeline.io_utils import atomic_write_binary, link_or_copy_file, sha256_file
+from pipeline.io_utils import atomic_write_binary
 
 
 @dataclass(frozen=True)
@@ -32,29 +32,27 @@ class AuthenticatedRGB:
 
 
 def authenticate_raw_rgb_image(
-        source_image, *, expected_sha256: str,
+        source_image, *, expected_sha256: str | None = None,
         expected_resolution,
         authenticated: AuthenticatedRGB | None = None) -> AuthenticatedRGB:
     """Authenticate native RGB bytes and the manifest-only sensor raster."""
     from PIL import Image
 
-    if (not isinstance(expected_sha256, str) or
-            not re.fullmatch(r"[0-9a-f]{64}", expected_sha256)):
-        raise ValueError("raw RGB expected digest is invalid")
     source_path = Path(source_image)
     if authenticated is not None:
         if not isinstance(authenticated, AuthenticatedRGB):
             raise TypeError("cached RGB must be an AuthenticatedRGB")
         if (authenticated.resolved_source_path !=
                 str(source_path.resolve(strict=True)) or
-                authenticated.sha256 != expected_sha256 or
+                (expected_sha256 is not None and
+                 authenticated.sha256 != expected_sha256) or
                 (authenticated.width_px, authenticated.height_px) !=
                 tuple(expected_resolution)):
             raise ValueError("cached RGB disagrees with requested source")
         return authenticated
     raw_bytes = source_path.read_bytes()
     actual_sha256 = hashlib.sha256(raw_bytes).hexdigest()
-    if actual_sha256 != expected_sha256:
+    if expected_sha256 is not None and actual_sha256 != expected_sha256:
         raise ValueError("raw RGB digest does not match expected digest")
     if (not isinstance(expected_resolution, (list, tuple)) or
             len(expected_resolution) != 2 or
@@ -75,133 +73,51 @@ def authenticate_raw_rgb_image(
         width_px=width, height_px=height)
 
 
-def numbered_dot_placement(markers, *, width: int,
-                           height: int) -> tuple[list, str | None]:
-    """Resolve marker pixels, or say why this set cannot be drawn.
+def materialize_target_point_image(
+        authenticated: AuthenticatedRGB, surface_anchor: dict,
+        destination: Path) -> dict:
+    """Mark the exact visible 3D anchor pixel, without drawing a bbox."""
+    from PIL import Image, ImageDraw
 
-    A record may legitimately carry a marker the renderer cannot draw: the
-    inventory only requires a finite centroid inside the raster, while the dot
-    needs a whole radius of margin. Answering with a reason instead of raising
-    lets the question be refused at eligibility time, where every other
-    unpublishable case is already handled, rather than aborting a whole build.
-    """
-    radius = int(config.A3_MARKER_RADIUS_PX)
-    rendered = []
-    for marker in markers:
-        if (not isinstance(marker, dict) or
-                marker.get("kind") != "numbered_dot"):
-            return [], "invalid numbered-dot marker"
-        number = marker.get("number")
-        center = marker.get("center_xy")
-        if (not isinstance(number, int) or isinstance(number, bool) or
-                number <= 0 or not isinstance(center, (list, tuple)) or
-                len(center) != 2):
-            return [], "invalid numbered-dot marker"
-        try:
-            x_float, y_float = (float(value) for value in center)
-        except (TypeError, ValueError):
-            return [], "invalid numbered-dot marker"
-        if not (math.isfinite(x_float) and math.isfinite(y_float)):
-            return [], "invalid numbered-dot marker"
-        x, y = int(round(x_float)), int(round(y_float))
-        if (x - radius < 0 or y - radius < 0 or
-                x + radius >= int(width) or y + radius >= int(height)):
-            return [], "numbered-dot marker is outside image bounds"
-        if any(math.hypot(x - prior_x, y - prior_y) <
-               config.A3_MARKER_MIN_SEPARATION_PX
-               for prior_x, prior_y, _prior_number in rendered):
-            return [], "numbered-dot markers overlap"
-        rendered.append((x, y, number))
-    if not rendered:
-        return [], "numbered-dot image requires at least one marker"
-    return rendered, None
-
-
-def materialize_numbered_dot_image(
-        authenticated: AuthenticatedRGB, markers,
-        asset_dir, asset_id: str, *, encoded_cache: dict | None = None) -> dict:
-    """Create a deterministic lossless PNG with bounded numbered dots."""
-    from PIL import Image, ImageDraw, ImageFont
-
-    if (not isinstance(asset_id, str) or
-            not re.fullmatch(r"[abd]-[0-9a-f]{16}", asset_id)):
-        raise ValueError("invalid numbered-dot asset id")
-    if not isinstance(authenticated, AuthenticatedRGB):
-        raise ValueError("numbered-dot source must be authenticated RGB")
-    source_path = Path(authenticated.resolved_source_path)
-    root = Path(asset_dir).resolve()
-    destination = (root / f"{asset_id}.png").resolve()
-    if destination.parent != root:
-        raise ValueError("numbered-dot destination escapes asset directory")
-    if source_path == destination:
-        raise ValueError("numbered-dot source and destination must differ")
+    pixel = surface_anchor["pixel_xy_px"]
+    x, y = (int(value) for value in pixel)
     width, height = authenticated.width_px, authenticated.height_px
-    radius = int(config.A3_MARKER_RADIUS_PX)
-    rendered, rejection = numbered_dot_placement(
-        markers, width=width, height=height)
-    if rejection is not None:
-        raise ValueError(rejection)
-    if not rendered:
-        raise ValueError("numbered-dot image requires at least one marker")
-    cache_key = (
-        authenticated.sha256, width, height, radius, tuple(rendered))
-    cached = encoded_cache.get(cache_key) if encoded_cache is not None else None
-    if cached is None:
-        with Image.open(io.BytesIO(authenticated.raw_bytes)) as opened:
-            image = opened.copy()
-            image.load()
-        draw = ImageDraw.Draw(image)
-        font = ImageFont.load_default()
-        for x, y, number in rendered:
-            draw.ellipse(
-                (x - radius, y - radius, x + radius, y + radius),
-                fill=(220, 0, 0), outline=(255, 255, 255), width=2)
-            label = str(number)
-            left, top, right, bottom = draw.textbbox(
-                (0, 0), label, font=font)
-            draw.text(
-                (x - (right - left) / 2 - left,
-                 y - (bottom - top) / 2 - top),
-                label, fill=(255, 255, 255), font=font)
-        payload = io.BytesIO()
-        image.save(
-            payload, format="PNG", optimize=False,
-            compress_level=config.QA_MARKED_PNG_COMPRESSION_LEVEL)
-        expected_bytes = payload.getvalue()
-        expected_sha256 = hashlib.sha256(expected_bytes).hexdigest()
-        if destination.exists():
-            if sha256_file(destination) != expected_sha256:
-                raise ValueError(
-                    "conflicting numbered-dot derivative already exists")
-        else:
-            atomic_write_binary(
-                destination, lambda stream: stream.write(expected_bytes))
-        if encoded_cache is not None:
-            encoded_cache[cache_key] = {
-                "path": str(destination), "sha256": expected_sha256}
-    else:
-        if (not isinstance(cached, dict) or
-                cached.get("sha256") is None or cached.get("path") is None):
-            raise TypeError("numbered-dot encoded cache entry is invalid")
-        expected_sha256 = str(cached["sha256"])
-        cached_path = Path(str(cached["path"]))
-        if destination.exists():
-            if sha256_file(destination) != expected_sha256:
-                raise ValueError(
-                    "conflicting numbered-dot derivative already exists")
-        else:
-            linked = link_or_copy_file(cached_path, destination)
-            if not linked and sha256_file(destination) != expected_sha256:
-                destination.unlink(missing_ok=True)
-                raise ValueError("copied numbered-dot derivative changed")
+    if not (0 <= x < width and 0 <= y < height):
+        raise ValueError("surface anchor pixel is outside the image")
+
+    with Image.open(io.BytesIO(authenticated.raw_bytes)) as opened:
+        image = opened.copy()
+        image.load()
+    draw = ImageDraw.Draw(image)
+    radius = int(config.TARGET_POINT_MARKER_RADIUS_PX)
+    for r, color in ((radius, (0, 0, 0)),
+                     (radius - 2, (255, 255, 255)),
+                     (radius - 4, (220, 24, 24))):
+        draw.ellipse((x - r, y - r, x + r, y + r), fill=color)
+
+    payload = io.BytesIO()
+    image.save(
+        payload, format="PNG", optimize=False,
+        compress_level=config.QA_MARKED_PNG_COMPRESSION_LEVEL)
+    encoded = payload.getvalue()
+    digest = hashlib.sha256(encoded).hexdigest()
+    destination = Path(destination)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write_binary(destination, lambda stream: stream.write(encoded))
     return {
         "marked": True,
         "path": str(destination),
-        "sha256": expected_sha256,
+        "sha256": digest,
         "raw_path": authenticated.source_path,
         "raw_sha256": authenticated.sha256,
-        "width_px": int(width),
-        "height_px": int(height),
+        "width_px": width,
+        "height_px": height,
+        "marker": {
+            "kind": "surface_point",
+            "style": "red-dot-white-black-outline",
+            "radius_px": radius,
+            "center_xy": [x, y],
+        },
     }
 
 

@@ -41,12 +41,7 @@ LEVEL_FLOOR_FIT = FloorPlaneFitResult(
 
 
 CAPACITY_TASKS = (
-    "A1_collision",
-    "A2_collision_step_grounding",
-    "A3_contact_object",
-    "B1_endpoint_distance",
-    "B2_endpoint_direction",
-    "C1_future_view_selection",
+    "A1", "A2", "A3", "A4", "B1", "B2", "C1",
 )
 
 
@@ -62,21 +57,14 @@ def capacity_evidence(root: Path, *, counts=None) -> dict:
     source_authority_path.write_text(json.dumps({
         "schema": "synthetic-capacity-source-authority"}))
     datasets = {}
-    record = {"selection": {"proposal_provenance": {"ordinary": {
-        "protocol": "depth-conditioned-action-bank-v3",
-        "variant": "natural_dynamic",
-    }}}}
-    record_digest = hashlib.sha256(json.dumps(
-        record, sort_keys=True, separators=(",", ":"),
-        ensure_ascii=True).encode("ascii")).hexdigest()
+    record = {"schema_version": "abc1.record.v2", "record_uid": "synthetic"}
     for dataset, catalog_count in counts.items():
         canaries = []
         for suffix in ("0", "1"):
             scene_id = f"{dataset}-{suffix}"
             scene_root = Path(root) / dataset / scene_id
-            artifact = scene_root / "candidate_qa"
-            (artifact / "public").mkdir(parents=True)
-            (artifact / "private").mkdir()
+            scene_root.mkdir(parents=True)
+            artifact = scene_root / "supply.json"
             records = scene_root / "records.jsonl"
             records.write_text((json.dumps(record) + "\n") * 10)
             source_path = {
@@ -106,6 +94,7 @@ def capacity_evidence(root: Path, *, counts=None) -> dict:
                 **controller_body, "sha256": controller_sha}))
             run_meta = scene_root / "run_meta.json"
             run_meta.write_text(json.dumps({
+                "record_count": 10,
                 "stats": {"pose_attempts": 20},
                 "params": {
                     "backend": dataset, "scenes": [scene_id],
@@ -147,36 +136,14 @@ def capacity_evidence(root: Path, *, counts=None) -> dict:
                 ("controller_scene_finished",
                  110.0 + 20 * pose_times[dataset]),
             )))
-            items = []
-            answers = []
-            atoms = [{"id": "atom-0", "record_sha256": record_digest}]
-            for task_id in CAPACITY_TASKS:
-                for index in range(10):
-                    item_id = f"{task_id}-{index}"
-                    items.append({"id": item_id, "task_id": task_id})
-                    answers.append({
-                        "id": item_id,
-                        "atom_ref": "atom-0",
-                        "input_asset": {
-                            "sha256": f"marked-{task_id}-{index}",
-                            "raw_sha256": f"frame-{index}",
-                        },
-                    })
-            contexts = [{
-                "record_sha256": record_digest,
-                "context": {
-                    "source": {
-                        "source_dataset": dataset, "scene_id": scene_id},
-                    "collection_contract": {
-                        "source_dataset": dataset, "scene_id": scene_id},
+            artifact.write_text(json.dumps({
+                "schema": "egoconseq.abc1-background-supply.v1",
+                "measurements": {
+                    "candidate_records": 10,
+                    "task_counts": {
+                        task_id: 10 for task_id in CAPACITY_TASKS},
                 },
-            }]
-            for path, rows in (
-                    (artifact / "public" / "items.jsonl", items),
-                    (artifact / "private" / "answers.jsonl", answers),
-                    (artifact / "private" / "atoms.jsonl", atoms),
-                    (artifact / "private" / "record_contexts.jsonl", contexts)):
-                path.write_text("".join(json.dumps(row) + "\n" for row in rows))
+            }))
             canaries.append({
                 "scene_id": scene_id,
                 "records_path": str(records),
@@ -252,8 +219,7 @@ def clean_record() -> dict:
     frame.objects[0]["mask_area_px"] = 30
     frame.semantic_index = _SurfaceIndex()
     outcome = consequence.judge(
-        frame, Disc(0.25), [Forward(2.0)], nav=HalfPlaneNav(0.8),
-        target_ids=[7])
+        frame, Disc(0.25), [Forward(2.0)], nav=HalfPlaneNav(0.8))
     outcome["outcome_id"] = "o"
     return record_fields.build_record(
         frame, [outcome], image_path="img/f.png",

@@ -10,16 +10,13 @@ from __future__ import annotations
 
 import hashlib
 import json
-import math
 import re
 from typing import Dict, Optional
 
 import numpy as np
 from scipy.spatial import cKDTree
 
-from pipeline import (
-    config, dataset_contracts, objects as OBJ, perception, semantic,
-)
+from pipeline import config, dataset_contracts
 
 
 AXIS_TRANSFORM_PROTOCOL = "interiorgs-zup-to-habitat-yup.v1"
@@ -28,10 +25,6 @@ ALIGNMENT_CERTIFICATE_SCHEMA = \
 SCENE_CAPABILITY_SCHEMA = "egoconseq.gs-scene-capability.v1"
 VISIBLE_CONTACT_IDENTITY_SCHEMA = \
     "gs-visible-contact-instance-identity.v1"
-VISIBLE_B_TARGET_GEOMETRY_SCHEMA = "gs-visible-b-target-geometry.v1"
-VISIBLE_B_GROUND_SUPPORT_PROTOCOL = "initial-visible-depth-anchor.v1"
-VISIBLE_B_REFERENCE_CENTROID_PROTOCOL = \
-    "initial-visible-depth-centroid.v1"
 VISIBLE_INSTANCE_PROTOCOL = "initial-visible-depth-instance-points.v1"
 _FROZEN_AXIS_MATRIX = np.asarray([
     [1, 0, 0],
@@ -269,6 +262,14 @@ class BboxSemanticIndex:
         # point. Targets without Gaussian surface support fail closed.
         return np.empty((0, 3), np.float64)
 
+    def instance_bbox_centroid(self, instance_id: int) -> np.ndarray:
+        """Return the centroid of one official transformed InteriorGS bbox."""
+        rows = np.flatnonzero(self._ids == int(instance_id))
+        if len(rows) != 1:
+            raise KeyError(f"GS bbox instance {int(instance_id)} is unknown")
+        row = int(rows[0])
+        return ((self._mins[row] + self._maxs[row]) * 0.5).copy()
+
     def visible_depth_view(
             self, world_points: np.ndarray, instance_ids: np.ndarray, *,
             geometry_authority_sha256: str,
@@ -417,84 +418,6 @@ class VisibleDepthSemanticIndex:
                 "confirmed": True, "reason": "confirmed", **body,
             })
         return results
-
-    def target_geometry_atom(
-            self, instance_id: int, floor_plane, *,
-            expected_geometry_authority_sha256: str,
-            pose: dict | None = None) -> dict:
-        """Build the GS B anchor from visible depth, never bbox or Gaussian."""
-        instance_id = _source_instance_id(instance_id)
-        if expected_geometry_authority_sha256 != \
-                self.geometry_authority_sha256:
-            raise ValueError("GS visible target authority digest disagrees")
-        if not isinstance(pose, dict):
-            raise ValueError("GS visible target pose is required")
-        position = np.asarray(pose.get("position"), dtype=np.float64)
-        yaw = float(pose.get("yaw_rad"))
-        if (position.shape != (3,) or not np.isfinite(position).all() or
-                not math.isfinite(yaw)):
-            raise ValueError("GS visible target pose is invalid")
-        points = self.instance_points(instance_id)
-        if not len(points):
-            raise KeyError(f"GS instance {instance_id} is not visible")
-        local = perception.local_from_world(points, position, yaw)
-        mask = np.asarray(
-            OBJ.ground_support_mask(local, floor_plane), dtype=bool)
-        support_local = local[mask]
-        if len(support_local) < config.TARGET_GROUND_SUPPORT_MIN_POINTS:
-            raise KeyError(
-                f"GS instance {instance_id} lacks visible ground support")
-        cell_size = float(config.INITIAL_VISIBLE_SUPPORT_GRID_CELL_M)
-        cells = sorted({
-            (int(math.floor(float(point[0]) / cell_size)),
-             int(math.floor(float(point[2]) / cell_size)))
-            for point in support_local
-        })
-        polygons = []
-        for ix, iz in cells:
-            corners_local = np.asarray([
-                [ix * cell_size, 0.0, iz * cell_size],
-                [(ix + 1) * cell_size, 0.0, iz * cell_size],
-                [(ix + 1) * cell_size, 0.0, (iz + 1) * cell_size],
-                [ix * cell_size, 0.0, (iz + 1) * cell_size],
-            ])
-            corners_world = perception.world_from_local(
-                corners_local, position, yaw)
-            polygons.append([point[[0, 2]] for point in corners_world])
-        components = semantic._canonical_support_components(polygons)
-        support = {
-            "protocol": VISIBLE_B_GROUND_SUPPORT_PROTOCOL,
-            "frame": "pbench_world_xz",
-            "ground_band_m": [
-                float(value) for value in config.GROUND_OBSTACLE_BAND_M],
-            **components,
-        }
-        support["sha256"] = _canonical_sha256(support)
-        centroid_xyz = np.mean(points, axis=0)
-        centroid = {
-            "protocol": VISIBLE_B_REFERENCE_CENTROID_PROTOCOL,
-            "frame": "pbench_world_xyz",
-            "world_xyz_m": [float(value) for value in centroid_xyz],
-            "world_xz_m": [
-                float(centroid_xyz[0]), float(centroid_xyz[2])],
-        }
-        centroid["sha256"] = _canonical_sha256(centroid)
-        value = {
-            "schema": VISIBLE_B_TARGET_GEOMETRY_SCHEMA,
-            "instance_id": instance_id,
-            "category": self.id_to_cat[instance_id],
-            "geometry_authority_sha256": self.geometry_authority_sha256,
-            "semantic_source_sha256": self.semantic_source_sha256,
-            "alignment_certificate_sha256": str(
-                self.alignment_certificate["sha256"]),
-            "visible_point_protocol": VISIBLE_INSTANCE_PROTOCOL,
-            "visible_point_count": int(len(points)),
-            "visible_points_sha256": self._points_sha256(points),
-            "ground_support": support,
-            "reference_centroid": centroid,
-        }
-        return {**value, "sha256": _canonical_sha256(value)}
-
 
 def load_bbox_index(labels_path: str) -> BboxSemanticIndex:
     """Load source labels under the official fixed coordinate contract."""

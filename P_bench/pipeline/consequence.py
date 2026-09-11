@@ -34,6 +34,12 @@ def _a_stability_batch_diagnostics() -> dict:
 def _full_contact_attribution(frame, contact) -> dict:
     world_point = contact.get("world_point")
     semantic_index = getattr(frame, "semantic_index", None)
+    component = contact.get("obstacle_identity")
+    if component and hasattr(semantic_index, "instance_id_for_component"):
+        instance_id = semantic_index.instance_id_for_component(component)
+        labels = semantic_index.category_layers(instance_id)
+        return {"instance_id": instance_id, "category": labels["machine"],
+                "source_category": labels["raw"], "unattributed": False}
     if (world_point is None or semantic_index is None or
             not hasattr(semantic_index, "assign")):
         return {"instance_id": None, "category": None, "unattributed": True}
@@ -241,14 +247,29 @@ def collect_a_stability_rows(sim, frame, body, acts,
                              nominal_outcome: dict, *,
                              require_contact_instance_witness: bool = True
                              ) -> list[dict]:
-    """Materialize the seven frozen SE(2) rerollout rows, without A3 lookup.
+    """Materialize seven frozen SE(2) rows with six fresh rerollouts.
 
     The initial RGB-D frame remains the evidence frame for every perturbation.
     Habitat navmesh physics is rebound to the perturbed world origin; depth and
     corridor checks use the matching ``base_pose`` against that original frame.
     """
-    rows = []
-    for index, perturbation in enumerate(R2R_A_STABILITY_PERTURBATIONS):
+    nominal = R2R_A_STABILITY_PERTURBATIONS[0]
+    rows = [{
+        "perturbation_id": str(nominal["id"]),
+        "transform": {
+            "x_m": float(nominal["x_m"]),
+            "z_m": float(nominal["z_m"]),
+            "yaw_deg": float(nominal["yaw_deg"]),
+        },
+        "physical": record_fields.json_value(
+            nominal_outcome.get("physical") or {}),
+        "depth_physical": record_fields.json_value(
+            nominal_outcome.get("depth_physical") or {}),
+        "corridor_coverage": float(
+            (nominal_outcome.get("evidence") or {}).get(
+                "physical", {})["coverage"]),
+    }]
+    for perturbation in R2R_A_STABILITY_PERTURBATIONS[1:]:
         transform = {
             "x_m": float(perturbation["x_m"]),
             "z_m": float(perturbation["z_m"]),
@@ -264,22 +285,6 @@ def collect_a_stability_rows(sim, frame, body, acts,
             frame, body, acts, nav, transform,
             require_contact_instance_witness=
                 require_contact_instance_witness))
-        if index == 0:
-            nominal_coverage = float(
-                (nominal_outcome.get("evidence") or {}).get(
-                    "physical", {})["coverage"])
-            nominal_physical = record_fields.json_value(
-                nominal_outcome.get("physical") or {})
-            nominal_depth = record_fields.json_value(
-                nominal_outcome.get("depth_physical") or {})
-            if (oracle_inputs["physical"] !=
-                    nominal_physical or
-                    oracle_inputs["depth_physical"] !=
-                    nominal_depth or
-                    abs(oracle_inputs["corridor_coverage"] -
-                        nominal_coverage) > 1e-12):
-                raise ValueError(
-                    "fresh nominal rerollout disagrees with nominal outcome")
         rows.append({
             "perturbation_id": str(perturbation["id"]),
             "transform": transform,
@@ -446,19 +451,16 @@ def collect_a_stability_certificate(sim, frame, body, acts,
     return outcome["shared_oracle_stability"]
 
 
-def judge(frame, body, acts, nav=None, *, target_ids=None,
+def judge(frame, body, acts, nav=None, *,
           cached_physical=None, cached_depth_physical=None,
           cached_corridor_coverage=None,
           cached_oracle_consensus=None,
           require_contact_instance_witness: bool = False) -> dict:
     """Predict structured consequences for one body-action query."""
-    targets = (OBJ.eligible_target_ids(frame) if target_ids is None
-               else list(target_ids))
     physical = copy.deepcopy(cached_physical) if cached_physical is not None \
         else rollout.physical_rollout(nav, acts)
     _attribute_full_contact(frame, physical["physical"])
     checkpoints = physical["checkpoints"]
-    future_view = rollout.future_view_rollout(frame, checkpoints, targets)
     execution = physical["execution"]
     view_estimate = (copy.deepcopy(cached_depth_physical)
                      if cached_depth_physical is not None else
@@ -496,14 +498,6 @@ def judge(frame, body, acts, nav=None, *, target_ids=None,
             "coverage_protocol": rollout.EVIDENCE_PROTOCOL_VERSION,
             "view_collision_estimate": view_collision,
         },
-        "future_view": {
-            "status": (
-                "not_computed" if future_view["status"] != "computed" else
-                "insufficient" if future_view.get("objects_entering_view") or
-                not future_view.get("initial_depth_reprojection_agrees", False)
-                else "sufficient"),
-            "source_frame": "initial",
-        },
     }
     result = {
         "body": body.to_dict(),
@@ -513,7 +507,6 @@ def judge(frame, body, acts, nav=None, *, target_ids=None,
         "physical": physical["physical"],
         "depth_physical": view_estimate,
         "oracle_consensus": consensus,
-        "future_view": future_view,
         "evidence": evidence,
         "provenance": {
             "physical_oracle": physical["physical"]["authority"],

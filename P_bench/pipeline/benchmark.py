@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Dict
 
+from pipeline import actions as action_geometry
 from pipeline import consensus as consensus_fields
 from pipeline import capability_contracts
 from pipeline import config
@@ -60,13 +61,13 @@ PUBLIC_INPUT_CONTRACT = {
         "collision_response": "stop_at_first_contact",
     },
     "relations": {
+        "A4_checkpoint_direction": (
+            "camera_centered_fixed_surface_point_checkpoint_3d_direction"),
         "B1_endpoint_distance": (
-            "robot_center_to_target_ground_support_nearest_distance; "
-            "the item task_metadata declares the authenticated geometry "
-            "protocol"),
+            "onboard_camera_optical_center_to_fixed_visible_surface_point_"
+            "3d_euclidean_distance"),
         "B2_endpoint_direction": (
-            "target_reference_centroid_terminal_bearing; the item "
-            "task_metadata declares the authenticated geometry protocol"),
+            "camera_centered_fixed_surface_point_terminal_3d_direction"),
     },
 }
 # The published height is a continuous fit rounded for legibility, not a
@@ -85,11 +86,13 @@ A_TASK_QUESTIONS = {
 }
 B_TASK_QUESTIONS = {
     "B1_endpoint_distance":
-        "After safely completing all the actions, how far will the robot be "
-        "from {target}?",
+        "After safely completing all the actions, what is the three-"
+        "dimensional straight-line distance from the onboard egocentric "
+        "camera's optical center to {target}?",
     "B2_endpoint_direction":
         "After safely completing all the actions, where will {target} be "
-        "relative to the robot’s final facing direction?",
+        "relative to the robot’s final facing direction?\n\n" +
+        action_geometry.DIRECTION_CONVENTION,
 }
 C_TASK_QUESTIONS = {
     "C1_future_view_selection":
@@ -101,11 +104,6 @@ ABC_CANDIDATE_TASK_IDS = (
     *B_TASK_QUESTIONS,
     *C_TASK_QUESTIONS,
 )
-
-
-def r2r_semantic_source_sha256(source: dict) -> str:
-    """Validate strict source provenance and return its semantic PLY hash."""
-    return record_fields.r2r_semantic_source_sha256(source)
 
 
 def _stability_shortfall_reason(certificate: Dict) -> str:
@@ -194,7 +192,9 @@ def shared_visible_space_certificate(
     try:
         expected_contract = record_fields.collection_contract(
             source, "main", record_schema_version=rec.get(
-                "schema_version", record_fields.SCHEMA_VERSION))
+                "schema_version", record_fields.SCHEMA_VERSION),
+            contract_version=(
+                contract.get("version") if dataset == "b1k" else None))
         authority_binding = record_fields.authority_binding(source)
     except (StopIteration, TypeError, ValueError):
         return None, contract_reason
@@ -257,8 +257,12 @@ def build_shared_visible_space_evidence(
             certificate, reason = None, "shared_oracle_stability_missing"
         else:
             summary = certificate.get("summary") or {}
-            if (summary.get("collision_label_stable") is not True or
-                    not isinstance(summary.get("collision"), bool)):
+            nominal = (
+                certificate.get("version") == "nominal-oracle.v1" and
+                summary.get("evaluation") == "nominal")
+            if (not isinstance(summary.get("collision"), bool) or
+                    (not nominal and
+                     summary.get("collision_label_stable") is not True)):
                 certificate, reason = (
                     None, _stability_shortfall_reason(certificate))
             else:

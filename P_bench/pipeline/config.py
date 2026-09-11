@@ -79,10 +79,6 @@ B1K_RESET_ORIENTATION_TOL_RAD = 1e-6
 # Runtime floor meshes are closed solids.  Only upward-facing support faces
 # are walkable floor authority; bottom and side faces remain collision input.
 B1K_FLOOR_UP_NORMAL_MIN = 0.5
-# Deterministic compression for per-entity initial-depth ground support.  This
-# is a record representation parameter, not the navigation voxel resolution,
-# even though both currently use five-centimetre cells.
-INITIAL_VISIBLE_SUPPORT_GRID_CELL_M = 0.05
 GROUND_ORACLE_HEIGHT_M = GROUND_OBSTACLE_BAND_M[1]
 # Recast voxelises before it erodes, so leaving these at habitat's defaults
 # silently rounds the band: a 0.2 m cell height turns a 0.30 m agent into
@@ -171,6 +167,10 @@ DEPTH_SUPPORT_TOL_M = 0.3         # projected-pixel depth slack for corridor sup
 
 # --- balanced action-combination generation ---
 GEN_TURNS_DEG = (-45, -30, -15, 15, 30, 45)
+# The first primitive is public and should not reveal whether the 79-degree or
+# 110-degree camera profile was used.  A 45-degree first turn is only visible
+# to the latter, so turn-first programs use this shared subset at index zero.
+INITIAL_TURNS_DEG = (-30, -15, 15, 30)
 # Forward legs are 0.5 m multiples only, so every action is a clean metric value
 # (no arbitrary/near-boundary distances). Turn/forward strictly alternate, so no
 # two consecutive same-direction primitives can occur (enforced in actions.py).
@@ -192,38 +192,48 @@ GEN_LENGTHS = (1, 2, 3, 4, 5, 6)
 # --- background collection capacity, quota, and controller closeout
 BACKGROUND_MIN_TOTAL_ITEMS = 6000
 BACKGROUND_MIN_ITEMS_PER_TASK = 1000
+BACKGROUND_COLLECTION_SEED_BASE = 20260811
 BACKGROUND_MAX_SCENE_WALLCLOCK_S = 21600
 BACKGROUND_CANARY_ACCEPTED_RECORDS = 20
+BACKGROUND_RECORDS_PER_SCENE_BY_DATASET = {
+    "r2r": 20,
+    "gs": 20,
+    "b1k": 40,
+}
 BACKGROUND_CANARY_POSE_ATTEMPT_CAP_BY_DATASET = {
     "r2r": 800,
     "gs": 800,
     "b1k": 6000,
 }
-BACKGROUND_SCENE_WALLCLOCK_S_BY_DATASET = {
+BACKGROUND_CANARY_SCENE_WALLCLOCK_S_BY_DATASET = {
     "r2r": 600,
     "gs": 600,
     "b1k": 900,
+}
+BACKGROUND_SCENE_WALLCLOCK_S_BY_DATASET = {
+    "r2r": 600,
+    "gs": 600,
+    "b1k": 1800,
 }
 BACKGROUND_RECORD_IDLE_STOP_S = 120.0
 BACKGROUND_SIGINT_GRACE_S = 30.0
 BACKGROUND_SIGTERM_GRACE_S = 30.0
 BACKGROUND_CAPACITY_HANDOFF_GRACE_S = 120.0
+BACKGROUND_FINALIZING_TIMEOUT_S = 300.0
 BACKGROUND_FINALIZATION_GRACE_S = 30.0
 BACKGROUND_HEARTBEAT_INTERVAL_S = 30
+BACKGROUND_PROCESS_POLL_INTERVAL_S = 1.0
 BACKGROUND_INITIALIZATION_DEADLINE_S = 600
 BACKGROUND_FIRST_RECORD_DEADLINE_S = BACKGROUND_RECORD_IDLE_STOP_S
 BACKGROUND_RETRYABLE_INITIALIZATION_ATTEMPTS = 1
 BACKGROUND_MAX_IDLE_GPU_MEMORY_MIB = 500
 BACKGROUND_MIN_FREE_STORAGE_BYTES = 120 * 1024 ** 3
-BACKGROUND_MIN_ITEMS_PER_LENGTH = 1
 BACKGROUND_MIN_UNIQUE_FRAMES_BY_DATASET = {
-    "r2r": 15000,
-    "gs": 15000,
-    "b1k": 6000,
+    "r2r": 3000,
+    "gs": 3000,
+    "b1k": 3000,
 }
-BACKGROUND_MIN_HEADLINE_ITEMS_GLOBAL = 160000
-BACKGROUND_OVERFLOW_DATASET = "r2r"
-BACKGROUND_MAX_A4_ITEMS = 60000
+BACKGROUND_TARGET_POSE_DIVERSE_FRAMES = 40000
 BACKGROUND_MIN_SCENE_FAMILIES_BY_DATASET = {
     "r2r": 12,
     "gs": 12,
@@ -242,7 +252,7 @@ BACKGROUND_GS_CATALOG_SCENE_COUNT = 54
 # Natural per-pose candidate selection and private do(action) matching.
 # Candidate selection is deliberately label-blind; balance belongs to the
 # artifact compiler, never to a physical pose.
-ACTION_CANDIDATE_MIN_PER_POSE = 2
+ACTION_CANDIDATE_MIN_PER_POSE = 1
 # The total action bank that may pay for full geometry, so it also bounds the
 # published ``candidate_budget``. Proposal v4 divides it into the ordinary
 # shortlist and the bounded C1 second pass below.
@@ -251,7 +261,6 @@ ACTION_CANDIDATE_MAX_PER_POSE = 48
 # only after the seven frozen perturbations, so trying exactly 36 would make
 # every unstable group reduce the record instead of letting a later,
 # label-blind shortlist member take its place.
-ACTION_CANDIDATE_ORDINARY_ATTEMPTS_PER_POSE = 48
 ACTION_CANDIDATE_ORDINARY_PER_POSE = 36
 ACTION_CANDIDATE_ORDINARY_LADDER = (18, 24, 36)
 # C1 counterfactual slots are taken from that same total budget rather than
@@ -261,9 +270,6 @@ C1_QUERIES_PER_POSE = 2
 C1_NEIGHBORS_PER_QUERY = 6
 C1_NEIGHBOR_SLOTS_PER_POSE = (
     C1_QUERIES_PER_POSE * C1_NEIGHBORS_PER_QUERY)
-ACTION_CANDIDATE_CERTIFICATION_MAX_PER_POSE = (
-    ACTION_CANDIDATE_ORDINARY_ATTEMPTS_PER_POSE +
-    C1_NEIGHBOR_SLOTS_PER_POSE)
 ACTION_MATCH_DISTANCE_BUCKET_M = 0.25
 ACTION_MATCH_TURN_BUCKET_DEG = 15.0
 # Label-blind natural-arm allocation within each action length. The distance
@@ -300,15 +306,8 @@ GS_COLLISION_PLANAR_GRID_M = 1e-9  # numerical USD projection canonicalization
 OBJ_MIN_AREA_PX = 400
 OBJ_MIN_VALID_DEPTH = 20
 OBJ_MAX_POINTS = 2000             # transient subsample cap for points_xz
-TARGET_VISIBLE_MIN_PX = 20
-TARGET_GROUND_SUPPORT_MIN_POINTS = 5
-# v16 B selects exactly one target from initial depth-backed object facts.
-B_TARGET_SELECTION_PROTOCOL = "b-s0-target-selection.v1"
-B_TARGET_MIN_DEPTH_BACKED_AREA_RATIO = 0.01
-B_TARGET_MIN_BBOX_WIDTH_RATIO = 0.08
-B_TARGET_MIN_BBOX_HEIGHT_RATIO = 0.08
-B_TARGET_VISIBLE_DISTANCE_RANGE_M = (1.0, 5.0)
-B_TARGET_EXCLUDED_MATERIAL_TOKENS = frozenset({
+# A4/B1/B2 use exact depth-backed instance pixels, without object-size gates.
+SURFACE_TARGET_EXCLUDED_MATERIAL_TOKENS = frozenset({
     "glass", "mirror", "reflective", "transparent",
 })
 B_ENDPOINT_DISTANCE_MIN_M = 0.05
@@ -321,14 +320,8 @@ C1_TERMINAL_POSITION_TOL_M = 1e-9
 C1_TERMINAL_HEADING_TOL_DEG = 1e-9
 B_DISTANCE_CHANGE_MIN_M = 0.30
 B_DISTANCE_CHANGE_MIN_RATIO = 0.10
-B_DIRECTION_BOUNDARY_MARGIN_DEG = 15.0
-B_TARGET_CENTROID_MIN_RANGE_M = 0.05
-# Task-GT diagnostics are measured before QA publication policy is chosen.
-# This threshold has its own semantics: it limits how far the complete-mesh
-# B1 nearest witness may lie from the initial visible support.  Its numerical
-# equality to SEMANTIC_ASSIGN_TOL_M is intentional (both are seeded at the
-# current depth/semantic uncertainty scale), but neither constant aliases the
-# other and future calibration may move them independently.
+TARGET_DIRECTION_MIN_RANGE_M = 0.05
+# MP3D A3 complete-face queries keep a small authenticated index cache.
 MP3D_TARGET_FACE_INDEX_CACHE_MAX_SCENES = 2
 MP3D_TARGET_FACE_INDEX_CACHE_MAX_BYTES = 512 * 1024 * 1024
 MP3D_TARGET_FACE_INDEX_STREAM_BYTES = 1024 * 1024
@@ -337,10 +330,9 @@ MP3D_AABB_MADVISE_INTERVAL_CHUNKS = 8
 # triangle distances, not this value, determine the published top two.
 A3_FACE_AABB_PRUNE_SLACK_M = 1e-9
 TRUSTED_R2R_SCENE_CACHE_MAX_SCENES = 4
-B_DISTANCE_CHOICE_PROTOCOL = "b1-metric-choices-rank-balanced.v3"
-B_DISTANCE_CHOICE_DECIMALS = 2
-B_DISTANCE_CHOICE_MIN_SEPARATION_M = 0.25
-B_DISTANCE_DISPLAY_ERROR_TOLERANCE_M = 0.006
+# Public metric-distance contract, shared by B1 and B3.
+B1_OPEN_DISPLAY_DECIMALS = 2
+B1_OPEN_ABSOLUTE_TOLERANCE_M = 0.25
 # Publication-only bins used to avoid keeping many numerically different B1
 # questions with the same coarse near/mid/far meaning from one source frame.
 DIVERSITY_B1_DISTANCE_BINS_M = (1.0, 2.0)
@@ -395,22 +387,11 @@ FLOOR_MAX_INLIER_RMSE_M = 0.010
 FLOOR_MAX_TILT_DEG = 5.0
 FLOOR_MIN_SUPPORT_EXTENT_M = 0.60
 FLOOR_MIN_SUPPORT_CELLS = 40
-# Frame-composition gates use geometry only. Texture or blur heuristics would
-# introduce a backend-dependent appearance bias into the benchmark.
-COLLECT_MIN_VALID_DEPTH_RATIO = 0.95
-COLLECT_MIN_VISIBLE_FLOOR_RATIO = 0.08
-COLLECT_VISIBLE_FLOOR_REFERENCE_HEIGHT_M = 0.80
 # Pose discovery is an input-population budget, not an answer or witness
 # quota. Each scene must expose enough independently sampled positions and
 # headings before a rare task-specific witness may be declared unavailable.
 POSE_CANDIDATES_PER_SCENE = 100
 
-
-def collect_min_visible_floor_ratio(camera_height_above_floor_m: float) -> float:
-    """Scale the composition gate without penalizing taller camera views."""
-    height = max(float(camera_height_above_floor_m), 1e-6)
-    return (COLLECT_MIN_VISIBLE_FLOOR_RATIO *
-            COLLECT_VISIBLE_FLOOR_REFERENCE_HEIGHT_M / height)
 
 # --- benchmark publication margins ---
 # These define the release set, not the geometric oracle resolution. Samples
@@ -429,15 +410,17 @@ BENCH_SAFE_CLEARANCE_M = 0.30
 
 # Two poses in one scene count as the same observation when they are within
 # BOTH of these. One source, because the collector and the threshold pilot must
-# reproduce each other's population from the same exclusion payload: while the
-# pilot held its own 1.0 m / 30 deg against the collector's 1.5 / 45, a
-# candidate 1.2 m from an excluded pose was kept by one and dropped by the other.
-POSE_DIVERSITY_POSITION_M = 1.5
+# reproduce each other's population from the same exclusion payload. Keep the
+# fixed policy here rather than exposing a second set of CLI overrides.
+POSE_DIVERSITY_POSITION_M = 0.75
 POSE_DIVERSITY_YAW_DEG = 45.0
 BENCH_RADIUS_CLEARANCE_MONOTONIC_TOL_M = 0.02
+# Current-frame visual diversity for the 8,400-item seen benchmark.  C1 answer
+# option images are intentionally outside this selection gate.
+SEEN_REPLACEMENT_POSE_DISTANCE_M = 3.0
 
 # --- offline semantic geometry and runtime assignment ---
-SEMANTIC_CACHE_DIR = "data/conseq/semantic_cache"
+SEMANTIC_CACHE_DIR = ".cache/pbench/semantic"
 SEMANTIC_SAMPLE_COUNT = 1_000_000  # surface samples per scene (labelled subset kept)
 SEMANTIC_ASSIGN_TOL_M = 0.20       # depth point -> nearest labelled surface cutoff
 # Full-frame depth assignment is large enough to amortize scipy's worker-pool
@@ -449,8 +432,7 @@ SEMANTIC_ASSIGN_PARALLEL_MIN_POINTS = 20_000
 # the complete semantic PLY by at least one physical march step.
 A3_CONTACT_FACE_MAX_DISTANCE_M = SEMANTIC_ASSIGN_TOL_M
 A3_CONTACT_FACE_TIE_MARGIN_M = MARCH_STEP_M
-A3_MARKER_RADIUS_PX = 8
-A3_MARKER_MIN_SEPARATION_PX = 20
+TARGET_POINT_MARKER_RADIUS_PX = 10
 
 # Free-text category substrings flagged as structural (flag only, not dropped).
 STRUCTURAL_CATEGORIES = frozenset({

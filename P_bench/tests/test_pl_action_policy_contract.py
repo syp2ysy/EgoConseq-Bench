@@ -49,7 +49,8 @@ def _record(policy, *, bank=None, provenance=None, digest=None):
     if policy in {
             AP.DEPTH_CONDITIONED_POLICY,
             AP.DEPTH_CONDITIONED_POLICY_V3,
-            AP.DEPTH_CONDITIONED_POLICY_V4}:
+            AP.DEPTH_CONDITIONED_POLICY_V4,
+            AP.DEPTH_CONDITIONED_POLICY_V5}:
         manifest = _BANK if bank is None else bank
         selection["materialized_action_bank"] = manifest
         selection["materialized_action_bank_sha256"] = (
@@ -85,22 +86,25 @@ def test_policy_is_derived_from_the_run_action_mode(action_mode, expected):
     assert AP.expected_policy_for_action_mode(action_mode) == expected
 
 
-def test_new_v4_collection_is_explicit_without_reinterpreting_legacy_runs():
+def test_new_v5_collection_is_explicit_without_reinterpreting_legacy_runs():
     assert AP.expected_policy_for_action_mode("balanced") == \
         AP.DEPTH_CONDITIONED_POLICY
     assert AP.policy_for_new_collection("balanced") == \
-        AP.DEPTH_CONDITIONED_POLICY_V4
+        AP.DEPTH_CONDITIONED_POLICY_V5
+    assert AP.DEPTH_CONDITIONED_POLICY_V5 != AP.DEPTH_CONDITIONED_POLICY_V4
     assert AP.DEPTH_CONDITIONED_POLICY_V4 != AP.DEPTH_CONDITIONED_POLICY_V3
     assert AP.DEPTH_CONDITIONED_POLICY_V3 != AP.DEPTH_CONDITIONED_POLICY
     assert AP.policy_for_new_collection("file") == \
         AP.EXPLICIT_ACTION_FILE_POLICY
 
 
-def test_explicit_v3_and_v4_policies_both_match_balanced_metadata():
+def test_explicit_v3_through_v5_policies_match_balanced_metadata():
     assert AP.declared_policy_matches_action_mode(
         "balanced", AP.DEPTH_CONDITIONED_POLICY_V3)
     assert AP.declared_policy_matches_action_mode(
         "balanced", AP.DEPTH_CONDITIONED_POLICY_V4)
+    assert AP.declared_policy_matches_action_mode(
+        "balanced", AP.DEPTH_CONDITIONED_POLICY_V5)
     assert not AP.declared_policy_matches_action_mode(
         "file", AP.DEPTH_CONDITIONED_POLICY_V3)
 
@@ -118,6 +122,8 @@ def test_each_mode_accepts_only_its_own_policy():
                    AP.DEPTH_CONDITIONED_POLICY_V3) == []
     assert _errors(_record(AP.DEPTH_CONDITIONED_POLICY_V4),
                    AP.DEPTH_CONDITIONED_POLICY_V4) == []
+    assert _errors(_record(AP.DEPTH_CONDITIONED_POLICY_V5),
+                   AP.DEPTH_CONDITIONED_POLICY_V5) == []
 
 
 def test_claiming_the_depth_policy_under_a_file_run_is_rejected():

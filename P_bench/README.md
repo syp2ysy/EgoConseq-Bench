@@ -1,483 +1,513 @@
-# EgoConseq-Bench
+# EgoConseq
 
-[中文说明](README.zh-CN.md)
+## Code and data distribution
 
-EgoConseq-Bench generates first-person, action-conditioned consequence QA from
-three simulators: R2R/Matterport3D, Habitat-GS/InteriorGS, and BEHAVIOR-1K. It
-stores simulator-grounded records first, then deterministically compiles them
-into one six-task candidate artifact.
+The current code is in [EgoConseq-Bench/P_bench](https://github.com/syp2ysy/EgoConseq-Bench/tree/main/P_bench).
+The full `data/` snapshot is distributed separately through
+[syp115/EgoConseq-Bench](https://huggingface.co/datasets/syp115/EgoConseq-Bench).
+**Upload status:** the data upload is pending; use the commands below after all volumes are available.
 
-This repository contains the collection, validation, compilation, evaluation,
-and static-review pipeline. Raw simulator assets are not redistributed; obtain
-them from their official providers under their respective licenses.
+It includes Benchmark, SFT, source records, saved responses and evaluation artifacts;
+model weights and external simulator/source-dataset installations are not bundled.
+The snapshot preserves internal symbolic links and hard links.
 
-## Quick starts
-
-Clone the outer repository, then enter this benchmark subtree:
+From this `P_bench/` directory, download and restore the archive volumes:
 
 ```bash
-git clone https://github.com/syp2ysy/EgoConseq-Bench.git
-cd EgoConseq-Bench/P_bench
-export P_BENCH_ROOT="$PWD"
+hf auth login  # required when accessing the private dataset repository
+hf download syp115/EgoConseq-Bench --repo-type dataset \
+  --include 'data.tar.zst.part-*' SHA256SUMS archive_manifest.json \
+  --local-dir ../egoconseq-data-download
+(cd ../egoconseq-data-download && sha256sum -c SHA256SUMS)
+cat ../egoconseq-data-download/data.tar.zst.part-* | zstd -d | tar -xf -
 ```
 
-Choose one workflow:
+Restore into a fresh checkout: extraction recreates `data/` and overwrites matching
+paths. All volumes are required. See the dataset card for the exact archive size
+and inventory. Copy `.env.example` to `.env.local`, set paths to your installed
+runtimes and source assets, then `source .env.local`. The model-specific environment
+requirements are documented in the inference README below. Collection metadata may
+retain original absolute source paths; recollection requires configuring the
+corresponding external source assets.
 
-- **Use the frozen snapshot:** create the Habitat environment in section 1,
-  download and extract both Hugging Face archives as described in
-  [Current frozen training snapshot](#current-frozen-training-snapshot), then
-  run the verification commands in section 5. You can immediately inspect the
-  compiled QA, saved replay, and static browser; no simulator is launched.
-- **Collect fresh records:** create both environments (sections 1-2), place the
-  three official source datasets under `data/sources/` or set the documented
-  overrides, build GS/B1K source authorities (section 3), run the three smokes
-  (section 6), then launch the measured background workflow (section 7).
+The collection environment in `environment/habitat.yml` uses Python 3.9;
+inference and LLM evaluation require Python 3.10 or later and their own model
+runtimes. Run collection/build tests in the Habitat environment, and judge tests
+in a Python 3.10+ environment with NumPy and pytest:
 
-Restore downloaded files into real directories below `P_bench/data`; do not
-replace `data/` with a symlink. Source authorities intentionally bind the
-lexical source paths. The recovery snapshot is immutable evidence and cannot
-be resumed with newer code; use a new output directory and manifest for fresh
-collection.
+```bash
+"${EGOCONSEQ_HABITAT_PYTHON:-python}" -m pytest --ignore=tests/test_pl_judge_evaluation.py
+"${EVAL_PYTHON:-python}" -m pytest tests/test_pl_judge_evaluation.py
+```
 
-## What is implemented
+Editable statistics are generated with
+`python visualization/plot_benchmark_figures.py` after restoring the data;
+the saved SVG/PDF/PNG figures and counts are in `output/figures/paper_20260911/`.
 
-The active benchmark contract has exactly six tasks:
+Predict robot action consequences from an initial egocentric RGB image.
+The current seen catalog contains **58,557 compact records**: B1K 11,750,
+GS 24,569, and R2R 22,238. B1K expansion was stopped at the user's request;
+accepted records are retained and catalog metadata is sealed.
 
-| ID | Question answered from the initial egocentric view and an action program |
-| --- | --- |
-| A1 | Will the robot collide? |
-| A2 | During which 1-based action does the first collision occur? |
-| A3 | Which initially visible object or surface is contacted first? |
-| B1 | After a safe execution, how far is the selected initial-visible target? |
-| B2 | After a safe execution, is that target in front, left, right, or rear? |
-| C1 | Which of four real terminal renders is the true future view? |
-
-Public input is one initial RGB image, body radius, optical-center height,
-HFOV/VFOV, a canonical action sequence, and a target for B. Depth, semantic
-labels, navmesh/full geometry, terminal pose, and GT certificates remain
-private. Collision and safety require agreement between full-geometry and
-initial-depth rollouts plus swept-corridor coverage.
-
-`A4_checkpoint_direction` is a separate, non-headline diagnostic derived from
-sealed records. It asks for a referent direction at the 25%, 50%, or 75% point
-inside a Forward action. It does not change collection, the six-task registry,
-or capacity stopping.
-
-All candidate artifacts intentionally report `headline_eligible=false`.
-`--gt-as-pred` checks scorer integrity; it is not a model result.
-
-## Data flow and output layout
+## Data and outputs
 
 ```text
-read-only simulator assets
-  -> records/<dataset>/<shard>/<scene>/records.jsonl
-  -> artifacts/global/<checkpoint>/candidate_qa/
-  -> artifacts/global/<checkpoint>/candidate_qa_report/index.html
+data/metadata/train/seen_updates/current/   existing records and source images
+data/benchmark/
+  benchmark/seen/{QA*.json,images/}          4,999 QA per input variant, shared images
+  benchmark/unseen/{QA*.json,images/}        2,000 QA per input variant, shared images
+  metadata/frozen.json                      frozen hashes and all 7,000 SFT exclusions
+  metadata/{seen,unseen}/                   record_index.json and report.json
+  inference/                               Qwen/Cosmos code and launch scripts
+    responses/                             model responses for the current saved QA
+    logs/                                  runtime logs
+  index.html                               one combined browser with All/Seen/Unseen filters
 ```
 
-The compiled artifact contains:
+Benchmark compilation never rewrites records, resamples poses, or changes
+radii, camera heights, FOV, actions or GT. One record supplies one benchmark QA.
+**Keep all original 5,000 Seen benchmark records excluded from SFT**, including the withdrawn A3 question's record.
+Unseen records are benchmark-only and never enter SFT. The combined browser uses
+All / Seen / Unseen filters for cases and statistics; it does not merge or rewrite
+the two QA files, indices or images. The B3 update also checks DINO similarity
+across the combined 7,000 initial images, not just within each split.
+
+After the authorized A3 withdrawal, the frozen release has 4,999 Seen + 2,000
+Unseen QA. The original 7,000 record exclusions remain unchanged. The 40 audited
+A3 case outputs and their 1 benchmark / 16 SFT questions were removed; all other
+record fields and retained QA are unchanged. Directory names describe splits, not
+sample counts. `metadata/frozen.json` binds both QA files, private
+indices and the sorted image-path/digest lists, and contains all excluded record
+UIDs. It does not duplicate assets. Do not reselect this release or change GT;
+wording revisions require explicit authorization and updated frozen hashes.
+HTML presentation may still be regenerated. `freeze --root <benchmark-root>` seals
+a future release once and refreshes its template-use statistics from the actual QA.
+
+Benchmark and SFT share `post_QA/templates.py::SYSTEM_PROMPT`
+(`abc1-prompts-v8-clear-questions`). The system defines the mobile-robot role,
+sequential forward/turn motions, circular collision footprint and camera alignment.
+It says "Follow the listed motions exactly, without changing the path" and
+"Assume continuous ground." Body radius, camera optical-center height and the
+horizontal/vertical fields of view appear in the user message's Configuration block.
+All eight tasks have ten concise question templates, shared with SFT.
+Use `refresh-prompts --keep-templates` to synchronize wording while preserving
+template assignments, images, GT and selections; hash transitions are recorded
+in `frozen.json` under `prompt_updates`.
+
+Camera height is the configured vertical offset relative to the robot's local
+ground reference: exactly **0.5 / 1.0 / 1.5 m**, read directly from
+`sensor.nominal_camera_offset_m`. It is not a post-hoc distance to the scene mesh
+or a fitted plane. `repair-parameters` synchronizes this setting and its wording
+across frozen indices, Benchmark, SFT (including existing ablation exports) and
+HTML. Source records, images, poses, actions, radii, FOV and GT are not changed.
+The latest summary replaces `data/benchmark/metadata/parameter_audit.json` in place.
+
+Regenerate the combined browser from the saved QA and metadata with:
+
+```bash
+/home/zhangshan/miniconda3/envs/qwen3vl_habitat/bin/python scripts/build_seen_benchmark.py browser
+```
+
+Serve the browser with compressed HTML and in-memory list thumbnails:
+
+```bash
+/home/zhangshan/miniconda3/envs/qwen3vl_habitat/bin/python scripts/serve_benchmark.py --port 8000
+```
+
+Open `http://localhost:8000/`, or add
+`#view=cases&task=B3` to show B3 directly. Opening a case displays the saved
+original images; thumbnails do not change benchmark or inference inputs and
+create no disk cache. The page also opens directly as a file, using original images.
+
+## Evaluate saved responses
+
+```bash
+bash data/benchmark/evaluation/run_eval.sh \
+  --responses data/benchmark/inference/responses/cosmos3-edge_thinking_off_response.json
+```
+
+Except for A3, the evaluator extracts explicit answers with regex and sends longer
+answers to a text LLM without GT, then applies fixed scoring rules, including distance
+accuracy at **±0.25 m and ±0.5 m**. A3 uses the LLM to judge each answer's semantic
+agreement with GT and reports overall A3 accuracy.
+
+`--rules-only` runs without an LLM; rerun the command without this flag to finish.
+The default extractor is cached Qwen3-8B. To use an existing API, pass
+`--extractor-model MODEL --base-url URL` with `INFER_API_KEY`.
+Per-item answers and independent score summaries are saved under
+`data/benchmark/evaluation/results/<student>/`.
+See [evaluation rules and output format](data/benchmark/evaluation/README.md).
+
+## Compile
+
+```bash
+HABITAT_PY=/home/zhangshan/miniconda3/envs/qwen3vl_habitat/bin/python
+
+$HABITAT_PY scripts/build_seen_benchmark.py compile \\
+  --output outputs/benchmark-build/new_run --seed 20260906
+
+$HABITAT_PY scripts/build_seen_benchmark.py compile-sft \\
+  --output data/sft/seen_v2 \\
+  --exclude-index data/benchmark/metadata/frozen.json
+
+```
+
+Compiler working bundles belong in `outputs/benchmark-build/`, separate from the
+frozen public package; do not compile over the current release.
+
+The compiler scans structured records once, preserves alternatives by action
+length, and expands stratified candidate batches as needed. It screens black
+holes/blank or blurred images and loads pretrained DINOv2-S/14 for full-view
+features. DINO cosine exclusion is global across selected initial images;
+features stay in memory. C1 endpoint images receive quality checks without
+requiring its four answer options to be semantically dissimilar.
+
+A4/B1/B2/B3 use one unnumbered red dot with white/black outlines, centered on the
+original fixed surface point. The following command only regenerates HTML from
+saved QA and metadata; it does not redraw markers, change prompts, reselect QA
+or rerun DINO:
+
+```bash
+$HABITAT_PY scripts/build_seen_benchmark.py browser --root data/benchmark
+```
+
+Task totals are in [seen_5000_v1.json](post_QA/specs/seen_5000_v1.json).
+Lengths are allocated as evenly as the image-qualified supply allows: L1–L6
+for ordinary tasks and C1, L3–L6 for A2. A2 has no L3 Turn-first; ordinal/rank
+balance is conditional on length and start. Every supported dataset/task
+has at least 30% Turn-first. Scene and action/answer diversity guide tie-breaking.
+Exact achieved distributions and nearest image pairs are in the report/browser.
+
+### B3: intermediate camera-to-point distance
+
+The B3 release was derived from saved geometry, without recollecting or rewriting
+records. It kept all 5,000 Seen record IDs
+(and therefore the SFT exclusion set), reassigns 600 Seen and 250 Unseen QA to
+B3, and replaces only cross-split visually similar Unseen observations.
+
+| Task | Seen | Unseen | Total |
+|---|---:|---:|---:|
+| A1 | 600 | 250 | 850 |
+| A2 | 800 | 250 | 1,050 |
+| A3 | 599 | 250 | 849 |
+| A4 | 600 | 250 | 850 |
+| B1 | 600 | 250 | 850 |
+| B2 | 600 | 250 | 850 |
+| B3 | 600 | 250 | 850 |
+| C1 | 600 | 250 | 850 |
+
+B3 uses only B1K/R2R, split equally. All earlier actions are completed;
+the query is at 25%, 50% or 75% of the **specified Forward action's distance**.
+GT is 3D Euclidean distance from that moment's camera optical center to the
+fixed surface point, not travel distance or endpoint distance. The full action
+sequence is certified safe. Pose, height, FOV and the original question's
+body radius are retained when a record is reassigned.
+
+The incremental allocation balances B3 lengths, progress fractions and Forward
+ordinals, and keeps at least 30% Turn-first per dataset. A2 retains conditional
+ordinal/rank balance with adaptive length counts. Distribution details and
+changed IDs are recorded in each split's `report.json`; features are never saved.
+Ordinary `compile` supports B3 with length/start balancing. The completed one-off
+B3 migration and its dedicated tests have been retired. SFT is rebuilt separately
+as `seen_v2`. The table above includes the subsequent one-question A3 withdrawal.
+New evaluations must match responses to the current saved QA hashes.
+
+## Model responses (no scoring)
+
+Each split keeps `QA.json` as full input plus `QA_no_radius.json`, `QA_no_height.json`,
+`QA_no_fov.json` and `QA_no_parameters.json`. These delete only the corresponding
+saved Configuration lines (both HFOV/VFOV for `no_fov`), exactly like SFT ablations.
+System prompts, questions/actions, GT, IDs and image references are otherwise unchanged.
+Use `run.sh <model> --variant no_height`, for example; responses are named by variant.
+Regenerate these JSON files after an authorized full-QA update with
+`scripts/build_seen_benchmark.py export-benchmark --root data/benchmark`.
+
+Each model family has its own `infer_*.py` in `data/benchmark/inference/`.
+Only QA input, HTTP transport, response storage and resume logic live in `common.py`.
+A single launcher supports 15 configurations, including Qwen baselines and the
+selected embodied/spatial understanding models:
+
+```bash
+bash data/benchmark/inference/run.sh list
+bash data/benchmark/inference/run.sh all --dry-run
+bash data/benchmark/inference/run.sh qwen3vl-4b --limit-per-task 1
+bash data/benchmark/inference/run.sh all
+```
+
+`all` runs models sequentially and resumes existing responses. No model is loaded
+for `--dry-run`. Full runs read all 6,999 QA; `--limit-per-task 1` selects 16 QA
+across both splits, including C1. Checkpoint downloads share the Hugging Face cache.
+Qwen-family models use Transformers, SenseNova-SI uses vLLM, and SpatioLM uses
+its official custom spatial model. Cosmos3-Edge uses the **reasoner**, not Policy-DROID.
+See [inference usage and environment requirements](data/benchmark/inference/README.md).
+The five cached small models can run sequentially, followed by a shared Qwen3-8B judge:
+
+```bash
+bash data/benchmark/inference/run.sh small --cached --serve --evaluate
+```
+
+`small` selects Qwen3-VL-4B, RoboBrain2.5-4B, RoboInter-3B, RynnBrain1.1-2B and
+Cosmos3-Edge. The queue uses v8 QA, pins cached checkpoint revisions and performs
+no downloads. Progress is recorded in `data/benchmark/inference/pipeline_status.json`;
+responses and evaluation results are checked against the source QA hashes before resume.
+
+Input is deliberately unchanged:
+
+- **System:** exactly the stored `system` message, defining the robot role,
+  sequential motion, in-place turns, circular footprint and camera alignment,
+  plus the shared continuous-ground assumption
+  for all tasks. No inference-only prompt is appended.
+- **User:** the complete stored text, including radius, camera height,
+  HFOV/VFOV, numbered actions, task question and any direction convention.
+- **Images:** resolve paths relative to that split's `QA.json` and
+  replace each `<image>` in place with a native image content block.
+  A1–B3 receive one image, including the existing marker for A4/B1/B2/B3.
+  C1 receives **initial image → question and A label → A image → B label →
+  B image → C label → C image → D label → D image** in a single user message.
+  Images are not tiled, relabeled, or reordered. Resizing uses the model's
+  own processor. Native-adapter settings are recorded in the output;
+  API server launch settings and runtime messages are retained in its log.
+- **GT:** the stored `assistant` message is excluded from model input.
+
+Each task has ten concise, equivalent question templates and its own answer format.
+A2/A3 explicitly state that a collision occurs; A2 uses the full action list's
+numbering. A4/B1/B2/B3/C1 state that the sequence is collision-free. Only C1 asks
+for A/B/C/D. The prompt revision changes no images, geometry, task IDs or GT.
+A4/B3 show the queried action and distance percentage on a separate `Query moment`
+line. Distance questions specify 3D straight-line distance from the camera optical
+center; direction questions retain the original 24-class boundaries.
+
+For an explicitly authorized wording update, synchronize the frozen Benchmark,
+SFT (including existing ablation exports), template metadata and HTML in place:
+
+```bash
+$HABITAT_PY scripts/build_seen_benchmark.py refresh-prompts --keep-templates
+```
+
+This reads indexed inputs, not source records or images. It preserves existing
+template assignments, QA IDs, GT and image order, and refreshes
+the frozen hashes. Temporary staging files are removed after publication.
+Responses produced from earlier prompts remain earlier-version results; rerun
+inference before reporting performance on the new prompts.
+
+Outputs are `data/benchmark/inference/responses/<alias>_response.json`, with `config`,
+model/processor metadata, and `predictions`. Each prediction contains `split`,
+`id`, `dataset`, `task_id`, the unedited model `answer`, and `finish_reason`
+(`stop` or `length`; SpatioLM's text-only chat interface reports `unknown`).
+The script builds
+the JSON; the VLM is not asked to generate IDs or a JSON wrapper. Generation
+is greedy with a default limit of 4,096 new tokens (`--max-new-tokens`).
+Thinking mode and smoke runs have separate filenames; requested template options
+are saved without rewriting the benchmark prompt.
+
+Each completed batch updates the same JSON. Running the same command resumes
+by `(split, id)`; use a different `--output` for a different model, input JSON
+or generation setting. Do not run two writers against the same output file.
+No images, GT or records are copied, and no scoring or LLM judging is performed.
+For offline use, pass the local snapshot directory to `--model`; this also avoids
+the tokenizer metadata request made by Transformers 4.57.3 for cached model IDs.
+
+## SFT (training only)
+
+`seen_v2` is rebuilt from the current Seen records and covers all eight tasks,
+including B3: **270,880 QA from 53,553 records, with 36,709 B3 examples**.
+The exclusion input is the frozen 7,000-record benchmark list;
+Unseen records never enter training. Exact coverage, task counts, unreadable
+source paths and residual imbalance are in `data/sft/seen_v2/metadata/summary.json`.
+Rank-balanced A2 has less supply; scarce questions are not duplicated to force
+equal task counts. One previously known unreadable GS initial image is skipped.
+The superseded `seen_v1` has been removed after validating the new export.
+
+The export excludes extremely dark views: at least 90% of native pixels have
+all RGB channels at most 8. Cleanup removed 39 QA and 96 unreferenced export
+images, synchronized all five JSONL views and canonical A3 names, and left
+source records/assets intact. No refill was needed (0.0144% of QA removed).
+The compact audit is `metadata/quality_cleanup.json`. For an existing export,
+`python scripts/build_seen_benchmark.py clean-sft` applies this same cleanup;
+future `compile-sft` exports already skip these dark initial/C1 views.
+
+`compile-sft` excludes the benchmark's entire records, covers every remaining
+record with an eligible QA, then supplements less frequent tasks. It selects
+at most two distinct QA per record/task; it does not export every surface point
+or duplicate questions with different wording. Partial-task records are valid.
+Task targets follow the smallest capped task supply, not a fixed dataset size.
+A1 balances collision/safe within starts; A2 balances distance ranks conditional
+on dataset/length/start. Scarce supply is reported instead of failing the build.
+Lengths, both starts, categories and the 24 directions are sampled across the
+available supply. This is not the benchmark's exact quota system.
+B3 shares the benchmark's saved-geometry GT calculation and safe-sequence rule;
+GS supplies neither B1 nor B3. Sampling rotates distance bins, action lengths,
+starts, Forward ordinals and 25%/50%/75% checkpoints. Different checkpoints are
+distinct questions but still share the two-QA record/task cap.
 
 ```text
-candidate_qa/benchmark.json
-candidate_qa/public/items.jsonl
-candidate_qa/private/answers.jsonl
-candidate_qa/private/atoms.jsonl
-candidate_qa/private/source_map.json
-candidate_qa/report.json
-candidate_qa_report/index.html
+data/sft/seen_v2/
+  images/{b1k,gs,r2r}/       shared original, marked and terminal images
+  json/full.jsonl           independent messages + images training examples
+  metadata/selection.jsonl  frozen record/case/point, template, inputs and GT
+  metadata/summary.json     coverage, source bindings and actual distributions
 ```
 
-The compiler reads sealed records and saved PNGs; it does not rerun a
-simulator. `pipeline/` is the only benchmark implementation, `scripts/`
-contains command-line entry points, and `tests/` contains deterministic tests.
+Images are hardlinked where possible; a marked image is rendered once per
+record/point. No DINO, new oracle checks, recollection, or validation/test split.
+Source records and the published benchmark are never modified.
+Unreadable initial images exclude only their records; a broken terminal image
+excludes the affected C1 questions, not other usable tasks. Exact paths and
+achieved coverage are reported in `metadata/summary.json`.
 
-## Current frozen training snapshot
-
-The current recovery snapshot is train-seen, candidate-only data:
-
-| Quantity | Value |
-| --- | ---: |
-| Source shards | 562 |
-| Simulator-grounded records | 10,028 |
-| Exact unique source frames | 9,798 |
-| Six-task QA | 44,404 |
-| A1 / A2 / A3 | 3,772 / 5,989 / 5,691 |
-| B1 / B2 / C1 | 7,551 / 10,531 / 10,870 |
-
-Its checkpoint is
-`data/candidate_pool/abc1_train_seen_200k_20260816_451b61a/artifacts/global/recovery-562/checkpoint.json`
-with SHA256
-`968248000449cbaacde41871c0c30bec22d25464964cd8f41e12bfa5deb645b7`.
-
-An access-controlled backup is hosted at the Hugging Face dataset repository
-`syp115/pbench-abc1-train-seen-recovery-562`. Access to that repository is
-required only to restore this snapshot; it is not required to collect fresh
-data. After access is granted:
+Derive parameter ablations **directly from the saved `json/full.jsonl`**, sharing
+the same images, QA IDs, order, system prompt, wording, C1 options and GT:
 
 ```bash
-huggingface-cli download syp115/pbench-abc1-train-seen-recovery-562 \
-  --repo-type dataset --local-dir /path/to/recovery-562-download
-
-cd /path/to/recovery-562-download
-sha256sum -c SHA256SUMS
-cat pbench-abc1-recovery-562.tar.zst.part-* | zstd -d | \
-  tar -xf - -C "$P_BENCH_ROOT"
-zstd -dc pbench-supporting-fixtures.tar.zst | \
-  tar -xf - -C "$P_BENCH_ROOT"
+$HABITAT_PY scripts/build_seen_benchmark.py export-sft --root data/sft/seen_v2 --hide-params height
+$HABITAT_PY scripts/build_seen_benchmark.py export-sft --root data/sft/seen_v2 --hide-params radius
+$HABITAT_PY scripts/build_seen_benchmark.py export-sft --root data/sft/seen_v2 --hide-params fov
+$HABITAT_PY scripts/build_seen_benchmark.py export-sft --root data/sft/seen_v2 --hide-params height radius fov
 ```
 
-The extraction destination must be the actual cloned `P_bench` directory, not
-a symlinked substitute. Verify the restored checkpoint before using it:
+These produce `json/no_height.jsonl`, `no_radius.jsonl`, `no_fov.jsonl` and
+`no_parameters.jsonl`. Only the corresponding configuration lines are removed;
+`no_parameters` removes the entire `Configuration` block. FOV means both HFOV and
+VFOV. Action distances, turns, the system's circular-body convention and A4/B3
+checkpoint fractions remain unchanged. No templates are reselected or rerendered.
+Combined subsets also work. Every SFT `images` entry is relative to the SFT
+dataset root (`images/...`), including ablations. Move `images/`, `json/` and
+`metadata/` together; no path rewriting or re-export is needed after a move.
+Benchmark image paths are relative to the directory containing its `qa.json`.
+
+The output follows the [ms-swift multimodal dataset format](https://swift.readthedocs.io/en/latest/Customization/Custom-dataset.html):
+one image for A1–B3, five ordered images for C1. Both SFT launchers set the
+native `ROOT_IMAGE_DIR` to the SFT root, resolving `images/...` without rewriting
+JSON or registering a custom dataset. Saved system/user messages and assistant
+GT are used directly; only assistant responses contribute to the SFT loss.
+Compilation does not start training.
+
+### Full-parameter Qwen3-VL-4B SFT (four A100s)
+
+`scripts/train_sft_full.sh` trains the LLM, vision encoder and alignment modules;
+it does not use LoRA or freeze any of these components. It reuses the environment
+below, with DeepSpeed (locally installed: 0.18.3). On another server, set
+`SFT_PYTHON` to that server's compatible Python, and use `SFT_MODEL` for a local
+base-model directory if needed. Default model loading is offline; set
+`HF_HUB_OFFLINE=0` when the weights need downloading.
+
+| Setting | Default and rationale |
+|---|---|
+| GPUs / sharding | Four A100s, BF16, native ZeRO-3; no CPU offload |
+| Learning rates | LLM `1e-5`, vision `1e-6`, aligner `5e-6`; smaller visual updates to limit disruption of pretrained features |
+| Effective batch | `4 GPUs × 1 example × 8 accumulation steps = 32` |
+| Schedule | One epoch, cosine decay, 3% warmup; a starting configuration, not a tuned optimum |
+| Optimizer | AdamW, weight decay `0.01`, gradient clipping `1.0` |
+| Images / context | At most 1,024 visual tokens per image, 8,192 total tokens; C1 retains all five images |
+| Memory / data | LLM and vision gradient checkpointing, SDPA, lazy image processing, no packing or validation split |
+| Saving | Every 1,000 optimizer steps; retain one resumable checkpoint |
+
+Uses the [native ms-swift 3.12 parameters](https://swift.readthedocs.io/en/v3.12/Instruction/Command-line-parameters.html).
+Different module learning rates automatically select ms-swift's multimodal
+optimizer grouping. Its logged `learning_rate` can be the first (vision) group,
+not the LLM rate. No custom trainer, dataset adapter or DeepSpeed JSON is added.
 
 ```bash
-cd "$P_BENCH_ROOT"
-PY="${EGOCONSEQ_HABITAT_PYTHON:-$(command -v python)}"
-"$PY" scripts/check_abc_golden.py
-echo "968248000449cbaacde41871c0c30bec22d25464964cd8f41e12bfa5deb645b7  data/candidate_pool/abc1_train_seen_200k_20260816_451b61a/artifacts/global/recovery-562/checkpoint.json" | \
-  sha256sum -c -
-"$PY" -m http.server 8789 --directory "$P_BENCH_ROOT"
-# Open data/candidate_pool/abc1_train_seen_200k_20260816_451b61a/artifacts/global/recovery-562/candidate_qa_report/index.html
+# Run on the four-A100 training host, not a single-GPU machine.
+bash scripts/train_sft_full.sh
+
+# Same images; choose one of full/no_height/no_radius/no_fov/no_parameters.
+# Each variant gets its own output directory and starts from the base model.
+SFT_VARIANT=no_height bash scripts/train_sft_full.sh
+
+# Exact continuation, including optimizer state.
+bash scripts/train_sft_full.sh \
+  --resume_from_checkpoint outputs/sft/qwen3vl-4b-full-finetune/full/checkpoint-1000
 ```
 
-Do not report this recovery snapshot as a completed or headline benchmark. It
-is a reproducible training/candidate snapshot registered in `docs/runs.json`.
+Outputs go to `outputs/sft/qwen3vl-4b-full-finetune/<variant>/`, separate from
+the historical LoRA output directory. Checkpoints include optimizer state and
+are much larger than LoRA checkpoints; allow room for the next save before the
+previous checkpoint is pruned. Changing GPU count or per-device batch also
+requires adjusting accumulation to keep the effective batch at 32. This launcher
+has argument-level checks, not a completed four-A100 training or memory test.
 
-## Tested system
+### Train Qwen3-VL with ms-swift (LoRA launcher)
 
-The current code was tested on Linux with four RTX 4090 GPUs (24 GB each),
-NVIDIA driver 575.57.08, and CUDA 12.x user-space packages. A single-scene
-smoke needs one GPU; the background controller can schedule several GPUs.
-
-Two Python environments are required because Isaac Sim 5.1 and the tested
-Habitat stack use different Python versions:
-
-| Runtime | Tested versions |
-| --- | --- |
-| Habitat/R2R/GS and controller | Python 3.9.23, Habitat-Sim 0.2.4 headless, Habitat-Lab 0.2.420230405, PyTorch 2.5.1, gsplat 1.5.3 |
-| BEHAVIOR-1K | Python 3.11.15, BEHAVIOR/OmniGibson 3.9.1, Isaac Sim 5.1.0, BDDL 3.7.0, PyTorch 2.7.0+cu128 |
-
-## 1. Create the Habitat environment
+Reuse the existing `qwen3vl` Conda environment, not `qwen3vl_habitat`:
 
 ```bash
-cd "$P_BENCH_ROOT"
-
-conda env create -f environment/habitat.yml
-conda activate egoconseq-habitat
-export EGOCONSEQ_HABITAT_PYTHON="$(command -v python)"
-
-python - <<'PY'
-import habitat_sim, habitat, gsplat, numpy, torch
-print("Habitat-Sim", habitat_sim.__version__)
-print("NumPy", numpy.__version__)
-print("PyTorch", torch.__version__, "CUDA", torch.cuda.is_available())
-PY
+conda activate qwen3vl
+python -m pip install --no-cache-dir ms-swift==3.12.6 \
+  torch==2.5.1+cu121 torchvision==0.20.1+cu121 transformers==4.57.3 \
+  peft==0.18.0 accelerate==1.12.0
+bash scripts/train_sft_lora.sh
 ```
 
-`environment/habitat.yml` mirrors the tested versions. PyTorch installs a CUDA
-12 wheel; match it to a compatible NVIDIA driver. The GS collision-authority
-preprocessor additionally needs `usd-core` when reading the official USD
-files:
+Pin ms-swift 3.12.6 for this PyTorch 2.5.1 environment: the 4.5.2 training
+callbacks unconditionally import the newer `torch.distributed.fsdp.FSDPModule`.
+The launcher therefore uses the 3.x native `--train_type lora` argument.
+`full.jsonl` means all robot input parameters are present, not full-parameter
+fine-tuning. The existing output directory name is kept for checkpoint continuity.
+
+The launcher uses the cached Qwen3-VL-4B-Instruct model, four GPUs with DDP,
+BF16 LoRA (rank 16, alpha 32), frozen vision/aligner, and one epoch over all
+270,880 QA. Effective batch size is 32. It does not create a validation split,
+evaluate the benchmark during training, precompute visual features, or pack the
+whole dataset before startup. Images are loaded lazily. Checkpoints (at most two,
+including optimizer state for resuming), TensorBoard events, and native training
+metadata stay under `outputs/sft/qwen3vl-4b-full/`.
+
+Run detached from the project root:
 
 ```bash
-python -m pip install usd-core
+mkdir -p outputs/sft/qwen3vl-4b-full
+nohup bash scripts/train_sft_lora.sh > outputs/sft/qwen3vl-4b-full/train.log 2>&1 < /dev/null &
 ```
 
-## 2. Install BEHAVIOR-1K / OmniGibson
+Append native ms-swift arguments to override defaults, e.g.
+`--resume_from_checkpoint outputs/sft/qwen3vl-4b-full/checkpoint-1000`.
+For parameter ablations, first export the matching JSONL, then change both
+`--dataset` and `--output_dir`; each ablation starts from the same base weights.
+`SFT_PYTHON` and `SFT_MODEL` override the interpreter and model. Model loading is
+offline by default; set `HF_HUB_OFFLINE=0` only when downloading a different model.
 
-Use the official BEHAVIOR-1K v3.9.1 setup in a separate environment:
+## Tasks and collection
+
+| Task | Question |
+|---|---|
+| A1 | Does the sequence collide? |
+| A2 | Which action first collides? |
+| A3 | Which initially visible object/category is contacted first? |
+| A4 | Where is the marked surface point during a Forward action? |
+| B1 | How far is the endpoint camera from the marked point? |
+| B2 | Where is the marked point at the endpoint? |
+| B3 | How far is the camera from the marked point during a specified Forward action? |
+| C1 | Which image is the true future view? |
+
+GS excludes A3/B1/B3. A4/B1/B2/B3 and every C1 family member use safe, complete
+sequences. A3 currently retains the existing first-contact definition; it is
+not a newly defined safe-action question. A2 evaluation reports start-conditioned
+accuracy because alternating sequences have a structural collision-index parity prior.
+
+Unseen scenes use `scripts/collect_unseen_records.py`, which invokes the existing
+collector and writes `abc1.record.v3`, without compiling a benchmark. R2R uses
+18 official test scenes; GS uses 9 official InteriorGS val scenes. B1K uses
+10 project-held-out scenes, **not an official test split** (its native catalog
+still declares train).
 
 ```bash
-git clone -b v3.9.1 https://github.com/StanfordVL/BEHAVIOR-1K.git
-cd BEHAVIOR-1K
-./setup.sh --new-env --omnigibson --bddl --joylo --dataset --eval
+$HABITAT_PY scripts/collect_unseen_records.py \
+  --data-root /home/zhangshan/syp/datasets \
+  --b1k-source-manifest /home/zhangshan/syp/datasets/behavior-1k-v3.9.1/pbench-abc1-task4/catalog-authority-audit-v2-20260812/audit-derived-source-manifest.json \
+  --b1k-python /home/zhangshan/miniconda3/envs/behavior/bin/python
 ```
 
-The tested checkout is tag `v3.9.1`, commit
-`26f2c7ef7b9cf96bd0414f81e1e751e493762779`. Follow the official installation
-guide if Isaac Sim requires a workstation-specific setup:
+GPUs 0/1 own disjoint B1K scenes; GPU 2 runs R2R and GPU 3 runs GS. Each worker
+finishes one scene's pose budget before loading the next. Default targets are
+3000/3000/2000 records (up to 8013 after per-scene rounding); actual accepted
+counts may be lower. Outputs live under
+`data/metadata/test/unseen/<dataset>/<worker>/<scene>/`. The final root
+`manifest.json` references these original shards, without copying records or
+images. `collection.json` tracks progress; rerunning the same command resumes.
+Unseen records are evaluation-only and never enter seen SFT.
 
-- BEHAVIOR installation: <https://behavior.stanford.edu/getting_started/installation.html>
-- Isaac Sim 5.1 Python environment: <https://docs.isaacsim.omniverse.nvidia.com/5.1.0/installation/install_python.html>
-
-Set the resulting interpreter through `EGOCONSEQ_B1K_PYTHON`; no repository
-path is hard-coded.
-
-## 3. Download and prepare simulator assets
-
-### R2R / Matterport3D
-
-1. Download the R2R-VLNCE v1-3 episode archive from
-   <https://github.com/jacobkrantz/VLN-CE>.
-2. Request Matterport3D academic access at
-   <https://matterport.com/partners/meta> and download the MP3D scans.
-3. Keep each scan's `.glb`, `.house`, `.navmesh`, and semantic PLY files under
-   one MP3D scan root, together with
-   `mp3d_annotated_basis.scene_dataset_config.json` at that root.
-
-The R2R episode JSON is a scene whitelist; instructions and navigation goals
-are not benchmark inputs.
-
-### Habitat-GS / InteriorGS
-
-Download the source assets at their pinned revisions:
-
-- Habitat-GS scenes: <https://huggingface.co/datasets/RukawaY/gs_scenes>,
-  revision `034f5938c40c55b873da81b1b6717484b40faae9`;
-- InteriorGS labels: <https://huggingface.co/datasets/spatialverse/InteriorGS>,
-  revision `5201ed9fd11fc2b8ac23e069796c386dbbf8f943`;
-- SAGE-3D collision meshes:
-  <https://huggingface.co/datasets/spatialverse/SAGE-3D_Collision_Mesh>.
-
-Normalize each selected scene to this layout:
-
-```text
-GS_ROOT/
-  train/<scene>/scene.gs.ply
-  train/<scene>/scene.navmesh
-  train/<scene>/labels.json
-  splits/train.json
-```
-
-`splits/train.json` uses schema `egoconseq.scene_manifest.v1`; each scene row
-contains `scene_id`, relative `path`, `source_scene`, and `split: "train"`.
-Build the physical authority once from the official collision USDs:
-
-```bash
-"$EGOCONSEQ_HABITAT_PYTHON" scripts/build_gs_collision_authority.py \
-  --data-root "$EGOCONSEQ_GS_ROOT" \
-  --source-manifest "$EGOCONSEQ_GS_TRAIN_MANIFEST" \
-  --collision-root "$SAGE3D_COLLISION_ROOT" --jobs 4 \
-  --exclude-scene interior_0505_839970
-```
-
-The excluded scene is a known source-conversion failure. Do not silently omit
-other scenes. Gaussian ellipsoids are used for rendering, never as the
-collision authority.
-
-### BEHAVIOR-1K source authority
-
-After the official setup downloads the dataset, bind the installation and
-derive per-scene authority fragments:
-
-```bash
-PY="$EGOCONSEQ_HABITAT_PYTHON"
-mkdir -p "$P_BENCH_ROOT/data/b1k-authority/fragments"
-
-"$PY" scripts/build_b1k_source_manifest.py verify-install \
-  --data-root "$B1K_DATA_ROOT" \
-  --source-root /path/to/BEHAVIOR-1K \
-  --output "$P_BENCH_ROOT/data/b1k-authority/install.json"
-
-"$PY" scripts/build_b1k_source_manifest.py derive-shard \
-  --data-root "$B1K_DATA_ROOT" \
-  --output-dir "$P_BENCH_ROOT/data/b1k-authority/fragments" \
-  --scene-timeout-s 1200 --resume \
-  --scenes <SCENE_ID_1> <SCENE_ID_2>
-
-INSTALL_SHA=$(sha256sum "$P_BENCH_ROOT/data/b1k-authority/install.json" | cut -d' ' -f1)
-"$PY" scripts/build_b1k_source_manifest.py assemble-catalog-audit \
-  --data-root "$B1K_DATA_ROOT" \
-  --install-manifest "$P_BENCH_ROOT/data/b1k-authority/install.json" \
-  --expected-install-manifest-sha256 "$INSTALL_SHA" \
-  --fragment-dir "$P_BENCH_ROOT/data/b1k-authority/fragments" \
-  --output "$B1K_SOURCE_MANIFEST" \
-  --audit-output "$B1K_CATALOG_AUDIT"
-```
-
-Run `build_b1k_source_manifest.py <subcommand> --help` for catalog sharding and
-resume options. Authority derivation invokes `EGOCONSEQ_B1K_PYTHON`.
-
-## 4. Configure local paths
-
-```bash
-cp .env.example .env.local
-# Edit .env.local, then:
-source .env.local
-PY="$EGOCONSEQ_HABITAT_PYTHON"
-cd "$P_BENCH_ROOT"
-```
-
-`.env.local` and `data/` are ignored by Git. Keep source datasets read-only.
-`EGOCONSEQ_DATA_ROOT` defaults to `$P_BENCH_ROOT/data/sources`; the R2R,
-Matterport3D, and GS-specific variables override only their corresponding
-source when a different layout is necessary. `B1K_DATA_ROOT` similarly
-defaults to `data/sources/behavior-1k-v3.9.1` in controller commands.
-Before collection, the repository must be clean because each run records and
-enforces the exact Git revision.
-
-## 5. Verify the installation
-
-```bash
-"$PY" -m pytest -q
-"$PY" scripts/check_abc_golden.py
-```
-
-The Golden command rebuilds the compact, authenticated three-dataset fixture,
-checks all six tasks, and runs GT-as-pred replay. It does not launch a
-simulator or validate collection throughput.
-
-## 6. Run one-scene smokes
-
-Use a scene that exists in your authenticated train-seen catalog. The examples
-below keep the scientific gates unchanged and only reduce the collection size.
-
-R2R:
-
-```bash
-REV=$(git rev-parse HEAD)
-"$PY" scripts/collect.py --backend r2r --benchmark-partition train_seen \
-  --scenes uNb9QFRL6hY --poses-per-scene 1 \
-  --pose-candidates-per-scene 800 --ordinary-actions-per-pose 24 \
-  --record-idle-stop-s 120 --scene-wallclock-stop-s 600 \
-  --code-revision "$REV" --out data/smoke/r2r
-```
-
-GS:
-
-```bash
-"$PY" scripts/collect.py --backend gs --benchmark-partition train_seen \
-  --scenes interior_0123_840023 --poses-per-scene 2 \
-  --pose-candidates-per-scene 800 --ordinary-actions-per-pose 24 \
-  --record-idle-stop-s 120 --scene-wallclock-stop-s 600 \
-  --code-revision "$REV" --out data/smoke/gs
-```
-
-B1K should use the supervisor so the Isaac Sim worker is isolated:
-
-```bash
-"$PY" scripts/run_b1k_collection_shard.py run \
-  --data-root "$B1K_DATA_ROOT" --source-manifest "$B1K_SOURCE_MANIFEST" \
-  --output-dir data/smoke/b1k --gpu-id 0 --shard-id smoke-b1k \
-  --code-revision "$REV" --scene-timeout-s 1200 \
-  --scenes Pomaria_0_garden --collect-args \
-  --poses-per-scene 1 --pose-candidates-per-scene 6000 \
-  --ordinary-actions-per-pose 24 --record-idle-stop-s 120 \
-  --scene-wallclock-stop-s 900 --benchmark-partition train_seen
-```
-
-A frame is retained when it supports at least one valid active task; it does
-not need to support A1, A2, A3, B1, B2, and C1 simultaneously.
-
-## 7. Run multi-GPU background collection
-
-The controller uses a measured canary profile instead of guessing scene
-capacity. The normal sequence is: build canary, run canary, derive profile,
-build the immutable production manifest, then run it.
-
-```bash
-CANARY="$EGOCONSEQ_RUN_ROOT/my-canary"
-RUN="$EGOCONSEQ_RUN_ROOT/my-train-seen-run"
-
-"$PY" scripts/run_background_collection.py canary-build \
-  --output-root "$CANARY" \
-  --r2r-scenes uNb9QFRL6hY XcA2TqTSSAj \
-  --gs-scenes interior_0123_840023 interior_0045_839925 \
-  --b1k-scenes Pomaria_0_garden Pomaria_0_int \
-  --python "$PY" --b1k-data-root "$B1K_DATA_ROOT" \
-  --b1k-source-manifest "$B1K_SOURCE_MANIFEST" \
-  --ordinary-actions-per-pose 24
-
-"$PY" scripts/run_background_collection.py canary-run \
-  --manifest "$CANARY/controller/canary-manifest.json"
-
-"$PY" scripts/run_background_collection.py profile \
-  --measurements "$CANARY/capacity-evidence.json" \
-  --out "$CANARY/capacity-profile.json"
-
-PROFILE_SHA=$(sha256sum "$CANARY/capacity-profile.json" | cut -d' ' -f1)
-AUDIT_SHA=$(sha256sum "$B1K_CATALOG_AUDIT" | cut -d' ' -f1)
-"$PY" scripts/run_background_collection.py build \
-  --output-root "$RUN" --python "$PY" \
-  --b1k-data-root "$B1K_DATA_ROOT" \
-  --b1k-source-manifest "$B1K_SOURCE_MANIFEST" \
-  --b1k-catalog-audit "$B1K_CATALOG_AUDIT" \
-  --b1k-catalog-audit-sha256 "$AUDIT_SHA" \
-  --capacity-profile "$CANARY/capacity-profile.json" \
-  --capacity-profile-sha256 "$PROFILE_SHA" --rounds 20
-
-nohup "$PY" scripts/run_background_collection.py run \
-  --manifest "$RUN/controller/manifest.json" \
-  > "$RUN/controller/nohup.log" 2>&1 &
-
-"$PY" scripts/run_background_collection.py status \
-  --manifest "$RUN/controller/manifest.json"
-```
-
-Stop through the controller rather than killing workers directly:
-
-```bash
-"$PY" scripts/run_background_collection.py stop \
-  --manifest "$RUN/controller/manifest.json"
-```
-
-The controller schedules train-seen scenes only, carries accepted-pose
-exclusions across catalog passes (1.5 m / 45 degrees), and publishes global QA
-checkpoints. Reaching a per-dataset target is a floor, not permission to hide a
-global capacity shortfall.
-
-## 8. Compile, inspect, and evaluate
-
-Background checkpoints already contain compiled QA and a browser. To append
-the separate A4 diagnostic to a run browser:
-
-```bash
-CHECKPOINT="$RUN/artifacts/global/<checkpoint>"
-"$PY" scripts/build_checkpoint_direction.py \
-  --run-root "$RUN" --output "$CHECKPOINT/candidate_qa/diagnostics/checkpoint_direction.v1" \
-  --update-report "$CHECKPOINT/candidate_qa_report/index.html"
-```
-
-Serve a static report from the repository root:
-
-```bash
-"$PY" -m http.server 8789 --directory "$P_BENCH_ROOT"
-# Open http://127.0.0.1:8789/data/candidate_pool/<run>/artifacts/global/<checkpoint>/candidate_qa_report/index.html
-```
-
-Evaluation needs an external source-authority manifest; the artifact's private
-source map cannot authorize itself:
-
-```bash
-BENCH="$RUN/artifacts/global/<checkpoint>/candidate_qa"
-"$PY" scripts/eval_benchmark.py --benchmark "$BENCH" \
-  --source-authority-manifest /path/to/source-authority.json \
-  --gt-as-pred
-```
-
-For a real model, replace `--gt-as-pred` with `--predictions predictions.jsonl`.
-
-## Data diversity and partitions
-
-- Training collection is restricted to the frozen `train_seen` scene list.
-- Future benchmark collection uses separate `test_unseen` scene families.
-- Scene families, not individual frames, are the split boundary.
-- Cross-pass pose exclusions prevent repeated nearby camera poses.
-- The compiler applies deterministic per-frame/per-task diversity selection;
-  exact source-frame SHA is the image identity.
-- Action shortlists cover lengths L1-L6 and dynamic distance strata before
-  physical certification. Failed individual tasks withhold only those tasks;
-  they do not require an otherwise useful frame to satisfy all six heads.
-
-See `pipeline/README.md` for module ownership and `docs/runs.json` for retained
-artifact provenance.
-
-## Troubleshooting
-
-- **B1K launches the wrong Python:** set `EGOCONSEQ_B1K_PYTHON` to the Python
-  inside the official BEHAVIOR environment.
-- **A scene is missing:** check the frozen partition and the authenticated
-  source manifest; do not add an unregistered scene by globbing.
-- **Resume rejects a run:** resume is intentionally same-revision and
-  same-contract only. Start a new output directory after code or contract
-  changes.
-- **No B target or too few C1 neighbours:** those are typed per-task
-  withholds; the frame may still publish other valid tasks.
-- **A candidate artifact says non-headline:** this is expected for the current
-  candidate protocol.
-
-## Licensing
-
-This checkout does not declare a project-wide license. Simulator code and raw
-assets remain subject to the Habitat, Matterport3D, Habitat-GS, InteriorGS,
-SAGE-3D, Isaac Sim, OmniGibson, BDDL, and BEHAVIOR-1K licenses and access terms.
-Do not redistribute restricted assets through this repository.
+Existing records use `plan/collect/dry-run`,
+`update-records` or `refine-surfaces`; workers finish all assigned records of
+one scene before loading the next. These collection paths remain separate from
+benchmark compilation. See [implementation notes](BENCHMARK_IMPROVEMENTS.md).

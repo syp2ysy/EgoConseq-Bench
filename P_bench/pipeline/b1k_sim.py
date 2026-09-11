@@ -10,12 +10,13 @@ from __future__ import annotations
 from collections.abc import Mapping
 import math
 from pathlib import Path
+import sys
 
 import numpy as np
 
 from pipeline import (
-    b1k_geometry, b1k_observation, b1k_semantic, config, floor_plane, perception,
-    pose_calibration, record,
+    actions, b1k_geometry, b1k_observation, b1k_semantic, config, floor_plane,
+    perception, pose_calibration, record, rollout,
 )
 from pipeline.frame import (
     RenderObservation, SensorProfile, TerminalRGBObservation,
@@ -28,12 +29,63 @@ B1K_SENSOR_MODALITIES = ("rgb", "depth_linear")
 B1K_OBSERVATION_MODALITIES = b1k_observation.OBSERVATION_MODALITIES
 
 
+_MINIMUM_ACTION_PROGRAMS = (
+    (actions.Forward(min(config.GEN_FORWARDS_M)),),
+    *tuple(
+        (actions.Turn(float(degrees)),
+         actions.Forward(min(config.GEN_FORWARDS_M)))
+        for degrees in config.INITIAL_TURNS_DEG),
+)
+
+
 class NoFiniteDepthObservation(ValueError):
     """The renderer returned no usable positive finite depth sample."""
 
 
+def _has_minimum_action_support(
+        geometry, position, yaw: float, radii) -> bool:
+    """Whether any public body can execute one vocabulary-minimum first leg.
+
+    Every active program begins either with Forward or with one Turn followed
+    by Forward, and the shortest Forward is 0.5 m.  If all of those paths leave
+    frozen floor support for every public radius, no ordinary action can ever
+    certify at this pose.  Obstacle contact remains viable: it is an A-label,
+    not a reason to reject the pose.
+    """
+    for raw_radius in radii:
+        nav = geometry.bind(
+            position, yaw, radius_m=float(raw_radius))
+        for program in _MINIMUM_ACTION_PROGRAMS:
+            if rollout.physical_collision_precheck(
+                    nav, program).get("collision") is not None:
+                return True
+    return False
+
+
 _ACTIVE_OG = None
+_ACTIVE_RUNTIME = None
 _RUNTIME_NEEDS_SHUTDOWN = False
+
+
+def _launch_omnigibson_for_collection(og) -> None:
+    """Register RT2 at Kit startup without the unused viewer product."""
+    import os
+
+    os.environ["OMNI_KIT_ACCEPT_EULA"] = "YES"
+    # Unit facades normally do not import Isaac. A facade that explicitly
+    # installs it exercises the same pre-launch registration as real OG.
+    if (getattr(og, "__name__", None) == "omnigibson" or
+            "isaacsim" in sys.modules):
+        from isaacsim import SimulationApp
+
+        extra_args = SimulationApp.DEFAULT_LAUNCHER_CONFIG["extra_args"]
+        for argument in (
+                "--/persistent/rtx/modes/rt/enabled=true",
+                "--/persistent/rtx/modes/rt2/enabled=true"):
+            if argument not in extra_args:
+                extra_args.append(argument)
+    og.gm.RENDER_VIEWER_CAMERA = False
+    og.launch()
 
 
 def _to_numpy(value) -> np.ndarray:
@@ -298,6 +350,22 @@ def _canonical_replay(scene, runtime) -> dict:
     }
 
 
+def _load_canonical_collection_state(
+        scene, runtime, replay_binding: Mapping) -> tuple[dict, tuple]:
+    """Load the audited canonical snapshot once for normal collection."""
+    seed_serialized = runtime.dump_state(scene)
+    runtime.load_state(scene, seed_serialized)
+    canonical_serialized = runtime.dump_state(scene)
+    runtime.load_state(scene, canonical_serialized)
+    state = runtime.capture_physical_state(scene)
+    _assert_valid_physical_state(state, context="canonical collection state")
+    if _canonical_physical_state_sha256(state) != \
+            replay_binding["canonical_state_sha256"]:
+        raise RuntimeError(
+            "B1K canonical collection state differs from source manifest")
+    return state, runtime.authority_inputs(scene)
+
+
 def bootstrap_scene_authority(
         scene_id: str, scene_json_path, *, runtime=None, fovs=None) -> dict:
     """Derive one loaded-scene authority before a trusted manifest exists.
@@ -398,7 +466,7 @@ class B1KSimSession:
     }
 
     def __init__(self, scene: SceneSpec, *, heights=None, fovs=None,
-                 runtime=None):
+                 runtime=None, contract_version: str | None = None):
         if not isinstance(scene, SceneSpec) or scene.source_dataset != "b1k":
             raise TypeError("B1KSimSession requires a B1K SceneSpec")
         self.scene_id = scene.scene_id
@@ -412,7 +480,15 @@ class B1KSimSession:
         if not self._fovs or len(set(self._fovs)) != len(self._fovs):
             raise ValueError("B1K session FOV profiles must be unique")
         self._hfov, self._vfov = self._fovs[0]
-        self._runtime = runtime if runtime is not None else load_b1k_runtime()
+        self._contract_version = (
+            record.B1K_OFFICIAL_RENDER_COLLECTION_CONTRACT_VERSION
+            if contract_version is None else str(contract_version))
+        profile = b1k_observation.load_frozen_profile(
+            contract_version=self._contract_version)
+        self._c1_render_mode = str(profile["c1_render_mode"])
+        self._runtime = (
+            runtime if runtime is not None else
+            load_b1k_runtime(contract_version=self._contract_version))
         self._scene = None
         self._sensors = []
         try:
@@ -433,30 +509,22 @@ class B1KSimSession:
             expected_atom = scene.b1k_scene_authority or {}
             replay_binding = b1k_semantic.canonical_replay_binding(
                 expected_atom)
-            versioned_replay = replay_binding is not None
-            if versioned_replay:
-                replay = _canonical_replay(self._scene, self._runtime)
-                floor_components, collision_components, instances = \
-                    replay["canonical_inputs"]
-                self._initial_physical_state = replay["canonical_state"]
-                self._serialized_state = replay["canonical_serialized"]
-                replay_kwargs = {
-                    "canonical_replay_protocol":
-                        replay["report"]["protocol"],
-                    "canonical_state_sha256":
-                        replay["report"]["canonical_state_sha256"],
-                }
-            else:
-                floor_components, collision_components, instances = \
-                    self._runtime.authority_inputs(self._scene)
-                replay_kwargs = {}
+            if replay_binding is None:
+                raise ValueError(
+                    "B1K collection requires a canonical replay binding")
+            canonical_state, canonical_inputs = \
+                _load_canonical_collection_state(
+                    self._scene, self._runtime, replay_binding)
+            floor_components, collision_components, instances = \
+                canonical_inputs
+            self._initial_physical_state = canonical_state
             self._floor_components = tuple(floor_components)
             self._collision_components = tuple(collision_components)
             self._geometry, self._semantic, self.scene_authority_atom = \
                 b1k_semantic.build_b1k_authorities(
                     floor_components=floor_components,
                     collision_components=collision_components,
-                    instances=instances, **replay_kwargs)
+                    instances=instances, **replay_binding)
             visual_identities = \
                 self._runtime.visual_prim_to_instance_identity(self._scene)
             self._visual_prim_to_instance_id = {
@@ -469,15 +537,11 @@ class B1KSimSession:
                 raise ValueError(
                     "runtime B1K scene authority differs from source manifest")
             self.scene_authority_sha256 = self.scene_authority_atom["sha256"]
-            if not versioned_replay:
-                self._initial_physical_state = \
-                    self._runtime.capture_physical_state(self._scene)
-                self._serialized_state = self._runtime.dump_state(self._scene)
-                self._runtime.load_state(self._scene, self._serialized_state)
-                _assert_physical_state_close(
-                    self._initial_physical_state,
-                    self._runtime.capture_physical_state(self._scene))
-            self._reset_physical_state()
+            actual = self._runtime.capture_physical_state(self._scene)
+            self.last_reset_pose_errors = _physical_state_errors(
+                self._initial_physical_state, actual)
+            _assert_physical_state_close(
+                self._initial_physical_state, actual)
             self._runtime.enable_native_instance_sensor(
                 self._scene, self._sensor)
             self._runtime.assert_observation_sync(self._sensor)
@@ -491,15 +555,6 @@ class B1KSimSession:
             except BaseException:
                 pass
             raise
-
-    def _reset_physical_state(self) -> None:
-        self._runtime.load_state(self._scene, self._serialized_state)
-        actual = self._runtime.capture_physical_state(self._scene)
-        self.last_reset_pose_errors = _physical_state_errors(
-            self._initial_physical_state, actual)
-        _assert_physical_state_close(
-            self._initial_physical_state,
-            actual)
 
     @property
     def id_to_cat(self):
@@ -649,13 +704,13 @@ class B1KSimSession:
             raise ValueError("B1K terminal RGB dtype is invalid")
         return np.ascontiguousarray(values)
 
-    def render_terminal_rgb_batch(self, base, local_poses):
-        """Render one C1 query bank with simultaneous temporary cameras.
+    def render_terminal_rgb_batch(
+            self, base, local_poses, *, render_transaction: str | None = None):
+        """Render one C1 query bank with simultaneous pooled cameras.
 
         The renderer's RGB is source-authentic but not pose-pure under a
-        sequential temporal history.  Temporary cameras are therefore created
-        only for this call, share one accumulation reset and one frozen render
-        count, and are destroyed before ordinary collection resumes.
+        sequential temporal history. All active pooled cameras therefore share
+        one accumulation reset and one frozen render count.
         """
         if (base.scene_id != self.scene_id or
                 str(base.scene_glb) != str(self.scene_glb)):
@@ -682,8 +737,10 @@ class B1KSimSession:
                 "yaw_rad": b1k_geometry.og_yaw_to_pbench_yaw_rad(yaw),
             })
             world_poses.append((root, yaw))
+        transaction = str(render_transaction or self._c1_render_mode)
         raw_images = list(self._runtime.render_rgb_batch(
-            self._scene, requests))
+            self._scene, requests,
+            render_transaction=transaction))
         if len(raw_images) != len(requests):
             raise RuntimeError("B1K terminal RGB batch returned the wrong size")
         return [
@@ -724,6 +781,11 @@ class B1KSimSession:
             if pose_valid is not None and not pose_valid(position, yaw):
                 if on_reject is not None:
                     on_reject("pose_rejected_by_backend")
+                continue
+            if not _has_minimum_action_support(
+                    self._geometry, position, yaw, radii):
+                if on_reject is not None:
+                    on_reject("action_support_unavailable")
                 continue
             try:
                 rendered = self.render(position, yaw, height, hfov, vfov)
@@ -779,25 +841,48 @@ class B1KSimSession:
 class _OmniGibsonRuntime:
     """Thin dynamic facade; constructed only by ``load_b1k_runtime``."""
 
-    def __init__(self, og, Environment, object_taxonomy, mesh_converter):
+    def __init__(self, og, Environment, object_taxonomy, mesh_converter, *,
+                 contract_version: str | None = None):
         self._og = og
         self._Environment = Environment
         self._object_taxonomy = object_taxonomy
         self._mesh_converter = mesh_converter
-        self._observation_profile = b1k_observation.load_frozen_profile()
+        self._contract_version = (
+            record.B1K_OFFICIAL_RENDER_COLLECTION_CONTRACT_VERSION
+            if contract_version is None else str(contract_version))
+        self._observation_profile = b1k_observation.load_frozen_profile(
+            contract_version=self._contract_version)
         self._profile_atom = self._observation_profile["profile_atom"]
+        self._observation_profile_sha256 = str(
+            self._profile_atom["sha256"])
         self._settings_api = None
         self._temporary_sensor_serial = 0
+        self._c1_sensors = []
         if callable(getattr(self._og, "launch", None)):
-            self._og.launch()
-            from omnigibson import lazy
+            if "settings" in self._profile_atom:
+                if getattr(self._og, "__name__", None) == "omnigibson":
+                    _launch_omnigibson_for_collection(self._og)
+                else:
+                    self._og.launch()
+                from omnigibson import lazy
 
-            self._settings_api = lazy.carb.settings.get_settings()
-            expected = b1k_observation.profile_setting_writes(
-                self._profile_atom["settings"])
-            for key, value in expected.items():
-                self._settings_api.set(key, value)
-            self._assert_observation_profile()
+                self._settings_api = lazy.carb.settings.get_settings()
+                self._restore_observation_profile_settings()
+                self._assert_observation_profile()
+            else:
+                _launch_omnigibson_for_collection(self._og)
+
+    @property
+    def observation_profile_sha256(self) -> str:
+        return self._observation_profile_sha256
+
+    def _restore_observation_profile_settings(self) -> None:
+        if self._settings_api is None:
+            return
+        expected = b1k_observation.profile_setting_writes(
+            self._profile_atom["settings"])
+        for key, value in expected.items():
+            self._settings_api.set(key, value)
 
     def _assert_observation_profile(self) -> None:
         if self._settings_api is None:
@@ -806,7 +891,8 @@ class _OmniGibsonRuntime:
             self._profile_atom["settings"])
         actual = {key: self._settings_api.get(key) for key in expected}
         if actual != expected:
-            raise RuntimeError("B1K renderer settings differ from v5 profile")
+            raise RuntimeError(
+                "B1K renderer settings differ from the stored profile")
 
     def open_scene(self, *, scene_id, scene_json_path):
         return {
@@ -850,6 +936,10 @@ class _OmniGibsonRuntime:
         }
         environment = self._Environment(configs=config_value)
         scene["environment"] = environment
+        # Environment construction initializes a new render graph and may
+        # restore OmniGibson defaults. Reapply the frozen legacy profile at
+        # that explicit boundary, then fail closed on the readback below.
+        self._restore_observation_profile_settings()
         self._assert_observation_profile()
         return [
             environment._external_sensors[f"pbench_vision_sensor_{index}"]
@@ -1107,14 +1197,39 @@ class _OmniGibsonRuntime:
             sensor.focal_length = focal
 
     def render(self, sensor):
+        from omnigibson import lazy
+
+        if self._profile_atom.get("reset_accumulation") is True:
+            lazy.omni.usd.get_context().reset_renderer_accumulation()
         for _index in range(int(self._profile_atom["sync_render_count"])):
             self._og.sim.render()
         return self._read_observation(sensor)
 
-    def render_rgb_batch(self, scene, requests):
-        """Render temporary, simultaneous RGB products and remove them."""
+    def render_rgb_batch(
+            self, scene, requests, *, render_transaction: str | None = None):
+        """Dispatch the exact C1 transaction named by the stored contract."""
+        transaction = str(
+            render_transaction or self._observation_profile["c1_render_mode"])
+        legacy = (
+            self._observation_profile_sha256 ==
+            record.B1K_LEGACY_OBSERVATION_PROFILE_SHA256)
+        allowed = ({record.B1K_V5_C1_RENDER_MODE, record.B1K_C1_RENDER_MODE}
+                   if legacy else {record.B1K_C1_RENDER_MODE})
+        if transaction not in allowed:
+            raise ValueError(
+                "B1K C1 transaction does not match the active profile")
         if not requests:
             return []
+        maximum = config.C1_QUERIES_PER_POSE * (
+            1 + config.C1_NEIGHBORS_PER_QUERY)
+        if len(requests) > maximum:
+            raise ValueError("B1K C1 batch exceeds its configured maximum")
+        if transaction == record.B1K_V5_C1_RENDER_MODE:
+            return self._render_rgb_batch_temporary(scene, requests)
+        return self._render_rgb_batch_persistent(scene, requests)
+
+    def _render_rgb_batch_temporary(self, scene, requests):
+        """Reproduce the v5 create-render-remove sensor transaction."""
         from omnigibson import lazy
         from omnigibson.sensors import VisionSensor, create_sensor
 
@@ -1132,16 +1247,14 @@ class _OmniGibsonRuntime:
                 name = f"pbench_c1_{serial}_{index}"
                 sensor = create_sensor(
                     sensor_type="VisionSensor",
-                    relative_prim_path=f"/{name}",
-                    name=name,
+                    relative_prim_path=f"/{name}", name=name,
                     modalities=("rgb",),
                     sensor_kwargs={
                         "image_width": int(request["width"]),
                         "image_height": int(request["height"]),
                         "focal_length": focal,
                         "horizontal_aperture": aperture,
-                    },
-                )
+                    })
                 sensor.load(environment.scene)
                 sensor.initialize()
                 self.set_sensor_pose(
@@ -1150,9 +1263,6 @@ class _OmniGibsonRuntime:
                         request["position_og"], dtype=np.float64),
                     yaw_rad=float(request["yaw_rad"]))
                 sensors.append(sensor)
-            # Sensor construction itself renders several frames at unequal
-            # ages.  Reset once after every product and pose exists, then all
-            # products accumulate the same frozen number of frames.
             lazy.omni.usd.get_context().reset_renderer_accumulation()
             for _index in range(int(self._profile_atom["sync_render_count"])):
                 self._og.sim.render()
@@ -1163,18 +1273,13 @@ class _OmniGibsonRuntime:
                     raise RuntimeError("temporary B1K sensor omitted RGB")
                 result.append(_to_numpy(observation["rgb"]).copy())
             _assert_physical_state_close(
-                physical_state_before,
-                self.capture_physical_state(scene),
+                physical_state_before, self.capture_physical_state(scene),
                 context="temporary C1 render transaction")
             return result
         finally:
             for sensor in reversed(sensors):
                 sensor.remove()
             if sensors:
-                # Removing a render product invalidates Isaac's physics view
-                # even though no physical state changed. Rebuild handles
-                # without stepping physics so later poses and the session-close
-                # audit can continue to read joint state.
                 self._og.sim.update_handles()
                 _assert_physical_state_close(
                     physical_state_before,
@@ -1184,8 +1289,67 @@ class _OmniGibsonRuntime:
                 raise RuntimeError(
                     "temporary B1K render products were not fully removed")
 
+    def _render_rgb_batch_persistent(self, scene, requests):
+        """Render one simultaneous RGB batch with persistent products."""
+        from omnigibson import lazy
+        from omnigibson.sensors import create_sensor
+
+        environment = self._environment(scene)
+        grew = False
+        while len(self._c1_sensors) < len(requests):
+            index = len(self._c1_sensors)
+            request = requests[index]
+            aperture = 20.955
+            focal = aperture / (2.0 * math.tan(math.radians(
+                float(request["hfov_deg"])) / 2.0))
+            name = f"pbench_c1_{index}"
+            sensor = create_sensor(
+                sensor_type="VisionSensor",
+                relative_prim_path=f"/{name}",
+                name=name,
+                modalities=("rgb",),
+                sensor_kwargs={
+                    "image_width": int(request["width"]),
+                    "image_height": int(request["height"]),
+                    "focal_length": focal,
+                    "horizontal_aperture": aperture,
+                },
+            )
+            sensor.load(environment.scene)
+            sensor.initialize()
+            self._c1_sensors.append(sensor)
+            grew = True
+        if grew:
+            self._og.sim.update_handles()
+        active = self._c1_sensors[:len(requests)]
+        for sensor, request in zip(active, requests):
+            self.configure_vision_sensor(
+                sensor,
+                width=int(request["width"]),
+                height=int(request["height"]),
+                hfov_deg=float(request["hfov_deg"]),
+                vfov_deg=float(request["vfov_deg"]))
+            self.set_sensor_pose(
+                sensor,
+                position_og=np.asarray(
+                    request["position_og"], dtype=np.float64),
+                yaw_rad=float(request["yaw_rad"]))
+        lazy.omni.usd.get_context().reset_renderer_accumulation()
+        for _index in range(int(self._profile_atom["sync_render_count"])):
+            self._og.sim.render()
+        result = []
+        for sensor in active:
+            observation, _info = sensor.get_obs()
+            if "rgb" not in observation:
+                raise RuntimeError("persistent B1K sensor omitted RGB")
+            result.append(_to_numpy(observation["rgb"]).copy())
+        return result
+
     def close(self, scene, sensors):
         environment = scene.get("environment")
+        for sensor in reversed(self._c1_sensors):
+            sensor.remove()
+        self._c1_sensors.clear()
         for sensor in tuple(sensors):
             annotator = getattr(
                 sensor, "_pbench_raw_instance_annotator", None)
@@ -1199,8 +1363,20 @@ class _OmniGibsonRuntime:
         self._og.clear()
 
 
-def load_b1k_runtime():
+def load_b1k_runtime(*, contract_version: str | None = None):
     """Load OmniGibson only at the explicit runtime trust boundary."""
+    global _ACTIVE_OG, _ACTIVE_RUNTIME, _RUNTIME_NEEDS_SHUTDOWN
+    version = (
+        record.B1K_OFFICIAL_RENDER_COLLECTION_CONTRACT_VERSION
+        if contract_version is None else str(contract_version))
+    requested_profile = b1k_observation.load_frozen_profile(
+        contract_version=version)["profile_atom"]["sha256"]
+    if _ACTIVE_RUNTIME is not None:
+        if _ACTIVE_RUNTIME.observation_profile_sha256 != requested_profile:
+            raise RuntimeError(
+                "B1K observation profile changed inside one process; "
+                "restart the worker")
+        return _ACTIVE_RUNTIME
     try:
         import omnigibson as og
         from bddl.object_taxonomy import ObjectTaxonomy
@@ -1210,18 +1386,22 @@ def load_b1k_runtime():
     except ImportError as error:
         raise RuntimeError(
             "B1K backend requires the pinned OmniGibson runtime") from error
-    global _ACTIVE_OG, _RUNTIME_NEEDS_SHUTDOWN
     _ACTIVE_OG = og
     _RUNTIME_NEEDS_SHUTDOWN = True
-    return _OmniGibsonRuntime(
+    _ACTIVE_RUNTIME = _OmniGibsonRuntime(
         og, Environment, ObjectTaxonomy(),
-        mesh_converter=mesh_prim_shape_to_trimesh_mesh)
+        mesh_converter=mesh_prim_shape_to_trimesh_mesh,
+        contract_version=version)
+    return _ACTIVE_RUNTIME
 
 
 def shutdown_b1k_runtime() -> None:
     """Shutdown the lazily loaded process runtime at most once per run."""
-    global _RUNTIME_NEEDS_SHUTDOWN
+    global _ACTIVE_OG, _ACTIVE_RUNTIME, _RUNTIME_NEEDS_SHUTDOWN
     if not _RUNTIME_NEEDS_SHUTDOWN:
         return
     _RUNTIME_NEEDS_SHUTDOWN = False
-    _ACTIVE_OG.shutdown(due_to_signal=True)
+    og = _ACTIVE_OG
+    _ACTIVE_OG = None
+    _ACTIVE_RUNTIME = None
+    og.shutdown(due_to_signal=True)

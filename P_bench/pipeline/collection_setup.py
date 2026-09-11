@@ -36,8 +36,6 @@ def validate_collection_args(args, parser):
         parser.error("--keep-per-length must be positive")
     if args.pose_candidates_per_scene <= 0:
         parser.error("pose candidate budget must be positive")
-    if args.min_pose_position_m < 0 or args.min_pose_yaw_deg < 0:
-        parser.error("pose diversity margins must be non-negative")
     if (args.collection_shard_id and
             not all(character.isalnum() or character in "-_"
                     for character in args.collection_shard_id)):

@@ -1,0 +1,98 @@
+{
+  "A1": [
+    {"id":"A1_01","question":"Will you collide with any object in the scene during these actions?"},
+    {"id":"A1_02","question":"During this action sequence, will you collide with any object in the scene?"},
+    {"id":"A1_03","question":"Will any of the listed actions cause you to collide with an object in the scene?"},
+    {"id":"A1_04","question":"Will executing these actions cause a collision with any object in the scene?"},
+    {"id":"A1_05","question":"During the listed actions, does a collision with any object in the scene occur?"},
+    {"id":"A1_06","question":"Will you collide with an object in the scene while following these actions?"},
+    {"id":"A1_07","question":"Will a collision with any object in the scene occur during the listed actions?"},
+    {"id":"A1_08","question":"Is there a collision with any object in the scene during this action sequence?"},
+    {"id":"A1_09","question":"Do you collide with any object in the scene at any point during these actions?"},
+    {"id":"A1_10","question":"While executing this action sequence, will you collide with an object in the scene?"}
+  ],
+  "A2": [
+    {"id":"A2_01","question":"During which numbered action does your first collision occur?"},
+    {"id":"A2_02","question":"Which numbered action are you executing when you first collide?"},
+    {"id":"A2_03","question":"What is the number of the action during which you first collide?"},
+    {"id":"A2_04","question":"In which numbered action do you first collide?"},
+    {"id":"A2_05","question":"Identify the numbered action during which your first collision occurs."},
+    {"id":"A2_06","question":"At which action number does your first collision occur?"},
+    {"id":"A2_07","question":"Give the number of the action in which you first collide."},
+    {"id":"A2_08","question":"When your first collision occurs, which numbered action are you executing?"},
+    {"id":"A2_09","question":"Which numbered action is in progress when you first collide?"},
+    {"id":"A2_10","question":"What is the action number at the time of your first collision?"}
+  ],
+  "A3": [
+    {"id":"A3_01","question":"What type of object do you collide with first?"},
+    {"id":"A3_02","question":"What is the category of the first object you collide with?"},
+    {"id":"A3_03","question":"Identify the category of the object involved in your first collision."},
+    {"id":"A3_04","question":"Which object category is involved in your first collision?"},
+    {"id":"A3_05","question":"Name the type of object you first collide with."},
+    {"id":"A3_06","question":"What kind of object is involved in your first collision?"},
+    {"id":"A3_07","question":"Give the category of the first object you collide with."},
+    {"id":"A3_08","question":"When you first collide, what type of object do you collide with?"},
+    {"id":"A3_09","question":"What type of object is involved when your first collision occurs?"},
+    {"id":"A3_10","question":"Which category does the first object you collide with belong to?"}
+  ],
+  "A4": [
+    {"id":"A4_01","question":"At the specified moment, in which direction is {target} relative to your camera?"},
+    {"id":"A4_02","question":"Which direction is {target} from your camera at the specified moment?"},
+    {"id":"A4_03","question":"At the specified moment, what is the direction from your camera to {target}?"},
+    {"id":"A4_04","question":"Give the direction of {target} relative to your camera at the specified moment."},
+    {"id":"A4_05","question":"At the specified moment, in which direction does {target} lie from your camera?"},
+    {"id":"A4_06","question":"What is the camera-relative direction of {target} at the specified moment?"},
+    {"id":"A4_07","question":"Determine the direction from your camera to {target} at the specified moment."},
+    {"id":"A4_08","question":"In which direction from your camera is {target} at the specified moment?"},
+    {"id":"A4_09","question":"At the specified moment, identify the direction of {target} relative to your camera."},
+    {"id":"A4_10","question":"In which direction will {target} be relative to your camera at the specified moment?"}
+  ],
+  "B1": [
+    {"id":"B1_01","question":"After all actions, how far is {target} from your camera?"},
+    {"id":"B1_02","question":"What is the distance from your camera to {target} after all actions?"},
+    {"id":"B1_03","question":"How far will your camera be from {target} at the end of the sequence?"},
+    {"id":"B1_04","question":"Give the distance between your camera and {target} after all actions."},
+    {"id":"B1_05","question":"Once all actions are complete, what is the distance from your camera to {target}?"},
+    {"id":"B1_06","question":"At the end of the sequence, how far is {target} from your camera?"},
+    {"id":"B1_07","question":"Determine the distance from your camera to {target} after all actions."},
+    {"id":"B1_08","question":"How far from {target} is your camera after the full sequence?"},
+    {"id":"B1_09","question":"What distance separates your camera and {target} after all actions?"},
+    {"id":"B1_10","question":"After the full sequence, what is the distance between {target} and your camera?"}
+  ],
+  "B2": [
+    {"id":"B2_01","question":"After all actions, in which direction is {target} relative to your camera?"},
+    {"id":"B2_02","question":"Which direction is {target} from your camera after all actions?"},
+    {"id":"B2_03","question":"After all actions, what is the direction from your camera to {target}?"},
+    {"id":"B2_04","question":"Give the direction of {target} relative to your camera after all actions."},
+    {"id":"B2_05","question":"After all actions, in which direction does {target} lie from your camera?"},
+    {"id":"B2_06","question":"What is the camera-relative direction of {target} after all actions?"},
+    {"id":"B2_07","question":"Determine the direction from your camera to {target} after all actions."},
+    {"id":"B2_08","question":"In which direction from your camera is {target} after all actions?"},
+    {"id":"B2_09","question":"After all actions, identify the direction of {target} relative to your camera."},
+    {"id":"B2_10","question":"In which direction will {target} be relative to your camera after all actions?"}
+  ],
+  "B3": [
+    {"id":"B3_01","question":"At the specified moment, how far is {target} from your camera?"},
+    {"id":"B3_02","question":"What is the distance from your camera to {target} at the specified moment?"},
+    {"id":"B3_03","question":"How far is your camera from {target} at the specified moment?"},
+    {"id":"B3_04","question":"Give the distance between your camera and {target} at the specified moment."},
+    {"id":"B3_05","question":"At the specified moment, what is the distance from your camera to {target}?"},
+    {"id":"B3_06","question":"How far from your camera is {target} at the specified moment?"},
+    {"id":"B3_07","question":"Determine the distance from your camera to {target} at the specified moment."},
+    {"id":"B3_08","question":"How far from {target} is your camera at the specified moment?"},
+    {"id":"B3_09","question":"What distance separates your camera and {target} at the specified moment?"},
+    {"id":"B3_10","question":"At the specified moment, what is the distance between {target} and your camera?"}
+  ],
+  "C1": [
+    {"id":"C1_01","question":"Which candidate image shows your camera view after all actions?"},
+    {"id":"C1_02","question":"After all actions, which candidate image matches your camera view?"},
+    {"id":"C1_03","question":"Select the candidate image showing your camera view after all actions."},
+    {"id":"C1_04","question":"Which candidate image shows what your camera sees at the end of the sequence?"},
+    {"id":"C1_05","question":"At the end of the sequence, which candidate image matches your camera view?"},
+    {"id":"C1_06","question":"Choose the candidate image corresponding to your camera view after all actions."},
+    {"id":"C1_07","question":"Which candidate image matches your camera view once all actions are complete?"},
+    {"id":"C1_08","question":"After the full sequence, which candidate image shows what your camera sees?"},
+    {"id":"C1_09","question":"Identify the candidate image showing your camera view at the end of the sequence."},
+    {"id":"C1_10","question":"Which candidate image represents your camera view after completing all actions?"}
+  ]
+}

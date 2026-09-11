@@ -464,6 +464,25 @@ def test_b1k_semantic_ids_are_stable_and_public_labels_are_synsets():
     ]
     assert "breakfast_table" not in repr(index.public_instances())
     assert "table_model" not in repr(index.public_instances())
+
+
+def test_contact_category_comes_from_hit_mesh_not_nearby_table():
+    from types import SimpleNamespace
+    from pipeline.consequence import _full_contact_attribution
+
+    index, _atom = _semantic_authority()
+    from tests._synthetic import LEVEL_FLOOR
+    frame = SimpleNamespace(semantic_index=index, id_to_cat=index.id_to_cat,
+                            position=np.zeros(3), yaw_rad=0.0,
+                            floor_plane=LEVEL_FLOOR,
+                            predicate_category=lambda iid: index.id_to_predicate_cat.get(iid, "unknown"))
+    contact = {"obstacle_identity": "/World/z-chair/base_link/collisions/mesh_0",
+               "world_point": [0.0, 0.2, 0.0]}
+    # The query point is on the table; the actual hit component belongs to chair.
+    attr = _full_contact_attribution(frame, contact)
+    assert attr["instance_id"] == 2
+    assert attr["category"] == "chair.n.01"
+    assert attr["source_category"] == "chair"
     assert "/World/a-table" not in repr(index.public_instances())
 
 
@@ -779,43 +798,6 @@ def test_b1k_contact_proof_survives_shared_stability_certificate():
     assert certificate["summary"]["contact_instance_id"] == 1
 
 
-def test_b1k_target_geometry_uses_synset_triangles_and_scene_authority():
-    """Catches proxy target geometry or a source-unbound B atom."""
-    index, atom = _semantic_authority()
-
-    target = index.target_geometry_atom(
-        1, LEVEL_FLOOR_FIT.estimate,
-        expected_scene_authority_sha256=atom["sha256"],
-        pose={"position": [0.0, 0.0, 0.0], "yaw_rad": 0.0},
-    )
-
-    assert target["schema"] == "b1k-b-target-geometry.v1"
-    assert target["instance_id"] == 1
-    assert target["category"] == "table.n.02"
-    assert target["scene_authority_sha256"] == atom["sha256"]
-    assert target["full_triangle_protocol"] == \
-        "b1k-runtime-instance-triangles.v1"
-    assert target["full_triangle_count"] == 2
-    assert target["full_triangles_sha256"] == \
-        index.instance_triangles_sha256(1)
-    assert target["ground_support"]["frame"] == "pbench_world_xz"
-    assert target["reference_centroid"]["frame"] == "pbench_world_xyz"
-    assert target["reference_centroid"]["world_xyz_m"] == \
-        pytest.approx([0.0, 0.2, 0.0])
-    assert "breakfast_table" not in repr(target)
-    assert "table_model" not in repr(target)
-    assert "/World/a-table" not in repr(target)
-    assert target["sha256"] == record.canonical_atom_sha256({
-        key: value for key, value in target.items() if key != "sha256"
-    })
-    with pytest.raises(ValueError, match="scene authority digest"):
-        index.target_geometry_atom(
-            1, LEVEL_FLOOR_FIT.estimate,
-            expected_scene_authority_sha256="0" * 64,
-            pose={"position": [0.0, 0.0, 0.0], "yaw_rad": 0.0},
-        )
-
-
 @pytest.mark.parametrize("invalid_instance_id", [True, 1.9])
 def test_b1k_semantic_rejects_coercive_instance_ids(invalid_instance_id):
     """Catches bool/float aliases selecting a different stable instance."""
@@ -826,8 +808,3 @@ def test_b1k_semantic_rejects_coercive_instance_ids(invalid_instance_id):
     with pytest.raises(TypeError, match="positive integral"):
         index.confirm_contact_instance(
             invalid_instance_id, [0.0, 0.2, 0.0])
-    with pytest.raises(TypeError, match="positive integral"):
-        index.target_geometry_atom(
-            invalid_instance_id, LEVEL_FLOOR_FIT.estimate,
-            expected_scene_authority_sha256=atom["sha256"],
-            pose={"position": [0.0, 0.0, 0.0], "yaw_rad": 0.0})

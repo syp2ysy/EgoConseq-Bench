@@ -51,6 +51,7 @@ _SUPPORTED_ACTION_POLICIES = frozenset({
     action_proposal.DEPTH_CONDITIONED_POLICY,
     action_proposal.DEPTH_CONDITIONED_POLICY_V3,
     action_proposal.DEPTH_CONDITIONED_POLICY_V4,
+    action_proposal.DEPTH_CONDITIONED_POLICY_V5,
     action_proposal.EXPLICIT_ACTION_FILE_POLICY,
 })
 # Only a depth-conditioned run materialises programs from a pose's own depth, so
@@ -325,8 +326,8 @@ def _validated_r2r_v16_collection_contract(
         return False
     fid = rec.get("frame_id", "?")
     scene_id = str(rec.get("scene_id") or "")
-    expected = context.expected_collection_contracts.get(scene_id)
-    if expected is None:
+    expected_entry = context.expected_collection_contracts.get(scene_id)
+    if expected_entry is None:
         errors.append(
             f"[{fid}] external validation context has no collection contract "
             f"for scene {scene_id!r}")
@@ -338,6 +339,13 @@ def _validated_r2r_v16_collection_contract(
     if not isinstance(contract, dict):
         errors.append(f"[{fid}] collection contract must be an object")
         return True
+    expected = (
+        expected_entry.get(contract.get("version"))
+        if context.route == "b1k_v16_registered" else expected_entry)
+    if not isinstance(expected, dict):
+        errors.append(
+            f"[{fid}] collection contract version is not registered")
+        return True
     if contract != expected:
         errors.append(
             f"[{fid}] collection contract does not match external validation "
@@ -345,7 +353,10 @@ def _validated_r2r_v16_collection_contract(
     try:
         source_bound = R.collection_contract(
             rec.get("source") or {}, expected.get("collection_mode"),
-            record_schema_version=context.expected_schema_version)
+            record_schema_version=context.expected_schema_version,
+            contract_version=(
+                expected.get("version")
+                if context.route == "b1k_v16_registered" else None))
     except (TypeError, ValueError) as error:
         errors.append(f"[{fid}] collection contract is invalid: {error}")
         return True
@@ -368,7 +379,11 @@ def _validate_declared_collection_contract(
     try:
         rebuilt = R.collection_contract(
             rec.get("source") or {}, contract.get("collection_mode"),
-            record_schema_version=rec.get("schema_version"))
+            record_schema_version=rec.get("schema_version"),
+            contract_version=(
+                contract.get("version")
+                if (rec.get("source") or {}).get("source_dataset") == "b1k"
+                else None))
     except (TypeError, ValueError) as error:
         errors.append(f"[{fid}] collection contract is invalid: {error}")
         return False
@@ -394,12 +409,15 @@ def _validate_record_local_context(
             errors.append(f"[{fid}] unsupported source dataset {dataset!r}")
         if str(source.get("scene_id") or "") != str(rec.get("scene_id") or ""):
             errors.append(f"[{fid}] source scene_id does not match record")
-        if source.get("official_split") != "train":
-            errors.append(f"[{fid}] source is not from the official train split")
+        if source.get("official_split") not in \
+                dataset_contracts.OFFICIAL_SOURCE_SPLITS:
+            errors.append(f"[{fid}] source official split is unsupported")
         if (dataset == "b1k" and
                 source.get("split_authority") != "project_defined"):
             errors.append(
                 f"[{fid}] B1K source split authority is not project-defined")
+        if dataset == "b1k" and source.get("official_split") != "train":
+            errors.append(f"[{fid}] B1K source split is not train")
         semantic_format = str(source.get("semantic_format") or "")
         semantic_format_matches = (
             source_contract is not None and
@@ -512,6 +530,35 @@ def _a_stability_validation_errors(
     stability = outcome.get("shared_oracle_stability")
     if not isinstance(stability, dict):
         return [f"{prefix} A stability certificate is missing"]
+    if stability.get("version") == "nominal-oracle.v1":
+        rows = stability.get("rows") or []
+        summary = stability.get("summary") or {}
+        physical = outcome.get("physical") or {}
+        depth = outcome.get("depth_physical") or {}
+        consensus = outcome.get("oracle_consensus") or {}
+        contact_index = physical.get("contact_action_index")
+        expected_index = (
+            None if contact_index is None else int(contact_index) + 1)
+        full_id = consensus.get("full_contact_instance_id")
+        depth_id = consensus.get("depth_contact_instance_id")
+        expected_contact_id = full_id if full_id == depth_id else None
+        body = {key: value for key, value in stability.items()
+                if key != "sha256"}
+        valid = (
+            len(rows) == 1 and
+            rows[0].get("perturbation_id") == "nominal" and
+            rows[0].get("transform") == {
+                "x_m": 0.0, "z_m": 0.0, "yaw_deg": 0.0} and
+            rows[0].get("physical") == physical and
+            rows[0].get("depth_physical") == depth and
+            rows[0].get("consensus") == consensus and
+            summary.get("evaluation") == "nominal" and
+            summary.get("collision") is physical.get("collision") and
+            summary.get("original_action_index") == expected_index and
+            summary.get("contact_instance_id") == expected_contact_id and
+            stability.get("sha256") == R.canonical_atom_sha256(body))
+        return [] if valid else [
+            f"{prefix} nominal A certificate differs from its outcome"]
     mismatches = consensus_module.a_stability_certificate_mismatches(
         actions, stability, outcome,
         authority_binding=authority_binding,
@@ -901,17 +948,6 @@ def _validate_outcome_execution(
         prefix, physical, execution, actions, checkpoints, errors)
 
 
-def _validate_future_view(
-        rec: dict, outcome: dict, errors: List[str]) -> None:
-    prefix = f"[{rec.get('frame_id', '?')}:{outcome.get('outcome_id', '?')}]"
-    future = outcome.get("future_view", {})
-    for checkpoint in future.get("checkpoints", []):
-        for target in checkpoint.get("targets", []):
-            ratio = float(target["image_area_ratio"])
-            if not 0.0 <= ratio <= 1.0:
-                errors.append(f"{prefix} future-view area ratio is out of range")
-
-
 _RETIRED_RECORD_FIELDS = frozenset({
     "review_evidence", "target_reference_sets", "targets",
 })
@@ -962,10 +998,14 @@ def _validate_v11_shape(rec: dict) -> List[str]:
 def _terminal_record_provenance_invalid(rec: dict, outcome: dict) -> bool:
     """Recompute record-visible provenance failures used by C1 collection."""
     source = rec.get("source")
+    declared = rec.get("collection_contract") or {}
     try:
         expected_contract = R.collection_contract(
             source, "main", record_schema_version=rec.get(
-                "schema_version", R.SCHEMA_VERSION))
+                "schema_version", R.SCHEMA_VERSION),
+            contract_version=(
+                declared.get("version")
+                if (source or {}).get("source_dataset") == "b1k" else None))
         future_view_selection._source_binding(
             source, scene_id=str(rec.get("scene_id") or ""))
     except (KeyError, StopIteration, TypeError, ValueError):
@@ -1106,7 +1146,6 @@ def validate_record_local(
             rec, outcome, sensor, strict_shared_oracle, errors,
             require_contact_instance_witness=
                 require_contact_instance_witness)
-        _validate_future_view(rec, outcome, errors)
         prefix = (
             f"[{rec.get('frame_id', '?')}:"
             f"{outcome.get('outcome_id', '?')}]"
@@ -1138,11 +1177,15 @@ def _trusted_b1k_source_errors(
     """Bind B1K record atoms to one externally rederived scene authority."""
     fid = rec.get("frame_id", "?")
     scene_id = str(rec.get("scene_id") or "")
-    expected_contract = context.expected_collection_contracts.get(scene_id)
-    if expected_contract is None:
+    expected_by_version = context.expected_collection_contracts.get(scene_id)
+    if expected_by_version is None:
         return [
             f"[{fid}] trusted B1K scene authority is unregistered for "
             f"scene {scene_id!r}"]
+    expected_contract = expected_by_version.get(
+        (rec.get("collection_contract") or {}).get("version"))
+    if not isinstance(expected_contract, dict):
+        return [f"[{fid}] trusted B1K collection contract is unregistered"]
     resolver = context.b1k_scene_authority_resolver
     try:
         resolved_sha256 = resolver(scene_id)
@@ -1163,15 +1206,6 @@ def _trusted_b1k_source_errors(
             resolved_sha256):
         errors.append(
             f"[{fid}] B1K scene authority differs from trusted resolver")
-    target = rec.get("b_target")
-    if isinstance(target, dict):
-        geometry = target.get("geometry")
-        if not isinstance(geometry, dict):
-            errors.append(
-                f"[{fid}] trusted B1K target geometry is invalid")
-        elif geometry.get("scene_authority_sha256") != resolved_sha256:
-            errors.append(
-                f"[{fid}] trusted B1K target geometry authority disagrees")
     for outcome in rec.get("outcomes") or []:
         atom = outcome.get("terminal_rgb_asset")
         if atom is None:
@@ -1239,7 +1273,6 @@ def validate_record_source_bound(
     errors.extend(binding_errors)
     if not binding_errors:
         errors.extend(scene_pool.trusted_r2r_a3_source_errors(rec, context))
-        errors.extend(scene_pool.trusted_r2r_b_source_errors(rec, context))
     return errors
 
 

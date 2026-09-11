@@ -2,16 +2,93 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from pathlib import Path
 import subprocess
 import sys
 from types import SimpleNamespace
 
-from pipeline import capability_matrix
+import pytest
+
+from pipeline import (
+    benchmark_tasks, capability_contracts, capability_matrix, record,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
 REPORT_CAPABILITY_MATRIX = ROOT / "scripts" / "report_capability_matrix.py"
+
+
+def _legacy_gs_capability_snapshot() -> dict:
+    body = {
+        "schema": "egoconseq.authority-capability-snapshot.v1",
+        "scope": "static_authority_surface_capability",
+        "source_dataset": "gs",
+        "main_collection_enabled": True,
+        "method_surface": {
+            "assign": True,
+            "instance_points": True,
+            "target_geometry_atom": True,
+            "confirm_contact_instances": True,
+            "instance_triangles": False,
+        },
+        "task_statuses": {
+            task: {"status": "available"}
+            for task in ("A1", "A2", "A3", "B1", "B2", "C1")
+        },
+        "certification": {
+            "runtime_evidence": "not_assessed",
+            "source_binding": "not_assessed",
+            "formal_collection": "not_assessed",
+        },
+    }
+    encoded = json.dumps(
+        body, sort_keys=True, separators=(",", ":"),
+        allow_nan=False).encode("utf-8")
+    return {**body, "sha256": hashlib.sha256(encoded).hexdigest()}
+
+
+def test_legacy_capability_snapshot_is_validated_by_its_own_schema():
+    """Catches recomputing a frozen v1 record with the current v2 surface."""
+    snapshot = _legacy_gs_capability_snapshot()
+
+    validated = capability_contracts.validate_snapshot(snapshot, "gs")
+
+    assert validated == snapshot
+
+
+def test_legacy_capability_snapshot_still_fails_closed_when_tampered():
+    snapshot = _legacy_gs_capability_snapshot()
+    snapshot["method_surface"]["instance_triangles"] = True
+
+    with pytest.raises(ValueError, match="snapshot"):
+        capability_contracts.validate_snapshot(snapshot, "gs")
+
+
+def test_gs_a2_eligibility_accepts_an_authenticated_legacy_snapshot(
+        monkeypatch):
+    """Catches the action refresh dying before it can inspect A2 evidence."""
+    rec = {
+        "schema_version": record.V18_SCHEMA_VERSION,
+        "source": {"source_dataset": "gs"},
+        "authority_surface_capability": _legacy_gs_capability_snapshot(),
+        "gs_scene_capability": {},
+    }
+    monkeypatch.setattr(
+        benchmark_tasks.gs_semantic, "scene_task_available",
+        lambda _atom, _source, task: task == "A2")
+
+    assert benchmark_tasks._capability_envelope_rejection(
+        "A2_collision_step_grounding", rec) is None
+
+
+def test_new_capability_snapshot_uses_a_new_schema():
+    """Catches mutating the meaning of v1 in place again."""
+    fields = capability_contracts.snapshot_fields("gs")
+
+    assert fields["schema"] == "egoconseq.authority-capability-snapshot.v2"
+    assert "target_geometry_atom" not in fields["method_surface"]
 
 
 def test_frozen_authority_method_surface_and_task_statuses():
@@ -25,21 +102,18 @@ def test_frozen_authority_method_surface_and_task_statuses():
     assert rows["r2r"]["method_surface"] == {
         "assign": True,
         "instance_points": True,
-        "target_geometry_atom": True,
         "confirm_contact_instances": True,
         "instance_triangles": True,
     }
     assert rows["b1k"]["method_surface"] == {
         "assign": True,
         "instance_points": True,
-        "target_geometry_atom": True,
         "confirm_contact_instances": True,
         "instance_triangles": True,
     }
     assert rows["gs"]["method_surface"] == {
         "assign": True,
         "instance_points": True,
-        "target_geometry_atom": True,
         "confirm_contact_instances": True,
         "instance_triangles": False,
     }

@@ -102,9 +102,9 @@ def query_exhaustive(
     parsed_endpoint = face_offset + face_count * triangle_dtype.itemsize
     if parsed_endpoint != file_size:
         raise ValueError("MP3D semantic PLY parsed endpoint is not file size")
-    raw_file = np.frombuffer(pinned, dtype=np.uint8, count=file_size)
-    source_hasher = hashlib.sha256()
-    source_hasher.update(memoryview(raw_file[:face_offset]))
+    index = backend["authenticated_face_index"](
+        semantic_ply, expected_semantic_ply_sha256)
+    actual_source_sha256 = index["source_sha256"]
     vertices = np.frombuffer(
         pinned, dtype=vertex_dtype, count=vertex_count, offset=header_size)
     faces = np.frombuffer(
@@ -116,9 +116,6 @@ def query_exhaustive(
     streaming_face_counts = dict.fromkeys(requested_ids, 0)
     for start in range(0, face_count, 200_000):
         chunk = faces[start:start + 200_000]
-        byte_start = face_offset + start * triangle_dtype.itemsize
-        byte_end = byte_start + len(chunk) * triangle_dtype.itemsize
-        source_hasher.update(memoryview(raw_file[byte_start:byte_end]))
         if len(chunk) and not np.all(chunk["count"] == 3):
             raise ValueError("MP3D semantic PLY contains non-triangle faces")
         raw_ids = np.asarray(chunk["object_id"], dtype=np.int64)
@@ -160,9 +157,6 @@ def query_exhaustive(
                     float(minimum))
     if not minima[0]:
         raise ValueError("MP3D semantic PLY contains no face-instance universe")
-    actual_source_sha256 = source_hasher.hexdigest()
-    if actual_source_sha256 != expected_semantic_ply_sha256:
-        raise ValueError("MP3D semantic PLY source digest changed")
     queries = []
     for query_minima, witness_instance_id in zip(minima, witness_ids):
         ranked = sorted(
@@ -213,13 +207,6 @@ def query_bounded(
     """Resolve exact top-two instances after conservative AABB pruning."""
     import trimesh
 
-    raw_view = memoryview(pinned)[:file_size]
-    try:
-        actual_source_sha256 = hashlib.sha256(raw_view).hexdigest()
-    finally:
-        raw_view.release()
-    if actual_source_sha256 != expected_semantic_ply_sha256:
-        raise ValueError("MP3D semantic PLY source digest changed")
     header_size, vertex_count, face_count = \
         backend["binary_ply_layout_from_buffer"](pinned, semantic_ply)
     vertex_dtype = backend["vertex_dtype"]
@@ -229,6 +216,7 @@ def query_bounded(
         raise ValueError("MP3D semantic PLY parsed endpoint is not file size")
     index = backend["authenticated_face_index"](
         semantic_ply, expected_semantic_ply_sha256)
+    actual_source_sha256 = index["source_sha256"]
     if (index["header_size"] != header_size or
             index["vertex_count"] != vertex_count or
             index["face_count"] != face_count or

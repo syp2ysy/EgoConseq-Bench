@@ -21,8 +21,7 @@ from pipeline import floor_plane as floor_plane_module
 class SensorProfile:
     # The sensor's mount offset above the agent root -- the extrinsic Habitat
     # was configured with, not a measured height above any floor. Named apart
-    # from ``camera_height_above_visible_floor_m`` (the calibrated, published
-    # quantity) so a call site cannot silently use one for the other.
+    # from the public camera-to-ground height measured against source geometry.
     nominal_camera_offset_m: float
     hfov_deg: float
     vfov_deg: float
@@ -141,9 +140,10 @@ class Frame:
         return inv
     @property
     def camera_height_above_visible_floor_m(self) -> float:
-        """Convention A: the calibrated height, derived in exactly one place.
+        """Legacy plane-relative distance for depth/oracle processing, not QA.
         ``n . c + d`` for the camera centre ``c = (0, nominal_offset, 0)``,
         which degenerates to ``nominal_offset - floor_y`` on a level floor.
+        Public relative camera height uses the configured nominal offset.
         """
         return self.floor_plane.height_above(
             (0.0, self.sensor.nominal_camera_offset_m, 0.0))
@@ -252,9 +252,11 @@ def build_frame(sim, position, yaw: float, *,
     vf = perception.VoxelField(pts[obs_mask])
     id_to_cat = sim.id_to_cat
     id_to_predicate_cat = getattr(sim, "id_to_predicate_cat", id_to_cat)
+
     objs = objects.extract_objects(
         pts, uv, sem, id_to_cat,
-        predicate_categories=id_to_predicate_cat)
+        predicate_categories=id_to_predicate_cat,
+        resolution=(sensor.width_px, sensor.height_px))
     semantic_index = getattr(sim, "semantic_index", None)
     frame_semantic_index = getattr(sim, "frame_semantic_index", None)
     if callable(frame_semantic_index):
@@ -295,6 +297,26 @@ def build_terminal_rgb_observation(
     """Render only native endpoint RGB; do not unproject or assign semantics."""
     position, yaw = _future_world_pose(base, local_pose)
     sensor = base.sensor
+    rgb_renderer = getattr(sim, "render_rgb", None)
+    if callable(rgb_renderer):
+        rgb = np.asarray(rgb_renderer(
+            position, yaw,
+            sensor.nominal_camera_offset_m,
+            sensor.hfov_deg,
+            sensor.vfov_deg,
+        ))
+        if (rgb.shape != (sensor.height_px, sensor.width_px, 3) or
+                rgb.dtype != np.uint8):
+            raise ValueError("terminal RGB renderer returned an invalid image")
+        return TerminalRGBObservation(
+            scene_id=base.scene_id,
+            scene_glb=base.scene_glb,
+            position=np.asarray(position, dtype=np.float64),
+            yaw_rad=float(yaw),
+            K=config.intrinsics(sensor.hfov_deg, sensor.vfov_deg),
+            rgb=rgb,
+            sensor=sensor,
+        )
     rendered = sim.render(
         position, yaw,
         sensor.nominal_camera_offset_m,

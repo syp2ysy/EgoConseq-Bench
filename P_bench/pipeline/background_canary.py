@@ -67,11 +67,14 @@ def build_manifest(
         for dataset in DATASETS
     }
     jobs = []
-    index = 0
-    for dataset in DATASETS:
-        for scene_id in selected[dataset]:
+    datasets_by_gpu = sorted(
+        DATASETS, key=dataset_contracts.collection_gpu_id)
+    for wave in range(2):
+        for dataset in datasets_by_gpu:
+            scene_id = selected[dataset][wave]
+            gpu_id = dataset_contracts.collection_gpu_id(dataset)
             common = {
-                "gpu_id": index % 4, "round_index": index // 4,
+                "gpu_id": gpu_id, "round_index": wave,
                 "scenes": [scene_id],
                 "output_root": root, "revision": revision,
                 "paths": dict(paths),
@@ -83,18 +86,20 @@ def build_manifest(
                 b1k_job_builder(
                     **common,
                     scene_wallclock_s=
-                    config.BACKGROUND_SCENE_WALLCLOCK_S_BY_DATASET[dataset])
+                    config.BACKGROUND_CANARY_SCENE_WALLCLOCK_S_BY_DATASET[
+                        dataset])
                 if dataset == "b1k" else
                 direct_job_builder(
                     dataset=dataset, **common,
                     scene_wallclock_s=
-                    config.BACKGROUND_SCENE_WALLCLOCK_S_BY_DATASET[dataset]))
+                    config.BACKGROUND_CANARY_SCENE_WALLCLOCK_S_BY_DATASET[
+                        dataset]))
             job["catalog_pass"] = 0
-            job["canary_wave"] = index // 4
+            job["canary_wave"] = wave
             job["scene_wallclock_s"] = \
-                config.BACKGROUND_SCENE_WALLCLOCK_S_BY_DATASET[dataset]
+                config.BACKGROUND_CANARY_SCENE_WALLCLOCK_S_BY_DATASET[dataset]
             job["weight"] = \
-                config.BACKGROUND_SCENE_WALLCLOCK_S_BY_DATASET[dataset]
+                config.BACKGROUND_CANARY_SCENE_WALLCLOCK_S_BY_DATASET[dataset]
             bind_job(
                 job, revision=revision, paths=paths,
                 source_manifest_sha256=source_manifest_sha256,
@@ -102,7 +107,6 @@ def build_manifest(
                 pose_candidates_per_scene=attempt_caps[dataset],
                 ordinary_actions_per_pose=ordinary_actions)
             jobs.append(job)
-            index += 1
     body = {
         "schema": SCHEMA,
         "revision": revision,
@@ -165,12 +169,14 @@ def validate_manifest(value: Mapping) -> None:
         binding = job.get("transaction_binding") or {}
         dataset = job.get("dataset")
         scene = (job.get("scenes") or [None])[0]
+        wave = index // len(DATASETS)
         actual_pairs.add((dataset, scene))
         job_ids.append(job.get("job_id"))
         if (len(job.get("scenes") or []) != 1 or
-                job.get("gpu_id") != index % 4 or
-                job.get("canary_wave") != index // 4 or
-                job.get("round_index") != index // 4 or
+                job.get("gpu_id") !=
+                dataset_contracts.collection_gpu_id(dataset) or
+                job.get("canary_wave") != wave or
+                job.get("round_index") != wave or
                 binding.get("dataset") != dataset or
                 binding.get("scene_id") != scene or
                 binding.get("revision") != value["revision"] or
@@ -184,7 +190,8 @@ def validate_manifest(value: Mapping) -> None:
                     (binding.get("source_authority") or {}).get("sha256") !=
                     sources.get(dataset) or
                     job.get("scene_wallclock_s") !=
-                    config.BACKGROUND_SCENE_WALLCLOCK_S_BY_DATASET[dataset]):
+                    config.BACKGROUND_CANARY_SCENE_WALLCLOCK_S_BY_DATASET[
+                        dataset]):
             raise ValueError("capacity canary job binding differs")
         background_job_contract.validate_job_command(job, value["paths"])
     if actual_pairs != expected_pairs or len(job_ids) != len(set(job_ids)):

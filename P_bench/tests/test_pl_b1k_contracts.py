@@ -6,7 +6,7 @@ import hashlib
 import pytest
 
 from pipeline import (
-    benchmark_tasks,
+    benchmark,
     collection_assets,
     consensus,
     future_view_selection,
@@ -15,7 +15,6 @@ from pipeline import (
     validate,
 )
 from tests._synthetic import LEVEL_FLOOR_FIT, make_frame, source_provenance
-from tests.test_pl_v16_b_candidates import _record_outcome
 from tests.test_pl_v16_c_assets import _clear_outcome, _terminal_frame
 
 
@@ -51,39 +50,6 @@ def _scene_authority_sha256(source: dict) -> str:
         if asset["role"] == "scene_authority")
 
 
-def _b1k_geometry(source: dict) -> dict:
-    support = {
-        "protocol": "full-triangle-floor-slab-xz-union.v1",
-        "frame": "pbench_world_xz",
-        "ground_band_m": [0.05, 0.30],
-        "triangles_xz_m": [
-            [[-0.2, -2.0], [0.0, -2.2], [0.2, -2.0]],
-        ],
-        "segments_xz_m": [],
-        "points_xz_m": [],
-    }
-    support["sha256"] = record.canonical_atom_sha256(support)
-    centroid = {
-        "protocol": "full-triangle-area-weighted-centroid.v1",
-        "frame": "pbench_world_xyz",
-        "world_xyz_m": [0.0, 0.5, -2.0],
-        "world_xz_m": [0.0, -2.0],
-    }
-    centroid["sha256"] = record.canonical_atom_sha256(centroid)
-    value = {
-        "schema": "b1k-b-target-geometry.v1",
-        "instance_id": 7,
-        "category": "chair",
-        "scene_authority_sha256": _scene_authority_sha256(source),
-        "full_triangle_protocol": "b1k-runtime-instance-triangles.v1",
-        "full_triangle_count": 12,
-        "full_triangles_sha256": "f" * 64,
-        "ground_support": support,
-        "reference_centroid": centroid,
-    }
-    return {**value, "sha256": record.canonical_atom_sha256(value)}
-
-
 def _bind_b1k_stability(outcome: dict) -> dict:
     value = copy.deepcopy(outcome)
     rows = copy.deepcopy(value["shared_oracle_stability"]["rows"])
@@ -102,29 +68,7 @@ def _bind_b1k_stability(outcome: dict) -> dict:
 
 def _build_b1k_b_record():
     source = _b1k_source()
-    geometry = _b1k_geometry(source)
-
-    class Authority:
-        def __init__(self):
-            self.calls = []
-
-        def target_geometry_atom(
-                self, instance_id, floor_plane, *,
-                expected_scene_authority_sha256, pose):
-            self.calls.append({
-                "instance_id": instance_id,
-                "floor_plane": floor_plane,
-                "expected_scene_authority_sha256":
-                    expected_scene_authority_sha256,
-                "pose": pose,
-            })
-            assert expected_scene_authority_sha256 == \
-                _scene_authority_sha256(source)
-            return copy.deepcopy(geometry)
-
     frame = make_frame()
-    authority = Authority()
-    frame.semantic_index = authority
     frame.objects = [{
         "instance_id": 7,
         "category": "chair",
@@ -134,15 +78,20 @@ def _build_b1k_b_record():
         "bbox_xyxy_px": [200, 150, 439, 329],
         "centroid_px": [320, 240],
         "dist_nearest_m": 2.0,
+        "surface_anchor": {
+            "protocol": "b1k-visible-depth-interior.v1",
+            "pixel_xy_px": [320, 240],
+            "initial_robot_xyz_m": [0.0, 0.5, -2.0],
+        },
     }]
-    outcome = _bind_b1k_stability(_record_outcome())
+    outcome = _bind_b1k_stability(_clear_outcome(outcome_id="o-a"))
     contract = record.collection_contract(source, "main")
     rec = record.build_record(
         frame, [outcome], image_path="images/target.png",
         floor_calibration=LEVEL_FLOOR_FIT,
         source_provenance=source,
         collection_contract=contract)
-    return rec, rec["outcomes"][0], authority
+    return rec, rec["outcomes"][0], None
 
 
 def test_collection_contract_dispatches_b1k_v11_without_changing_r2r():
@@ -151,7 +100,7 @@ def test_collection_contract_dispatches_b1k_v11_without_changing_r2r():
     contract = record.collection_contract(source, "main")
 
     assert contract == {
-        "version": "b1k-visible-space-abc1.v5",
+        "version": "b1k-visible-space-abc1.v7",
         "record_schema_version": "conseq.v11",
         "oracle_contract_version": "ground-disc-visible-v8",
         "collection_mode": "main",
@@ -172,9 +121,43 @@ def test_collection_contract_dispatches_b1k_v11_without_changing_r2r():
     assert contract["sha256"] == record.canonical_atom_sha256({
         key: value for key, value in contract.items() if key != "sha256"
     })
+    assert contract["c1_render_mode"] == \
+        "persistent-counterfactual-bank-batch.v2"
+    legacy = record.collection_contract(
+        source, "main", contract_version="b1k-visible-space-abc1.v5")
+    assert legacy["c1_render_mode"] == \
+        "temporary-counterfactual-bank-batch.v1"
+    legacy_v6 = record.collection_contract(
+        source, "main", contract_version="b1k-visible-space-abc1.v6")
+    assert legacy_v6["observation_profile_sha256"] == \
+        record.B1K_LEGACY_OBSERVATION_PROFILE_SHA256
+    assert contract["observation_profile_sha256"] != \
+        legacy_v6["observation_profile_sha256"]
     r2r = source_provenance("r2r-scene", dataset="r2r")
     assert record.collection_contract(r2r, "main") == \
         record.r2r_v16_collection_contract(r2r, "main")
+
+
+def test_b1k_v5_collection_contract_remains_readable():
+    rec, outcome, _authority = _build_b1k_b_record()
+    rec["collection_contract"] = record.collection_contract(
+        rec["source"], "main",
+        contract_version="b1k-visible-space-abc1.v5")
+
+    context = source_manifest.b1k_v16_registered_validation_context(
+        [rec["source"]], collection_mode="main",
+        expected_schema_version=record.SCHEMA_VERSION,
+        expected_oracle_contract_version=record.ORACLE_CONTRACT_VERSION,
+        authority_sha256="f" * 64,
+        scene_authority_resolver=lambda _scene_id: _scene_authority_sha256(
+            rec["source"]))
+    errors = validate.validate_record_source_bound(rec, context=context)
+    certificate, reason = benchmark.shared_visible_space_certificate(
+        rec, outcome)
+
+    assert not [error for error in errors if "collection contract" in error]
+    assert certificate == outcome["shared_oracle_stability"]
+    assert reason == "eligible"
 
 
 def test_b1k_source_format_and_physical_authority_validate():
@@ -206,52 +189,13 @@ def test_b1k_collision_source_must_match_its_geometry_authority():
         "collision state") in errors
 
 
-def test_b1k_b1_and_b2_use_the_source_bound_semantic_authority():
-    rec, outcome, authority = _build_b1k_b_record()
-
-    b1 = benchmark_tasks.b_candidate_eligibility(
-        "B1_endpoint_distance", rec, outcome)
-    b2 = benchmark_tasks.b_candidate_eligibility(
-        "B2_endpoint_direction", rec, outcome)
-
-    assert authority.calls == [{
-        "instance_id": 7,
-        "floor_plane": make_frame().floor_plane,
-        "expected_scene_authority_sha256":
-            _scene_authority_sha256(rec["source"]),
-        "pose": {"position": [0.0, 0.0, 0.0], "yaw_rad": 0.0},
-    }]
-    assert rec["b_target"]["geometry"]["schema"] == \
-        "b1k-b-target-geometry.v1"
-    assert b1.eligible is True
-    assert b2.eligible is True
-
-
-def test_b1k_b_target_rejects_an_unsupported_strict_contract():
-    source = _b1k_source()
-    frame = make_frame()
-    contract = record.collection_contract(source, "main")
-    contract["version"] = "unknown-contract"
-
-    try:
-        record.build_record(
-            frame, [], image_path="images/target.png",
-            floor_calibration=LEVEL_FLOOR_FIT,
-            source_provenance=source, collection_contract=contract)
-    except ValueError as error:
-        assert str(error) == \
-            "B1K B target requires the strict B1K main contract"
-    else:
-        raise AssertionError("unsupported B1K strict contract was accepted")
-
-
 def test_b1k_invalid_contract_validation_never_claims_it_is_r2r():
     rec, _outcome, _authority = _build_b1k_b_record()
     rec["collection_contract"]["version"] = "unknown-contract"
 
     errors = validate.validate_record_local(rec)
 
-    assert any("collection contract source binding disagrees" in error
+    assert any("collection contract version is unsupported" in error
                for error in errors)
     assert not [error for error in errors if "R2R v16" in error]
 
@@ -313,7 +257,6 @@ def test_b1k_source_bound_validation_contains_unexpected_resolver_error():
 @pytest.mark.parametrize(
     ("malformed", "expected_error"),
     [
-        ("geometry", "[F-test] trusted B1K target geometry is invalid"),
         ("terminal_rgb_asset",
          "[F-test:o-a] trusted B1K terminal RGB atom is invalid"),
         ("source",
@@ -326,9 +269,7 @@ def test_b1k_source_bound_validation_contains_malformed_nested_atom(
         malformed, expected_error):
     rec, outcome, _authority = _build_b1k_b_record()
     scene_sha256 = _scene_authority_sha256(rec["source"])
-    if malformed == "geometry":
-        rec["b_target"]["geometry"] = "not-a-geometry"
-    elif malformed == "terminal_rgb_asset":
+    if malformed == "terminal_rgb_asset":
         outcome["terminal_rgb_asset"] = "not-an-atom"
     else:
         outcome["terminal_rgb_asset"] = {
@@ -397,9 +338,61 @@ def test_b1k_c1_binds_scene_authority_and_omnigibson_renderer(tmp_path):
         rec, outcome, asset_root=tmp_path) == (True, "eligible")
 
 
-def test_b1k_terminal_assets_are_limited_to_the_simultaneous_batch(tmp_path):
+@pytest.mark.parametrize(
+    ("contract_version", "render_transaction", "profile_sha256"),
+    [
+        (
+            record.B1K_V5_COLLECTION_CONTRACT_VERSION,
+            record.B1K_V5_C1_RENDER_MODE,
+            record.B1K_LEGACY_OBSERVATION_PROFILE_SHA256,
+        ),
+        (
+            record.B1K_V16_COLLECTION_CONTRACT_VERSION,
+            record.B1K_C1_RENDER_MODE,
+            record.B1K_LEGACY_OBSERVATION_PROFILE_SHA256,
+        ),
+    ],
+)
+def test_b1k_legacy_c1_materializes_under_its_stored_contract(
+        tmp_path, contract_version, render_transaction, profile_sha256):
     source = _b1k_source()
-    contract = record.collection_contract(source, "main")
+    contract = record.collection_contract(
+        source, "main", contract_version=contract_version)
+    base = make_frame()
+    outcome = _bind_b1k_stability(_clear_outcome())
+    terminal = _terminal_frame(base, outcome)
+    cache = {
+        future_view_selection.terminal_render_cache_key(outcome): terminal,
+    }
+
+    atom = future_view_selection.materialize_terminal_rgb_asset(
+        tmp_path, base_frame=base, outcome=outcome, render_cache=cache,
+        source=source, collection_contract=contract,
+        render_transaction=render_transaction)
+
+    assert atom["renderer"]["observation_profile_sha256"] == \
+        profile_sha256
+    assert atom["renderer"]["c1_render_mode"] == render_transaction
+
+
+@pytest.mark.parametrize(
+    ("contract_version", "render_transaction"),
+    [
+        (
+            record.B1K_V5_COLLECTION_CONTRACT_VERSION,
+            record.B1K_V5_C1_RENDER_MODE,
+        ),
+        (
+            record.B1K_V16_COLLECTION_CONTRACT_VERSION,
+            record.B1K_C1_RENDER_MODE,
+        ),
+    ],
+)
+def test_b1k_terminal_assets_are_limited_to_the_simultaneous_batch(
+        tmp_path, contract_version, render_transaction):
+    source = _b1k_source()
+    contract = record.collection_contract(
+        source, "main", contract_version=contract_version)
     base = make_frame()
     selected = _bind_b1k_stability(_clear_outcome())
     incidental = copy.deepcopy(selected)
@@ -413,18 +406,42 @@ def test_b1k_terminal_assets_are_limited_to_the_simultaneous_batch(tmp_path):
         tmp_path, base, [selected, incidental], cache,
         source=source, collection_contract=contract,
         eligible_outcome_ids={selected["outcome_id"]},
-        render_transaction=record.B1K_C1_RENDER_MODE,
+        render_transaction=render_transaction,
         terminal_renderer=lambda _pose: pytest.fail(
             "B1K v5 must not fall back to sequential terminal rendering"))
 
     assert counts == {"materialized": 1, "withheld": 1}
     assert selected["terminal_rgb_asset"]["renderer"]["c1_render_mode"] == \
-        record.B1K_C1_RENDER_MODE
+        render_transaction
     assert "terminal_rgb_asset" not in incidental
     assert incidental["terminal_rgb_asset_withhold"] == \
         "terminal_render_transaction_unavailable"
     assert incidental["terminal_rgb_asset_withhold_authority"] == \
         "collection_runtime_attested"
+
+
+def test_b1k_terminal_asset_withhold_exposes_ephemeral_diagnostics(tmp_path):
+    source = _b1k_source()
+    contract = record.collection_contract(source, "main")
+    base = make_frame()
+    selected = _bind_b1k_stability(_clear_outcome())
+    failures = []
+
+    counts = collection_assets.attach_terminal_rgb_assets(
+        tmp_path, base, [selected], {}, source=source,
+        collection_contract=contract,
+        eligible_outcome_ids={selected["outcome_id"]},
+        render_transaction=record.B1K_C1_RENDER_MODE,
+        failure_diagnostics=failures)
+
+    assert counts == {"materialized": 0, "withheld": 1}
+    assert failures == [{
+        "outcome_id": selected["outcome_id"],
+        "reason": "terminal_cache_miss",
+        "authority": "collection_runtime_attested",
+        "detail": "cached terminal RGB is missing",
+    }]
+    assert "terminal_rgb_asset_diagnostic" not in selected
 
 
 def test_b1k_terminal_asset_validator_rejects_non_batch_transaction(tmp_path):

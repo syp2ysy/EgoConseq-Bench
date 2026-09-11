@@ -11,7 +11,6 @@ import pytest
 from pipeline import (
     config,
     consequence,
-    objects as object_utils,
     outcome as outcome_fields,
     perception,
     rollout,
@@ -34,7 +33,7 @@ class _SurfaceIndex:
         # Local (0, 0.15, 2) lies in the target ground-support band.
         return np.repeat(
             np.array([[0.0, 0.15, -2.0]]),
-            config.TARGET_GROUND_SUPPORT_MIN_POINTS,
+            5,
             axis=0,
         )
 
@@ -107,6 +106,17 @@ class _BatchCountingNav:
         raise AssertionError("rollout must use the unified query API")
 
 
+def test_rollout_retains_the_actual_collision_component():
+    class ComponentNav(HalfPlaneNav):
+        def closest_obstacle(self, pose):
+            return {**super().closest_obstacle(pose),
+                    "obstacle_identity": "/World/chair/base_link/collision"}
+
+    result = rollout.physical_rollout(ComponentNav(), [Forward(2.0)])
+    assert result["physical"]["contact"].get("obstacle_identity") == \
+        "/World/chair/base_link/collision"
+
+
 class _ExcludedGeometryNav:
     authority = "gs_collision_mesh"
     geometry_authority_sha256 = "b" * 64
@@ -124,6 +134,34 @@ class _ExcludedGeometryNav:
     def query_pose(self, pose, max_y_delta=0.5):
         del pose, max_y_delta
         return GeometryQuery(False, 0.0, None, self.source)
+
+
+class _MixedBatchNav:
+    authority = "b1k_geometry"
+
+    def __init__(self):
+        self.batch_calls = 0
+        self.scalar_calls = 0
+
+    @staticmethod
+    def _query(pose):
+        x, z = float(pose[0]), float(pose[1])
+        if x > 0.25:
+            return GeometryQuery(False, 0.0, None, "unsupported_floor")
+        navigable = z <= 0.75
+        return GeometryQuery(
+            navigable, max(0.0, 0.75 - z), None,
+            None if navigable else "b1k_geometry")
+
+    def query_many(self, poses, max_y_delta=0.5):
+        del max_y_delta
+        self.batch_calls += 1
+        return [self._query(pose) for pose in poses]
+
+    def query_pose(self, pose, max_y_delta=0.5):
+        del max_y_delta
+        self.scalar_calls += 1
+        return self._query(pose)
 
 
 class _Hit:
@@ -207,7 +245,7 @@ def _visible_frame(visible):
 def test_navmesh_is_physical_authority_and_collision_stops_checkpoints():
     fr = dataclasses.replace(make_frame(), semantic_index=_SurfaceIndex())
     out = consequence.judge(fr, Disc(0.25), [Forward(2.0)],
-                            nav=HalfPlaneNav(0.8), target_ids=[7])
+                            nav=HalfPlaneNav(0.8))
 
     assert out["physical"]["authority"] == "navmesh"
     assert out["physical"]["collision"] is True
@@ -230,11 +268,64 @@ def test_physical_precheck_batches_the_coarse_path_without_double_queries():
     assert nav.scalar_calls == 0
 
 
+@pytest.mark.parametrize(
+    "nav_factory",
+    [lambda: HalfPlaneNav(10.0), lambda: HalfPlaneNav(0.8),
+     lambda: _ExcludedGeometryNav("unsupported_floor")],
+)
+def test_physical_path_trace_preserves_safe_collision_and_excluded_rollouts(
+        nav_factory):
+    actions = [Turn(15.0), Forward(2.0)]
+    nav = nav_factory()
+
+    path_trace = rollout.physical_path_trace(nav, actions)
+    precheck = rollout.physical_collision_precheck(
+        nav, actions, path_trace=path_trace)
+    cached = rollout.physical_rollout(
+        nav, actions, path_trace=path_trace)
+    fresh = rollout.physical_rollout(nav_factory(), actions)
+
+    assert precheck == rollout.physical_collision_precheck(
+        nav_factory(), actions)
+    assert cached == fresh
+
+
+def test_physical_path_traces_batch_actions_without_changing_results():
+    programs = [
+        [Forward(0.5)],
+        [Forward(1.0)],
+        [Turn(90.0), Forward(0.5)],
+    ]
+    expected = [
+        rollout.physical_path_trace(_MixedBatchNav(), actions)
+        for actions in programs
+    ]
+    nav = _MixedBatchNav()
+
+    observed = rollout.physical_path_traces(nav, programs)
+
+    assert observed == expected
+    assert [trace.collision for trace in observed] == [False, True, None]
+    assert nav.batch_calls == 1
+
+
+def test_cached_safe_path_materializes_only_checkpoint_queries():
+    nav = _BatchCountingNav()
+    actions = [Forward(1.0), Turn(30.0), Forward(0.5)]
+
+    path_trace = rollout.physical_path_trace(nav, actions)
+    assert (nav.batch_calls, nav.scalar_calls) == (1, 0)
+
+    rollout.physical_rollout(nav, actions, path_trace=path_trace)
+
+    assert (nav.batch_calls, nav.scalar_calls) == (2, 0)
+
+
 def test_judge_uses_execution_endpoint_without_continuation_oracle():
     assert not hasattr(consequence.rollout, "terminal_options")
     out = consequence.judge(
         make_frame(), Disc(0.25), [Forward(0.5)],
-        nav=HalfPlaneNav(1.2), target_ids=[],
+        nav=HalfPlaneNav(1.2),
     )
 
     assert out["execution"]["realized_pose"] == {
@@ -246,7 +337,7 @@ def test_judge_uses_execution_endpoint_without_continuation_oracle():
         "future_state", "terminal_options", "start_terminal_options",
         "object_consequences",
     } & set(out)
-    assert set(out["evidence"]) == {"physical", "future_view"}
+    assert set(out["evidence"]) == {"physical"}
 
 
 def test_collision_stops_at_last_navigable_arc_before_first_contact():
@@ -331,21 +422,6 @@ def test_summarize_execution_multi_leg_collision_counts_intermediate_turn():
     assert summary["executed_forward_after_turn_m"] == pytest.approx(1.5)
 
 
-def test_explicit_empty_targets_do_not_trigger_auto_selection(monkeypatch):
-    def fail_if_called(_frame):
-        raise AssertionError("explicit empty targets must not be recomputed")
-
-    monkeypatch.setattr(object_utils, "eligible_target_ids", fail_if_called)
-
-    outcome = consequence.judge(
-        make_frame(), Disc(0.25), [Forward(0.5)], nav=None,
-        target_ids=[],
-    )
-
-    assert all(not checkpoint["targets"]
-               for checkpoint in outcome["future_view"]["checkpoints"])
-
-
 @pytest.mark.parametrize("wall_z", [0.8, 10.0])
 def test_physical_precheck_matches_full_collision_and_contact_arc(wall_z):
     actions = [Turn(15), Forward(2.0)]
@@ -406,7 +482,7 @@ def test_gs_support_failures_are_invalid_geometry_not_collisions(source):
 def test_visible_depth_collision_does_not_override_safe_navmesh():
     fr = dataclasses.replace(make_frame(), semantic_index=_SurfaceIndex())
     out = consequence.judge(fr, Disc(0.25), [Forward(2.0)],
-                            nav=HalfPlaneNav(10.0), target_ids=[7])
+                            nav=HalfPlaneNav(10.0))
     assert out["physical"]["collision"] is False
     assert out["evidence"]["physical"]["view_collision_estimate"] is True
 
@@ -427,7 +503,7 @@ def test_judge_reuses_cached_depth_coverage_and_consensus():
 
     out = consequence.judge(
         frame, Disc(0.25), actions, nav=HalfPlaneNav(10.0),
-        target_ids=[7], cached_physical=physical,
+        cached_physical=physical,
         cached_depth_physical=cached_depth, cached_corridor_coverage=0.93,
         cached_oracle_consensus=cached_consensus)
 

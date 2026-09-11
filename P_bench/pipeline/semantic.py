@@ -29,9 +29,6 @@ MP3D_COMPLETE_FACE_UNIVERSE_PROTOCOL = \
     "mp3d-complete-face-instance-universe.v1"
 MP3D_STREAMING_INSTANCE_FACES_PROTOCOL = \
     "mp3d-source-order-canonical-vertex-faces.v1"
-B_TARGET_GEOMETRY_SCHEMA = "b-target-geometry.v1"
-B_GROUND_SUPPORT_PROTOCOL = "full-triangle-floor-slab-xz-union.v1"
-B_REFERENCE_CENTROID_PROTOCOL = "full-triangle-area-weighted-centroid.v1"
 MP3D_TARGET_FACE_INDEX_PROTOCOL = "mp3d-authenticated-face-index.v1"
 _MP3D_TARGET_FACE_INDEX_CACHE = OrderedDict()
 # One decode seed shared by the decoder default and the cache identity: if
@@ -183,7 +180,7 @@ class MP3DSemanticIndex(SemanticIndex):
         """Return canonical full triangles in Habitat world XYZ, shape F×3×3.
 
         This exact face query is deliberately separate from the sampled
-        nearest-surface index. It supplies semantic identity/target geometry;
+        nearest-surface index. It supplies exact semantic identity evidence;
         it is not a collision oracle.
         """
         instance_id = int(instance_id)
@@ -218,58 +215,6 @@ class MP3DSemanticIndex(SemanticIndex):
                 triangles, dtype="<f4", order="C").tobytes(order="C"))
             self._instance_triangle_hashes[instance_id] = digest.hexdigest()
         return self._instance_triangle_hashes[instance_id]
-
-    def target_geometry_atom(
-            self, instance_id: int, floor_plane, *,
-            expected_semantic_ply_sha256: str, pose: dict | None = None) -> dict:
-        """Materialize B geometry from one source-pinned complete-face read."""
-        instance_id = int(instance_id)
-        if instance_id not in self.id_to_cat:
-            raise KeyError(f"MP3D semantic instance {instance_id} is unknown")
-        expected = str(expected_semantic_ply_sha256)
-        if expected != self._semantic_ply_sha256:
-            raise ValueError("semantic PLY digest does not match source authority")
-        triangles = _pinned_instance_triangles(
-            self._semantic_ply, instance_id,
-            expected_semantic_ply_sha256=expected)
-        if not len(triangles):
-            raise KeyError(
-                f"MP3D semantic instance {instance_id} has no triangles")
-        triangle_sha = _instance_triangles_sha256(
-            triangles, instance_id=instance_id,
-            category=self.id_to_cat[instance_id])
-        support = clip_target_ground_support(
-            triangles, floor_plane, pose=pose)
-        centroid = area_weighted_surface_centroid(triangles)
-        support_value = {
-            "protocol": B_GROUND_SUPPORT_PROTOCOL,
-            "frame": "habitat_world_xz",
-            "ground_band_m": [
-                float(config.GROUND_OBSTACLE_BAND_M[0]),
-                float(config.GROUND_OBSTACLE_BAND_M[1]),
-            ],
-            **support,
-        }
-        support_value["sha256"] = _json_sha256(support_value)
-        centroid_value = {
-            "protocol": B_REFERENCE_CENTROID_PROTOCOL,
-            "frame": "habitat_world_xyz",
-            "world_xyz_m": centroid.tolist(),
-            "world_xz_m": centroid[[0, 2]].tolist(),
-        }
-        centroid_value["sha256"] = _json_sha256(centroid_value)
-        value = {
-            "schema": B_TARGET_GEOMETRY_SCHEMA,
-            "instance_id": instance_id,
-            "category": self.id_to_cat[instance_id],
-            "semantic_ply_sha256": expected,
-            "full_triangle_protocol": MP3D_INSTANCE_TRIANGLES_SCHEMA,
-            "full_triangle_count": int(len(triangles)),
-            "full_triangles_sha256": triangle_sha,
-            "ground_support": support_value,
-            "reference_centroid": centroid_value,
-        }
-        return {**value, "sha256": _json_sha256(value)}
 
     def confirm_contact_instance(
             self, instance_id: int, world_point,
@@ -380,297 +325,6 @@ class MP3DSemanticIndex(SemanticIndex):
                 self._streaming_instance_face_hashes[instance_id],
             **common,
         }
-
-
-def _json_sha256(value: dict) -> str:
-    encoded = json.dumps(
-        value, sort_keys=True, separators=(",", ":"), allow_nan=False,
-        ensure_ascii=True).encode("ascii")
-    return hashlib.sha256(encoded).hexdigest()
-
-
-def _instance_triangles_sha256(
-        triangles: np.ndarray, *, instance_id: int, category: str) -> str:
-    canonical = _canonical_triangles(triangles)
-    metadata = json.dumps({
-        "schema": MP3D_INSTANCE_TRIANGLES_SCHEMA,
-        "frame": "habitat_world_xyz",
-        "instance_id": int(instance_id),
-        "category": str(category),
-        "triangle_count": int(len(canonical)),
-        "dtype": "float32-le",
-    }, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
-    digest = hashlib.sha256()
-    digest.update(metadata.encode("utf-8"))
-    digest.update(b"\n")
-    digest.update(np.asarray(
-        canonical, dtype="<f4", order="C").tobytes(order="C"))
-    return digest.hexdigest()
-
-
-def _world_triangles_to_floor_local(
-        triangles: np.ndarray, pose: dict | None) -> np.ndarray:
-    values = np.asarray(triangles, dtype=np.float64)
-    if pose is None:
-        return values
-    position = np.asarray(pose.get("position"), dtype=np.float64)
-    try:
-        yaw = float(pose.get("yaw_rad"))
-    except (TypeError, ValueError):
-        raise ValueError("target geometry pose is invalid") from None
-    if (position.shape != (3,) or not np.all(np.isfinite(position)) or
-            not np.isfinite(yaw)):
-        raise ValueError("target geometry pose is invalid")
-    shifted = values - position
-    cosine, sine = np.cos(yaw), np.sin(yaw)
-    local = np.empty_like(shifted)
-    local[:, :, 0] = shifted[:, :, 0] * cosine - shifted[:, :, 2] * sine
-    local[:, :, 1] = shifted[:, :, 1]
-    local[:, :, 2] = -shifted[:, :, 0] * sine - shifted[:, :, 2] * cosine
-    return local
-
-
-def _clip_polygon_by_height(
-        world_polygon: list[np.ndarray], heights: list[float], *,
-        boundary: float, keep_above: bool) -> tuple[list, list]:
-    output_points = []
-    output_heights = []
-    for index, current in enumerate(world_polygon):
-        previous = world_polygon[index - 1]
-        current_height = float(heights[index])
-        previous_height = float(heights[index - 1])
-        current_inside = (
-            current_height >= boundary if keep_above
-            else current_height <= boundary)
-        previous_inside = (
-            previous_height >= boundary if keep_above
-            else previous_height <= boundary)
-        if current_inside != previous_inside:
-            denominator = current_height - previous_height
-            if denominator == 0.0:
-                continue
-            fraction = (boundary - previous_height) / denominator
-            output_points.append(previous + fraction * (current - previous))
-            output_heights.append(float(boundary))
-        if current_inside:
-            output_points.append(current)
-            output_heights.append(current_height)
-    return output_points, output_heights
-
-
-def _canonical_rows(values: list[np.ndarray], width: int) -> list:
-    if not values:
-        return []
-    unique = np.unique(np.stack(values).reshape(len(values), width), axis=0)
-    shaped = unique.reshape(len(unique), width // 2, 2)
-    return (shaped[:, 0, :].tolist() if width == 2 else shaped.tolist())
-
-
-def _canonical_support_components(polygons: list[list[np.ndarray]]) -> dict:
-    triangles = []
-    segments = []
-    points = []
-    for raw_polygon in polygons:
-        polygon = []
-        for raw_point in raw_polygon:
-            point = np.asarray(raw_point, dtype=np.float64)
-            if not polygon or not np.array_equal(point, polygon[-1]):
-                polygon.append(point)
-        if len(polygon) > 1 and np.array_equal(polygon[0], polygon[-1]):
-            polygon.pop()
-        unique = np.unique(np.stack(polygon), axis=0) if polygon else \
-            np.empty((0, 2), dtype=np.float64)
-        if len(unique) == 1:
-            points.append(unique)
-            continue
-        if len(unique) == 2:
-            segments.append(unique)
-            continue
-        coordinates = np.stack(polygon)
-        signed_twice_area = math.fsum(
-            float(coordinates[index, 0] * coordinates[(index + 1) % len(
-                coordinates), 1] - coordinates[(index + 1) % len(
-                coordinates), 0] * coordinates[index, 1])
-            for index in range(len(coordinates)))
-        if signed_twice_area == 0.0:
-            distances = np.sum(
-                (unique[:, None, :] - unique[None, :, :]) ** 2, axis=2)
-            left, right = np.unravel_index(np.argmax(distances), distances.shape)
-            if distances[left, right] == 0.0:
-                points.append(unique[:1])
-            else:
-                segments.append(np.stack([unique[left], unique[right]]))
-            continue
-        for index in range(1, len(coordinates) - 1):
-            triangle = np.stack([
-                coordinates[0], coordinates[index], coordinates[index + 1]])
-            area = float(np.cross(
-                triangle[1] - triangle[0], triangle[2] - triangle[0]))
-            if area == 0.0:
-                continue
-            order = np.lexsort((triangle[:, 1], triangle[:, 0]))
-            triangles.append(triangle[order])
-    if not triangles and not segments and not points:
-        raise ValueError("target ground support is empty")
-    return {
-        "triangles_xz_m": _canonical_rows(triangles, 6),
-        "segments_xz_m": _canonical_rows(segments, 4),
-        "points_xz_m": _canonical_rows(points, 2),
-    }
-
-
-def clip_target_ground_support(
-        triangles_world: np.ndarray, floor_plane, *, pose: dict | None = None,
-        band_m=config.GROUND_OBSTACLE_BAND_M) -> dict:
-    """Clip complete target faces to the floor slab and project world XZ."""
-    triangles = np.asarray(triangles_world, dtype=np.float64)
-    if (triangles.ndim != 3 or triangles.shape[1:] != (3, 3) or
-            not len(triangles) or not np.all(np.isfinite(triangles))):
-        raise ValueError("target triangles must be finite Fx3x3")
-    low, high = (float(value) for value in band_m)
-    if not (np.isfinite(low) and np.isfinite(high) and 0 <= low <= high):
-        raise ValueError("target ground band is invalid")
-    local = _world_triangles_to_floor_local(triangles, pose)
-    heights = np.asarray(
-        floor_plane.height_above_points(local.reshape(-1, 3)),
-        dtype=np.float64).reshape(-1, 3)
-    projected_polygons = []
-    for world_triangle, triangle_heights in zip(triangles, heights):
-        polygon, polygon_heights = _clip_polygon_by_height(
-            [point for point in world_triangle], triangle_heights.tolist(),
-            boundary=low, keep_above=True)
-        if not polygon:
-            continue
-        polygon, polygon_heights = _clip_polygon_by_height(
-            polygon, polygon_heights, boundary=high, keep_above=False)
-        if not polygon:
-            continue
-        projected_polygons.append([point[[0, 2]] for point in polygon])
-    support = _canonical_support_components(projected_polygons)
-    if not support["triangles_xz_m"]:
-        raise ValueError(
-            "target ground support has no nondegenerate 2-D triangle")
-    return support
-
-
-def point_to_ground_support_nearest(
-        point_xz, support: dict) -> tuple[float, list[float]]:
-    """Return exact distance and a deterministic witness on ground support.
-
-    Coordinates are Habitat world ``(x, z)`` in metres.  Canonical component
-    order breaks equidistant ties, so a rebuilt certificate selects the same
-    witness without depending on set or dictionary iteration order.
-    """
-    point = np.asarray(point_xz, dtype=np.float64)
-    if point.shape != (2,) or not np.all(np.isfinite(point)):
-        raise ValueError("support query point must be finite XZ")
-    if not isinstance(support, dict):
-        raise ValueError("ground support must be an object")
-    try:
-        triangles = np.asarray(support["triangles_xz_m"], dtype=np.float64)
-        segments = np.asarray(support["segments_xz_m"], dtype=np.float64)
-        points = np.asarray(support["points_xz_m"], dtype=np.float64)
-        triangles = triangles.reshape(-1, 3, 2)
-        segments = segments.reshape(-1, 2, 2)
-        points = points.reshape(-1, 2)
-    except (KeyError, TypeError, ValueError) as error:
-        raise ValueError("ground support components are invalid") from error
-    if not all(np.all(np.isfinite(value))
-               for value in (triangles, segments, points)):
-        raise ValueError("ground support components must be finite")
-    best: tuple[float, int, int, int, np.ndarray] | None = None
-
-    def consider(distance: float, kind: int, component_index: int,
-                 part_index: int, witness: np.ndarray) -> None:
-        nonlocal best
-        candidate = (
-            float(distance), int(kind), int(component_index), int(part_index),
-            np.asarray(witness, dtype=np.float64),
-        )
-        if best is None or candidate[:4] < best[:4]:
-            best = candidate
-
-    for triangle_index, triangle in enumerate(triangles):
-        edges = [
-            triangle[1] - triangle[0],
-            triangle[2] - triangle[1],
-            triangle[0] - triangle[2],
-        ]
-        area = float(np.cross(edges[0], triangle[2] - triangle[0]))
-        if area == 0.0:
-            continue
-        signs = [
-            float(np.cross(edge, point - triangle[index]))
-            for index, edge in enumerate(edges)
-        ]
-        if (all(value >= 0.0 for value in signs) or
-                all(value <= 0.0 for value in signs)):
-            return 0.0, [float(value) for value in point]
-        for index, edge in enumerate(edges):
-            length_sq = float(np.dot(edge, edge))
-            fraction = min(1.0, max(0.0, float(
-                np.dot(point - triangle[index], edge) / length_sq)))
-            nearest = triangle[index] + fraction * edge
-            consider(
-                float(np.linalg.norm(point - nearest)), 0,
-                triangle_index, index, nearest)
-    for segment_index, segment in enumerate(segments):
-        edge = segment[1] - segment[0]
-        length_sq = float(np.dot(edge, edge))
-        if length_sq == 0.0:
-            consider(
-                float(np.linalg.norm(point - segment[0])), 1,
-                segment_index, 0, segment[0])
-            continue
-        fraction = min(1.0, max(0.0, float(
-            np.dot(point - segment[0], edge) / length_sq)))
-        nearest = segment[0] + fraction * edge
-        consider(
-            float(np.linalg.norm(point - nearest)), 1,
-            segment_index, 0, nearest)
-    for point_index, support_point in enumerate(points):
-        consider(
-            float(np.linalg.norm(point - support_point)), 2,
-            point_index, 0, support_point)
-    if best is None or not math.isfinite(best[0]):
-        raise ValueError("ground support is empty")
-    return float(best[0]), [float(value) for value in best[4]]
-
-
-def point_to_ground_support_distance_m(point_xz, support: dict) -> float:
-    """Distance to the dataset-typed target ground-support union."""
-    return point_to_ground_support_nearest(point_xz, support)[0]
-
-
-def area_weighted_surface_centroid(triangles: np.ndarray) -> np.ndarray:
-    """Return the full-surface centroid using 3D triangle area measure."""
-    values = np.asarray(triangles, dtype=np.float64)
-    if (values.ndim != 3 or values.shape[1:] != (3, 3) or
-            not len(values) or not np.all(np.isfinite(values))):
-        raise ValueError("surface triangles must be finite Fx3x3")
-    first_edges = values[:, 1] - values[:, 0]
-    second_edges = values[:, 2] - values[:, 0]
-    scales = np.maximum(
-        np.max(np.abs(first_edges), axis=1),
-        np.max(np.abs(second_edges), axis=1))
-    normalized_area_twice = np.zeros(len(values), dtype=np.float64)
-    nonzero_scale = scales > 0.0
-    normalized_area_twice[nonzero_scale] = np.linalg.norm(np.cross(
-        first_edges[nonzero_scale] / scales[nonzero_scale, None],
-        second_edges[nonzero_scale] / scales[nonzero_scale, None]), axis=1)
-    keep = normalized_area_twice > 0.0
-    if not np.any(keep):
-        raise ValueError("surface has no nondegenerate triangles")
-    log_weights = (
-        np.log(normalized_area_twice[keep]) + 2.0 * np.log(scales[keep]))
-    weights = np.exp(log_weights - np.max(log_weights))
-    centers = values[keep].mean(axis=1)
-    total = math.fsum(float(value) for value in weights)
-    return np.array([
-        math.fsum(float(weight * center[axis])
-                  for weight, center in zip(weights, centers)) / total
-        for axis in range(3)
-    ], dtype=np.float64)
 
 
 def complete_face_universe_sha256(
@@ -1191,6 +845,7 @@ def _build_authenticated_face_index(
         "protocol": (
             f"{MP3D_TARGET_FACE_INDEX_PROTOCOL}:"
             f"objects={object_dtype.str}:indices={index_dtype.str}"),
+        "source_sha256": str(expected_sha256),
         "header_size": int(header_size),
         "vertex_count": int(vertex_count),
         "face_count": int(face_count),
@@ -1315,68 +970,6 @@ def _ensure_authenticated_instance_aabbs(
     return tuple(index[key] for key in keys)
 
 
-def _pinned_instance_triangles(
-        semantic_ply: os.PathLike, instance_id: int, *,
-        expected_semantic_ply_sha256: str) -> np.ndarray:
-    index = _authenticated_face_index(
-        semantic_ply, str(expected_semantic_ply_sha256))
-    raw_object_id = int(instance_id) - 1
-    face_rows = np.flatnonzero(index["object_ids"] == raw_object_id)
-    expected_indices = np.asarray(
-        index["vertex_indices"][face_rows], dtype=np.int64)
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-    descriptor = os.open(semantic_ply, flags)
-    try:
-        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
-            raise ValueError("MP3D semantic PLY must be a regular file")
-        pinned = mmap.mmap(descriptor, 0, access=mmap.ACCESS_READ)
-        all_faces = all_vertices = None
-        try:
-            all_faces = np.frombuffer(
-                pinned, dtype=_MP3D_TRIANGLE_DTYPE,
-                count=index["face_count"], offset=index["face_offset"])
-            faces = all_faces[face_rows].copy()
-            del all_faces
-            if (not np.all(faces["count"] == 3) or
-                    not np.all(faces["object_id"] == raw_object_id)):
-                raise ValueError("authenticated MP3D face membership changed")
-            actual_indices = _validated_mp3d_face_indices(
-                faces["vertex_indices"], index["vertex_count"])
-            if not np.array_equal(actual_indices, expected_indices):
-                raise ValueError("authenticated MP3D face indices changed")
-            if not len(expected_indices):
-                vertices = np.empty(0, dtype=_MP3D_VERTEX_DTYPE)
-                inverse = np.empty(0, dtype=np.int64)
-            else:
-                unique_vertices, inverse = np.unique(
-                    expected_indices.reshape(-1), return_inverse=True)
-                all_vertices = np.frombuffer(
-                    pinned, dtype=_MP3D_VERTEX_DTYPE,
-                    count=index["vertex_count"], offset=index["header_size"])
-                vertices = all_vertices[unique_vertices].copy()
-                del all_vertices
-                all_vertices = None
-        finally:
-            all_faces = None
-            all_vertices = None
-            pinned.close()
-    finally:
-        os.close(descriptor)
-    if not len(expected_indices):
-        return np.empty((0, 3, 3), dtype=np.float32)
-    selected = vertices[inverse].reshape(len(expected_indices), 3)
-    source = np.stack([
-        selected["x"], selected["y"], selected["z"],
-    ], axis=-1)
-    if not np.all(np.isfinite(source)):
-        raise ValueError(
-            "MP3D semantic faces must reference finite vertex coordinates")
-    world = np.stack([
-        source[:, :, 0], source[:, :, 2], -source[:, :, 1],
-    ], axis=-1).astype(np.float32)
-    return _canonical_triangles(world)
-
-
 def load_mp3d_semantic_index(
         scene_glb: os.PathLike,
         cache_dir: os.PathLike = config.SEMANTIC_CACHE_DIR,
@@ -1424,16 +1017,3 @@ def load_mp3d_semantic_index(
     return MP3DSemanticIndex(
         points, instances, id_to_cat, semantic_ply,
         semantic_identity["sha256"], query_workers=query_workers)
-
-
-def load_mp3d_target_authority(
-        scene_glb: os.PathLike, *, expected_semantic_ply_sha256: str,
-        expected_house_sha256: str) -> MP3DSemanticIndex:
-    """Load immutable MP3D category and geometry validation authorities."""
-    semantic_ply, house = _mp3d_paths(scene_glb)
-    id_to_cat = _parse_mp3d_house(
-        house, expected_sha256=expected_house_sha256)
-    return MP3DSemanticIndex(
-        np.empty((0, 3), dtype=np.float32),
-        np.empty(0, dtype=np.int32), id_to_cat, semantic_ply,
-        str(expected_semantic_ply_sha256))

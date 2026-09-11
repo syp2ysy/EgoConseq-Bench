@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 from plyfile import PlyData, PlyElement
 
-from pipeline import config, semantic, sim
+from pipeline import config, mp3d_contact_query, semantic, sim
 
 
 class _SemanticQuerySpy:
@@ -646,19 +646,33 @@ def test_mp3d_contact_identity_batches_seven_points_in_one_universe_pass(
                for value in results)
 
 
-def test_mp3d_contact_batch_rejects_ply_changed_after_index_load(tmp_path):
+def test_mp3d_contact_batch_reuses_authenticated_read_only_source(
+        tmp_path, monkeypatch):
+    semantic._MP3D_TARGET_FACE_INDEX_CACHE.clear()
     scene = _write_mp3d_semantics(tmp_path)
     index = semantic.load_mp3d_semantic_index(
         scene, cache_dir=tmp_path / "cache", sample_count=1)
     ply_path = tmp_path / "AAA_semantic.ply"
-    header_size, _vertices, _faces = semantic._binary_ply_layout(ply_path)
-    payload = bytearray(ply_path.read_bytes())
-    payload[header_size] ^= 1
-    ply_path.write_bytes(payload)
+    original_sha256 = mp3d_contact_query.hashlib.sha256
+    query_full_hashes = 0
 
-    with pytest.raises(ValueError, match="source digest"):
-        index.confirm_contact_instances([
-            (1, [0.25, 0.0, -0.25]) for _index in range(7)])
+    def counted_sha256(*args, **kwargs):
+        nonlocal query_full_hashes
+        if (args and isinstance(args[0], memoryview) and
+                len(args[0]) == ply_path.stat().st_size):
+            query_full_hashes += 1
+        return original_sha256(*args, **kwargs)
+
+    monkeypatch.setattr(
+        mp3d_contact_query.hashlib, "sha256", counted_sha256)
+    requests = [(1, [0.25, 0.0, -0.25]) for _index in range(7)]
+
+    first = index.confirm_contact_instances(requests)
+    second = index.confirm_contact_instances(requests)
+
+    assert first == second
+    assert len(semantic._MP3D_TARGET_FACE_INDEX_CACHE) == 1
+    assert query_full_hashes == 0
 
 
 @pytest.mark.parametrize(

@@ -26,9 +26,7 @@ from tests._synthetic import _outcome, _record, source_provenance
 
 
 ROOT = Path(__file__).resolve().parents[1]
-GOLDEN_MANIFEST = (
-    ROOT / "docs" / "golden" /
-    "2026-08-11-r2r-abc-v11-counterfactual-c1-47qa.json")
+GOLDEN_MANIFEST = ROOT / "tests" / "fixtures" / "abc_golden.json"
 
 
 BASELINE_ERRORS = [

@@ -100,6 +100,25 @@ def jobs_for_pass(manifest: Mapping, catalog_pass: int) -> list[dict]:
     ]
 
 
+def _normally_exhausted_scenes(
+        manifest: Mapping, state: Mapping, *, before_pass: int) -> set[tuple]:
+    """Return scenes whose earlier full search completed with zero yield."""
+    definitions = {
+        job["job_id"]: job
+        for round_value in manifest.get("rounds") or []
+        for job in round_value.get("jobs") or []
+    }
+    exhausted = set()
+    for job_id, runtime in (state.get("jobs") or {}).items():
+        job = definitions.get(job_id)
+        if (job is None or int(job["catalog_pass"]) >= int(before_pass) or
+                runtime.get("status") != "completed_zero_yield" or
+                runtime.get("catalog_status") != "zero_yield"):
+            continue
+        exhausted.add((job["dataset"], job["scenes"][0]))
+    return exhausted
+
+
 def catalog_pass_complete(
         manifest: Mapping, state: Mapping, *, catalog_pass: int,
         completed_datasets: Iterable[str] = ()) -> bool:
@@ -109,8 +128,11 @@ def catalog_pass_complete(
     if not jobs:
         return False
     runtime = state.get("jobs") or {}
+    exhausted = _normally_exhausted_scenes(
+        manifest, state, before_pass=catalog_pass)
     return all(
         job["dataset"] in completed or
+        (job["dataset"], job["scenes"][0]) in exhausted or
         (runtime.get(job["job_id"]) or {}).get("catalog_status") in
         TERMINAL_CATALOG_STATUSES
         for job in jobs
@@ -133,6 +155,8 @@ def next_jobs(
                 completed_datasets=completed):
             return []
     runtime = state.get("jobs") or {}
+    exhausted = _normally_exhausted_scenes(
+        manifest, state, before_pass=catalog_pass)
     busy_gpus = {
         int(row["gpu_id"])
         for row in runtime.values()
@@ -148,6 +172,8 @@ def next_jobs(
         for job in queues[gpu_id]:
             if job["dataset"] in completed:
                 continue
+            if (job["dataset"], job["scenes"][0]) in exhausted:
+                continue
             row = runtime.get(job["job_id"])
             if row is None:
                 ready.append(job)
@@ -158,6 +184,55 @@ def next_jobs(
             # never run a later scene over its durable state.
             break
     return ready
+
+
+def next_continuous_jobs(
+        manifest: Mapping, state: dict, *, job_factory: Callable) -> list[dict]:
+    """Choose one cursor-bound job for each idle dataset GPU."""
+    cursors = state.get("dataset_cursors") or {}
+    catalog = manifest.get("scene_catalog") or {}
+    busy_gpus = {
+        int(row["gpu_id"])
+        for row in (state.get("jobs") or {}).values()
+        if row.get("status") in RUNNING_STATUSES and "gpu_id" in row
+    }
+    ready = []
+    exhausted = set(state.get("exhausted_datasets") or [])
+    for dataset, cursor in cursors.items():
+        if dataset in exhausted:
+            continue
+        scenes = catalog.get(dataset) or []
+        if not scenes:
+            raise ValueError(
+                f"background continuous {dataset} catalog is empty")
+        catalog_pass = int(cursor["catalog_pass"])
+        scene_index = int(cursor["scene_index"])
+        job = job_factory(
+            manifest, dataset, catalog_pass=catalog_pass,
+            scene_index=scene_index)
+        if int(job["gpu_id"]) not in busy_gpus:
+            ready.append(job)
+    return sorted(ready, key=lambda job: int(job["gpu_id"]))
+
+
+def advance_dataset_cursor(
+        manifest: Mapping, state: dict, job: Mapping) -> None:
+    """Advance exactly the continuous cursor represented by a terminal job."""
+    dataset = str(job["dataset"])
+    cursor = (state.get("dataset_cursors") or {}).get(dataset)
+    if not isinstance(cursor, dict) or any((
+            int(cursor.get("catalog_pass", -1)) != int(job["catalog_pass"]),
+            int(cursor.get("scene_index", -1)) != int(job["scene_index"]),
+    )):
+        raise ValueError("background continuous cursor differs from job")
+    scenes = (manifest.get("scene_catalog") or {}).get(dataset) or []
+    scene_index = int(cursor["scene_index"]) + 1
+    catalog_pass = int(cursor["catalog_pass"])
+    if scene_index == len(scenes):
+        catalog_pass += 1
+        scene_index = 0
+    cursor.update({
+        "catalog_pass": catalog_pass, "scene_index": scene_index})
 
 
 def launch_jobs(
@@ -189,6 +264,8 @@ def launch_jobs(
             "scene_id": job["scenes"][0],
             "gpu_id": int(job["gpu_id"]),
             "round_index": int(job["round_index"]),
+            "catalog_pass": int(job.get("catalog_pass") or 0),
+            "scene_index": int(job.get("scene_index") or 0),
             "pid": int(process.pid),
             "status": "running",
             "attempt": 1,

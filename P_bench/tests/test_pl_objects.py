@@ -1,67 +1,12 @@
 """Object extraction + contact attribution tests (pure numpy)."""
 
-import dataclasses
-
 import numpy as np
 import pytest
 
 from pipeline import config, perception, objects
-from pipeline.gs_semantic import BboxSemanticIndex
 from tests._synthetic import LEVEL_FLOOR, make_frame
 
 K = config.intrinsics()
-
-
-class _OverheadOnlyTargetIndex:
-    def instance_points(self, instance_id: int) -> np.ndarray:
-        if int(instance_id) != 7:
-            return np.empty((0, 3), dtype=np.float64)
-        return np.array([
-            [0.0, 1.00, -2.0],
-            [0.2, 1.10, -2.0],
-        ], dtype=np.float64)
-
-
-def _gs_target_frame(category="chair"):
-    frame = make_frame()
-    target = dict(frame.objects[0], category=category, mask_area_px=20)
-    surface_points = np.array([
-        [-0.20, 0.10, -2.00],
-        [-0.10, 0.15, -2.00],
-        [0.00, 0.20, -2.00],
-        [0.10, 0.25, -2.00],
-        [0.20, 0.30, -2.00],
-    ], dtype=np.float64)
-    index = BboxSemanticIndex(
-        mins=np.array([[-0.5, 0.05, -2.2]]),
-        maxs=np.array([[0.5, 0.30, -1.8]]),
-        ids=np.array([7]),
-        id_to_cat={7: category},
-        surface_points=surface_points,
-    )
-    return dataclasses.replace(
-        frame, semantic_index=index, objects=[target])
-
-
-def test_eligible_target_requires_full_scene_ground_support_points():
-    frame = make_frame()
-    target = dict(frame.objects[0], mask_area_px=20)
-    frame = dataclasses.replace(
-        frame, semantic_index=_OverheadOnlyTargetIndex(), objects=[target])
-
-    assert objects.eligible_target_ids(frame) == []
-
-
-def test_eligible_target_accepts_gs_index_with_full_ground_support_points():
-    assert objects.eligible_target_ids(_gs_target_frame()) == [7]
-
-
-@pytest.mark.parametrize(
-    "category",
-    ["misc", " MISC ", "unknown", "unlabeled", "other", "objects"],
-)
-def test_eligible_target_rejects_non_specific_semantic_categories(category):
-    assert objects.eligible_target_ids(_gs_target_frame(category)) == []
 
 
 def _synth_frame_arrays(semantic):
@@ -232,8 +177,7 @@ def test_partial_predicate_category_map_falls_back_per_instance():
     assert result["category"] == "chair.n.01"
 
 
-def test_initial_visible_entity_inventory_marks_only_duplicate_categories():
-    """Catches unique entities being marked or duplicate names being ambiguous."""
+def test_initial_visible_entity_inventory_keeps_only_category_identity():
     record = {
         "objects": [
             {"instance_id": 9, "category": "chair", "centroid_px": [90, 20]},
@@ -243,22 +187,9 @@ def test_initial_visible_entity_inventory_marks_only_duplicate_categories():
     }
 
     assert objects.initial_visible_entity_inventory(record) == [
-        {
-            "choice_id": "entity_7", "instance_id": 7,
-            "category": "chair", "name": "chair 1",
-            "marker": {"kind": "numbered_dot", "number": 1,
-                       "center_xy": [70.0, 25.0]},
-        },
-        {
-            "choice_id": "entity_9", "instance_id": 9,
-            "category": "chair", "name": "chair 2",
-            "marker": {"kind": "numbered_dot", "number": 2,
-                       "center_xy": [90.0, 20.0]},
-        },
-        {
-            "choice_id": "entity_3", "instance_id": 3,
-            "category": "table", "name": "table", "marker": None,
-        },
+        {"instance_id": 7, "category": "chair"},
+        {"instance_id": 9, "category": "chair"},
+        {"instance_id": 3, "category": "table"},
     ]
 
 

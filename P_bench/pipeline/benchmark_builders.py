@@ -9,7 +9,7 @@ from typing import Dict
 from pipeline import future_view_selection
 from pipeline.benchmark import C_TASK_QUESTIONS, PUBLIC_HEIGHT_DECIMALS
 from pipeline.benchmark_tasks import (
-    build_a_candidate_projection, build_b_candidate_projection,
+    build_a_candidate_projection,
 )
 
 
@@ -26,20 +26,6 @@ def build_a_candidate(*, task_id: str, record: Dict, outcome: Dict,
         evidence=a_eligibility_evidence)
 
 
-def build_b_candidate(*, task_id: str, record: Dict, outcome: Dict,
-                      image: str, expected_raw_image_sha256: str,
-                      asset_dir=None, authenticated_rgb=None,
-                      numbered_dot_cache=None,
-                      b_outcome_evidence=None) -> tuple[dict, dict]:
-    """Build one v16 Closed Exact B item alongside its private answer."""
-    return build_b_candidate_projection(
-        task_id=task_id, record=record, outcome=outcome, image=image,
-        stable_id=_stable_id,
-        expected_raw_image_sha256=expected_raw_image_sha256,
-        asset_dir=asset_dir, authenticated_rgb=authenticated_rgb,
-        numbered_dot_cache=numbered_dot_cache,
-        evidence=b_outcome_evidence)
-
 
 def build_c_candidate(*, record: Dict, outcome: Dict, image: str,
                       expected_raw_image_sha256: str,
@@ -54,6 +40,16 @@ def build_c_candidate(*, record: Dict, outcome: Dict, image: str,
         stable_id=_stable_id,
         public_height_decimals=PUBLIC_HEIGHT_DECIMALS,
         authenticated_rgb=authenticated_rgb)
+
+
+def candidate_item_id(task_id: str, record: Dict, outcome: Dict) -> str:
+    """Return the stable public ID without materializing a candidate."""
+    prefix = {"A": "a", "B": "b", "C": "c"}.get(str(task_id)[:1])
+    if prefix is None:
+        raise ValueError(f"unknown benchmark task: {task_id}")
+    return prefix + "-" + _stable_id(
+        record.get("observation_id") or record["frame_id"],
+        outcome.get("outcome_id"), task_id)
 
 def _stable_id(*parts: object) -> str:
     payload = json.dumps(parts, sort_keys=True, separators=(",", ":"))

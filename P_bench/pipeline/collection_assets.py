@@ -110,11 +110,16 @@ def preload_counterfactual_terminal_rgb(
 def attach_terminal_rgb_assets(
         root, frame, outcomes, render_cache, *, source,
         collection_contract, terminal_renderer=None,
-        eligible_outcome_ids=None, render_transaction=None) -> dict:
+        eligible_outcome_ids=None, render_transaction=None,
+        failure_diagnostics=None) -> dict:
     """Attach native C1 endpoint PNGs from the evaluation cache."""
     is_b1k = (source or {}).get("source_dataset") == "b1k"
+    contract_version = (collection_contract or {}).get("version")
+    authorized_b1k_transaction = \
+        record.B1K_C1_RENDER_MODE_BY_CONTRACT.get(contract_version)
     if is_b1k and (eligible_outcome_ids is None or
-                   render_transaction != record.B1K_C1_RENDER_MODE):
+                   authorized_b1k_transaction is None or
+                   render_transaction != authorized_b1k_transaction):
         raise ValueError(
             "B1K terminal publication requires an authorized C1 batch")
     eligible_ids = (None if eligible_outcome_ids is None else
@@ -154,6 +159,13 @@ def attach_terminal_rgb_assets(
             result.pop("terminal_rgb_asset", None)
             result["terminal_rgb_asset_withhold"] = error.reason
             result["terminal_rgb_asset_withhold_authority"] = error.authority
+            if failure_diagnostics is not None:
+                failure_diagnostics.append({
+                    "outcome_id": str(result.get("outcome_id") or ""),
+                    "reason": error.reason,
+                    "authority": error.authority,
+                    "detail": str(error),
+                })
             withheld += 1
         else:
             result.pop("terminal_rgb_asset_withhold", None)

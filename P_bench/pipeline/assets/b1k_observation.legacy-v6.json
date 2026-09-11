@@ -1,0 +1,54 @@
+{
+  "c1_render_mode": "persistent-counterfactual-bank-batch.v2",
+  "profile_atom": {
+    "antialiasing": "FXAA",
+    "modalities": [
+      "rgb",
+      "depth_linear",
+      "seg_instance_id"
+    ],
+    "protocol": "b1k-observation.v5",
+    "renderer_input_resolution": [
+      640,
+      480
+    ],
+    "renderer_output_resolution": [
+      640,
+      480
+    ],
+    "reset_accumulation": false,
+    "rgb_authority": "frozen-asset-no-rerender-hash.v1",
+    "runtime_identity": {
+      "bddl": "3.7.0",
+      "behavior-1k-assets": "3.9.0",
+      "isaac_sim": "5.1.0.0",
+      "omnigibson": "3.9.1",
+      "omnigibson-robot-assets": "3.8.2",
+      "python": "3.11.15",
+      "source_commit": "26f2c7ef7b9cf96bd0414f81e1e751e493762779",
+      "source_tag": "v3.9.1",
+      "torch": "2.7.0+cu128"
+    },
+    "settings": {
+      "/rtx-transient/post/aa/limitedOps": false,
+      "/rtx/post/aa/op": 2,
+      "/rtx/post/scaling/staticRatio": 1.0,
+      "/rtx/rendermode": "RaytracedLighting"
+    },
+    "settings_readback": {
+      "/rtx-defaults/post/aa/op": 2,
+      "/rtx-defaults/post/scaling/staticRatio": 1.0,
+      "/rtx-defaults/rendermode": "RaytracedLighting",
+      "/rtx-transient/post/aa/limitedOps": false,
+      "/rtx/post/aa/op": 2,
+      "/rtx/post/scaling/staticRatio": 1.0,
+      "/rtx/rendermode": "RaytracedLighting"
+    },
+    "sha256": "b02ba45708cf607eda82ee9d01671805c79670f46d7ca342661e16df5b881088",
+    "sync_render_count": 6
+  },
+  "rgb_pose_pure": false,
+  "schema": "b1k-render-profile-probe.v1",
+  "selected_profile_id": "aa-op-2-reset-0",
+  "sync_render_count": 6
+}

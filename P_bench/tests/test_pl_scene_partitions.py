@@ -15,13 +15,17 @@ class _Scene:
     source_dataset: str
 
 
-def test_default_partition_asset_enumerates_complete_gs_and_b1k_catalogs():
+def test_default_partition_asset_enumerates_complete_collection_catalogs():
     partitions = scene_partitions.load()
 
     assert partitions.counts("gs") == {
         "excluded_damaged": 1,
-        "test_unseen": 12,
+        "test_unseen": 21,
         "train_seen": 42,
+    }
+    assert partitions.counts("r2r") == {
+        "test_unseen": 29,
+        "train_seen": 61,
     }
     assert partitions.counts("b1k") == {
         "excluded_unavailable": 1,
@@ -32,6 +36,9 @@ def test_default_partition_asset_enumerates_complete_gs_and_b1k_catalogs():
         "train_seen"
     assert partitions.partition("gs", "interior_0505_839970") == \
         "excluded_damaged"
+    assert partitions.partition("gs", "interior_0516_840045") == \
+        "test_unseen"
+    assert partitions.partition("r2r", "2t7WUuJeko7") == "test_unseen"
     assert partitions.sha256 == hashlib.sha256(
         scene_partitions.DEFAULT_PATH.read_bytes()).hexdigest()
 

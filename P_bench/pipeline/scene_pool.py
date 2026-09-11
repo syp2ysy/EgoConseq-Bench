@@ -256,27 +256,33 @@ def _read_pinned_r2r_manifest(path: os.PathLike) -> tuple[dict, str]:
 def _r2r_manifest_scene_ids(payload: dict) -> List[str]:
     episodes = payload.get("episodes") if isinstance(payload, dict) else None
     if not isinstance(episodes, list):
-        raise SceneCatalogError("R2R train manifest has no episodes list")
+        raise SceneCatalogError("R2R manifest has no episodes list")
     scene_ids = sorted({
         Path(str(episode.get("scene_id", ""))).stem
         for episode in episodes
         if isinstance(episode, dict) and episode.get("scene_id")
     })
     if not scene_ids:
-        raise SceneCatalogError("R2R train manifest contains no scene ids")
+        raise SceneCatalogError("R2R manifest contains no scene ids")
     return scene_ids
 
 
-def discover_r2r_train_scenes(
-        episodes_path: os.PathLike, mp3d_root: os.PathLike) -> List[SceneSpec]:
-    """Use R2R train only as an MP3D scene whitelist; ignore trajectories."""
+def discover_r2r_scenes(
+        episodes_path: os.PathLike, mp3d_root: os.PathLike, *,
+        source_split: str = "train") -> List[SceneSpec]:
+    """Use one official R2R split as an MP3D whitelist; ignore trajectories."""
+    source_split = str(source_split)
+    if source_split not in dataset_contracts.OFFICIAL_SOURCE_SPLITS:
+        raise SceneCatalogError(
+            f"unsupported R2R source split: {source_split!r}")
     episodes_path = Path(episodes_path).resolve()
     mp3d_root = Path(mp3d_root).resolve()
     try:
         payload, manifest_hash = _read_pinned_r2r_manifest(episodes_path)
     except OSError as error:
         raise SceneCatalogError(
-            f"R2R train episode manifest is unavailable: {episodes_path}") \
+            f"R2R {source_split} episode manifest is unavailable: "
+            f"{episodes_path}") \
             from error
     scene_ids = _r2r_manifest_scene_ids(payload)
     scene_config = (
@@ -300,7 +306,7 @@ def discover_r2r_train_scenes(
         specs.append(SceneSpec(
             scene_id=scene_id,
             source_dataset="r2r",
-            official_split="train",
+            official_split=source_split,
             scene_path=str(scene_path),
             navmesh_path=str(navmesh),
             semantic_path=str(semantic_mesh),
@@ -316,8 +322,16 @@ def discover_r2r_train_scenes(
         suffix = (
             f"; ... and {len(missing) - 20} more" if len(missing) > 20 else "")
         raise SceneCatalogError(
-            f"R2R train references unavailable MP3D assets: {preview}{suffix}")
+            f"R2R {source_split} references unavailable MP3D assets: "
+            f"{preview}{suffix}")
     return specs
+
+
+def discover_r2r_train_scenes(
+        episodes_path: os.PathLike, mp3d_root: os.PathLike) -> List[SceneSpec]:
+    """Backward-compatible train-split discovery wrapper."""
+    return discover_r2r_scenes(
+        episodes_path, mp3d_root, source_split="train")
 
 
 def _b1k_input_identity(root: Path, raw, *, label: str) -> dict:
@@ -377,7 +391,7 @@ def _read_pinned_b1k_manifest(path: os.PathLike) -> tuple[dict, str]:
 
 
 def discover_b1k_train_scenes(
-        root: os.PathLike, manifest: os.PathLike) -> List[SceneSpec]:
+        root: os.PathLike, manifest: os.PathLike, *, requested=None) -> List[SceneSpec]:
     """Resolve the project-defined B1K train catalog and authenticate inputs.
 
     Encrypted USD content is hashed as an opaque source file here.  Runtime
@@ -415,6 +429,7 @@ def discover_b1k_train_scenes(
             "B1K installation must contain at least 3 declared scenes")
     seen = set()
     specs = []
+    requested = None if requested is None else set(map(str, requested))
     for entry in entries:
         if not isinstance(entry, dict):
             raise SceneCatalogError("B1K scene entry must be an object")
@@ -423,6 +438,8 @@ def discover_b1k_train_scenes(
             raise SceneCatalogError(
                 f"B1K scene id is missing or duplicated: {scene_id!r}")
         seen.add(scene_id)
+        if requested is not None and scene_id not in requested:
+            continue
         scene_json = _b1k_input_identity(
             root_path, entry.get("scene_json"),
             label=f"scene {scene_id} JSON")
@@ -514,11 +531,13 @@ def discover_b1k_train_scenes(
 def resolve_trusted_r2r_scene(
         scene_id: str, *,
         episodes_path: os.PathLike = config.R2R_TRAIN_EPISODES,
-        mp3d_root: os.PathLike = config.MP3D_ROOT) -> SceneSpec:
+        mp3d_root: os.PathLike = config.MP3D_ROOT,
+        source_split: str = "train") -> SceneSpec:
     """Resolve one scene only through the configured local R2R authority."""
     requested = str(scene_id)
     matches = [
-        spec for spec in discover_r2r_train_scenes(episodes_path, mp3d_root)
+        spec for spec in discover_r2r_scenes(
+            episodes_path, mp3d_root, source_split=source_split)
         if spec.scene_id == requested
     ]
     if len(matches) != 1:
@@ -582,20 +601,12 @@ def _cache_trusted_r2r_scene(key: tuple, value: dict) -> None:
     _TRUSTED_R2R_SCENE_CACHE[key] = value
 
 
-def _trusted_r2r_scene_for_context(rec: dict, context):
-    source = rec.get("source") or {}
+def _trusted_r2r_scene_cache_key(rec: dict, context) -> tuple[tuple, dict]:
     scene_id = str(rec.get("scene_id") or "")
     expected = context.expected_collection_contracts.get(scene_id)
     if not isinstance(expected, dict):
         raise SceneCatalogError(
             "trusted validation context has no R2R scene contract")
-    if (source.get("source_manifest_sha256") !=
-            expected.get("source_manifest_sha256") or
-            source.get("source_assets_sha256") !=
-            expected.get("source_assets_sha256")):
-        raise SceneCatalogError(
-            "record source binding disagrees with expected collection "
-            "contract")
     try:
         episodes_path = str(Path(
             context.r2r_train_episodes).resolve(strict=True))
@@ -605,9 +616,25 @@ def _trusted_r2r_scene_for_context(rec: dict, context):
             f"trusted R2R roots are unavailable: {error}") from error
     key = (
         episodes_path, mp3d_root, scene_id,
+        str(expected.get("official_split") or ""),
         str(expected.get("source_manifest_sha256") or ""),
         str(expected.get("source_assets_sha256") or ""),
     )
+    return key, expected
+
+
+def _trusted_r2r_scene_for_context(rec: dict, context):
+    source = rec.get("source") or {}
+    key, expected = _trusted_r2r_scene_cache_key(rec, context)
+    episodes_path, mp3d_root = key[:2]
+    scene_id = str(rec.get("scene_id") or "")
+    if (source.get("source_manifest_sha256") !=
+            expected.get("source_manifest_sha256") or
+            source.get("source_assets_sha256") !=
+            expected.get("source_assets_sha256")):
+        raise SceneCatalogError(
+            "record source binding disagrees with expected collection "
+            "contract")
     cached = _TRUSTED_R2R_SCENE_CACHE.get(key)
     if cached is not None:
         if _source_identity(cached["provenance"]) != _source_identity(source):
@@ -616,7 +643,8 @@ def _trusted_r2r_scene_for_context(rec: dict, context):
         _TRUSTED_R2R_SCENE_CACHE.move_to_end(key)
         return cached["spec"]
     spec = resolve_trusted_r2r_scene(
-        scene_id, episodes_path=episodes_path, mp3d_root=mp3d_root)
+        scene_id, episodes_path=episodes_path, mp3d_root=mp3d_root,
+        source_split=str(expected.get("official_split") or ""))
     provenance = _authenticate_trusted_scene(
         spec, str(expected.get("source_manifest_sha256") or ""))
     if _source_identity(provenance) != _source_identity(source):
@@ -626,6 +654,28 @@ def _trusted_r2r_scene_for_context(rec: dict, context):
         "spec": spec, "provenance": provenance,
     })
     return spec
+
+
+def _trusted_r2r_semantic_authority(rec: dict, context, spec):
+    """Reuse one already authenticated MP3D authority per cached scene."""
+    from pipeline import semantic
+
+    source = rec.get("source") or {}
+    key, _expected = _trusted_r2r_scene_cache_key(rec, context)
+    cached = _TRUSTED_R2R_SCENE_CACHE.get(key)
+    if cached is not None and cached.get("spec") is spec:
+        authority = cached.get("semantic_authority")
+        if authority is not None:
+            return authority
+    authority = semantic.load_mp3d_semantic_index(
+        spec.scene_path,
+        expected_semantic_ply_sha256=_source_asset_sha256(
+            source, "semantic"),
+        expected_house_sha256=_source_asset_sha256(
+            source, "semantic_metadata"))
+    if cached is not None and cached.get("spec") is spec:
+        cached["semantic_authority"] = authority
+    return authority
 
 
 def trusted_r2r_source_binding_errors(rec: dict, context) -> List[str]:
@@ -641,94 +691,21 @@ def trusted_r2r_source_binding_errors(rec: dict, context) -> List[str]:
     return []
 
 
-def trusted_r2r_b_source_errors(rec: dict, context) -> List[str]:
-    """Rederive B atoms from configured local R2R/MP3D source authority."""
-    if context.route != "r2r_v16_registered" or rec.get("b_target") is None:
-        return []
-    from pipeline import outcome as outcome_fields, record as record_fields
-    from pipeline import semantic
-    from pipeline.geometry import points_to_ground_support_distances_m
-
-    errors = []
-    fid = rec.get("frame_id", "?")
-    source = rec.get("source") or {}
-    try:
-        spec = _trusted_r2r_scene_for_context(rec, context)
-        semantic_sha = _source_asset_sha256(source, "semantic")
-        index = semantic.load_mp3d_target_authority(
-            spec.scene_path, expected_semantic_ply_sha256=semantic_sha,
-            expected_house_sha256=_source_asset_sha256(
-                source, "semantic_metadata"))
-        stored_target = rec.get("b_target")
-        if not isinstance(stored_target, dict):
-            raise ValueError("B target is not an object")
-        selection = stored_target.get("selection")
-        if not isinstance(selection, dict):
-            raise ValueError("B target selection is not an object")
-        instance_id = selection.get("instance_id")
-        if (not isinstance(instance_id, int) or
-                isinstance(instance_id, bool) or instance_id <= 0):
-            raise ValueError("B target instance is invalid")
-        geometry = index.target_geometry_atom(
-            instance_id, record_fields.require_floor_plane(rec),
-            expected_semantic_ply_sha256=semantic_sha,
-            pose=rec.get("pose") or {})
-        if stored_target.get("geometry") != geometry:
-            return [f"[{fid}] trusted B target geometry disagrees with record"]
-        rebuilt_target = record_fields.build_b_target_atom(
-            selection=selection, geometry=geometry,
-            pose=rec.get("pose") or {})
-        if stored_target != rebuilt_target:
-            return [f"[{fid}] trusted B target atom disagrees with source"]
-        relation_outcomes = [
-            outcome for outcome in rec.get("outcomes") or []
-            if outcome.get("b_endpoint_relation") is not None
-        ]
-        endpoint_world_xz = []
-        for outcome in relation_outcomes:
-            endpoint = outcome_fields.realized_pose(outcome)
-            endpoint_world_xz.append(
-                record_fields.local_ground_xz_to_world(
-                    rec.get("pose") or {},
-                    (endpoint["x"], endpoint["z"])))
-        distances = (
-            points_to_ground_support_distances_m(
-                endpoint_world_xz, geometry["ground_support"])
-            if endpoint_world_xz else [])
-        for outcome, distance_after_m in zip(
-                relation_outcomes, distances):
-            stored_relation = outcome["b_endpoint_relation"]
-            rebuilt = \
-                record_fields.build_b_endpoint_relation_from_validated_target(
-                pose=rec.get("pose") or {}, outcome=outcome,
-                b_target=rebuilt_target,
-                distance_after_m=float(distance_after_m))
-            if stored_relation != rebuilt:
-                errors.append(
-                    f"[{fid}:{outcome.get('outcome_id', '?')}] trusted B "
-                    "endpoint relation disagrees with source")
-    except (KeyError, MemoryError, OSError, TypeError, ValueError) as error:
-        return [f"[{fid}] trusted R2R source unavailable: {error}"]
-    return errors
-
-
 def trusted_r2r_a3_source_errors(rec: dict, context) -> List[str]:
     """Rederive exact A3 identities from authenticated MP3D PLY/house."""
     if context.route != "r2r_v16_registered":
         return []
-    from pipeline import consensus, objects as object_fields, semantic
+    from pipeline import consensus, objects as object_fields
 
     fid = rec.get("frame_id", "?")
     source = rec.get("source") or {}
     try:
         spec = _trusted_r2r_scene_for_context(rec, context)
         semantic_sha = _source_asset_sha256(source, "semantic")
-        authority = semantic.load_mp3d_target_authority(
-            spec.scene_path,
-            expected_semantic_ply_sha256=semantic_sha,
-            expected_house_sha256=_source_asset_sha256(
-                source, "semantic_metadata"))
+        authority = _trusted_r2r_semantic_authority(rec, context, spec)
         errors = []
+        requests = []
+        replay_groups = []
         for outcome in rec.get("outcomes") or []:
             certificate = outcome.get("shared_oracle_stability") or {}
             summary = certificate.get("summary") or {}
@@ -752,8 +729,8 @@ def trusted_r2r_a3_source_errors(rec: dict, context) -> List[str]:
                 errors.append(
                     f"{prefix} trusted A3 certificate source binding "
                     f"disagrees: {', '.join(mismatches)}")
-            requests = []
             stored_identities = []
+            start = len(requests)
             for row in rows:
                 physical = row.get("physical") or {}
                 if physical.get("collision") is not True:
@@ -769,8 +746,11 @@ def trusted_r2r_a3_source_errors(rec: dict, context) -> List[str]:
                         "A3 contact replay inputs are incomplete")
                 requests.append((instance_id, world_point))
                 stored_identities.append(row.get("exact_contact_identity"))
-            replayed = authority.confirm_contact_instances(requests)
-            for stored, rebuilt in zip(stored_identities, replayed):
+            replay_groups.append((prefix, start, stored_identities))
+        replayed = authority.confirm_contact_instances(requests)
+        for prefix, start, stored_identities in replay_groups:
+            rebuilt_values = replayed[start:start + len(stored_identities)]
+            for stored, rebuilt in zip(stored_identities, rebuilt_values):
                 if stored != rebuilt:
                     errors.append(
                         f"{prefix} trusted A3 contact identity disagrees "
@@ -781,38 +761,43 @@ def trusted_r2r_a3_source_errors(rec: dict, context) -> List[str]:
         return [f"[{fid}] trusted R2R source unavailable: {error}"]
 
 
-def discover_gs_train_scenes(
+def discover_gs_scenes(
         root: os.PathLike, manifest: os.PathLike, *,
         requested: Optional[Sequence[os.PathLike]] = None,
+        source_split: str = "train",
         ) -> List[SceneSpec]:
-    """Resolve explicitly declared GS train scenes and their local assets.
+    """Resolve explicitly declared GS split scenes and their local assets.
 
     ``requested`` narrows asset validation without weakening the manifest
-    boundary: every requested key must still name a unique train entry.  This
+    boundary: every requested key must still name a unique split entry.  This
     lets one-scene smoke runs proceed while collision artifacts for the rest of
     the authenticated catalog are still being preprocessed.  Full-catalog
-    discovery continues to fail closed if any train asset is absent.
+    discovery continues to fail closed if any selected asset is absent.
     """
+    source_split = str(source_split)
+    if source_split not in dataset_contracts.OFFICIAL_SOURCE_SPLITS:
+        raise SceneCatalogError(
+            f"unsupported GS source split: {source_split!r}")
     root = Path(root).resolve()
     manifest_path = Path(manifest).resolve()
     if not manifest_path.is_file():
         raise SceneCatalogError(
-            f"GS train manifest does not exist: {manifest_path}")
+            f"GS {source_split} manifest does not exist: {manifest_path}")
     payload = json.loads(manifest_path.read_text())
     if payload.get("schema_version") != SCENE_MANIFEST_VERSION:
         raise SceneCatalogError(
-            "GS train manifest has unsupported schema_version")
+            "GS manifest has unsupported schema_version")
     if payload.get("dataset") != "gs":
-        raise SceneCatalogError("GS train manifest dataset must be 'gs'")
+        raise SceneCatalogError("GS manifest dataset must be 'gs'")
     entries = payload.get("scenes")
     if not isinstance(entries, list):
-        raise SceneCatalogError("GS train manifest has no scenes list")
-    allowed_splits = {"train", "val", "test"}
+        raise SceneCatalogError("GS manifest has no scenes list")
+    allowed_splits = set(dataset_contracts.OFFICIAL_SOURCE_SPLITS)
     requested_keys = None if requested is None else {
         str(value).strip() for value in requested}
     if requested_keys is not None and (
             not requested_keys or "" in requested_keys):
-        raise SceneCatalogError("requested GS train scenes are empty")
+        raise SceneCatalogError("requested GS scenes are empty")
     matched_requested = set()
     seen = set()
     specs = []
@@ -828,7 +813,7 @@ def discover_gs_train_scenes(
         if scene_id in seen:
             raise SceneCatalogError(f"duplicate GS scene_id: {scene_id}")
         seen.add(scene_id)
-        if split != "train":
+        if split != source_split:
             continue
         raw_path = Path(str(entry.get("path", scene_id)))
         if raw_path.is_absolute():
@@ -868,7 +853,7 @@ def discover_gs_train_scenes(
         specs.append(SceneSpec(
             scene_id=scene_id,
             source_dataset="gs",
-            official_split="train",
+            official_split=source_split,
             scene_path=str(scene_path),
             navmesh_path=str(navmesh),
             semantic_path=str(labels),
@@ -884,18 +869,29 @@ def discover_gs_train_scenes(
         missing = sorted(requested_keys - matched_requested)
         if missing:
             raise SceneCatalogError(
-                "requested GS scene is not in the verified train catalog: "
+                f"requested GS scene is not in the verified {source_split} "
+                "catalog: "
                 + ", ".join(missing))
     if not specs:
         raise SceneCatalogError(
-            f"GS manifest contains no complete train scenes: {manifest_path}")
+            f"GS manifest contains no complete {source_split} scenes: "
+            f"{manifest_path}")
     return sorted(specs, key=lambda value: value.scene_id)
+
+
+def discover_gs_train_scenes(
+        root: os.PathLike, manifest: os.PathLike, *,
+        requested: Optional[Sequence[os.PathLike]] = None,
+        ) -> List[SceneSpec]:
+    """Backward-compatible train-split discovery wrapper."""
+    return discover_gs_scenes(
+        root, manifest, requested=requested, source_split="train")
 
 
 def resolve_scene_subset(
         catalog: Sequence[SceneSpec],
         requested: Sequence[os.PathLike]) -> List[SceneSpec]:
-    """Resolve explicit IDs/paths without permitting a non-train scene."""
+    """Resolve explicit IDs/paths inside an already verified source split."""
     by_key = {}
     for scene in catalog:
         scene_path = Path(scene.scene_path).resolve()
@@ -930,8 +926,10 @@ def resolve_scene_subset(
         seen.add(scene.scene_id)
         resolved.append(scene)
     if unknown:
+        splits = sorted({scene.official_split for scene in catalog})
+        split_label = splits[0] if len(splits) == 1 else "source"
         raise SceneCatalogError(
-            "requested scenes are not in the verified train catalog: "
+            f"requested scenes are not in the verified {split_label} catalog: "
             + ", ".join(unknown))
     return resolved
 

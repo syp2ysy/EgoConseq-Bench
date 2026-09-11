@@ -1,8 +1,10 @@
-"""Frozen B1K renderer-profile and observation transaction contracts."""
+"""B1K observation profile and instance-mask contracts."""
 
 from __future__ import annotations
 
 import json
+import sys
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -10,18 +12,53 @@ import pytest
 from pipeline import b1k_observation, record
 
 
-def test_frozen_profile_is_self_authenticated_and_uses_raw_instance_mask():
+def test_frozen_profile_uses_official_omnigibson_renderer_defaults():
     value = b1k_observation.load_frozen_profile()
+    atom = value["profile_atom"]
 
-    assert value["selected_profile_id"] == "aa-op-2-reset-0"
+    assert value["schema"] == "b1k-observation-profile.v1"
     assert value["sync_render_count"] == 6
-    assert value["rgb_pose_pure"] is False
     assert value["c1_render_mode"] == \
-        "temporary-counterfactual-bank-batch.v1"
-    assert value["profile_atom"]["modalities"] == [
+        "persistent-counterfactual-bank-batch.v2"
+    assert atom["renderer_authority"] == {
+        "implementation": "omnigibson-official-defaults",
+        "source_commit": "26f2c7ef7b9cf96bd0414f81e1e751e493762779",
+        "source_tag": "v3.9.1",
+    }
+    assert atom["reset_accumulation"] is True
+    assert "settings" not in atom
+    assert "settings_readback" not in atom
+    assert atom["modalities"] == [
         "rgb", "depth_linear", "seg_instance_id"]
-    assert value["profile_atom"]["sha256"] == \
-        record.B1K_OBSERVATION_PROFILE_SHA256
+    assert atom["sha256"] == record.B1K_OBSERVATION_PROFILE_SHA256
+
+
+@pytest.mark.parametrize(
+    ("contract_version", "render_mode"),
+    [
+        (
+            record.B1K_V5_COLLECTION_CONTRACT_VERSION,
+            record.B1K_V5_C1_RENDER_MODE,
+        ),
+        (
+            record.B1K_V16_COLLECTION_CONTRACT_VERSION,
+            record.B1K_C1_RENDER_MODE,
+        ),
+    ],
+)
+def test_frozen_profile_dispatches_legacy_contract_versions(
+        contract_version, render_mode):
+    value = b1k_observation.load_frozen_profile(
+        contract_version=contract_version)
+    atom = value["profile_atom"]
+
+    assert value["schema"] == "b1k-render-profile-probe.v1"
+    assert value["c1_render_mode"] == render_mode
+    assert atom["sha256"] == \
+        record.B1K_LEGACY_OBSERVATION_PROFILE_SHA256
+    assert atom["reset_accumulation"] is False
+    assert atom["antialiasing"] == "FXAA"
+    assert atom["settings"]["/rtx/post/aa/op"] == 2
 
 
 def test_frozen_profile_rejects_a_self_consistent_unpublished_atom(tmp_path):
@@ -47,185 +84,147 @@ def test_frozen_profile_requires_the_published_c1_batch_mode(tmp_path):
         b1k_observation.load_frozen_profile(path)
 
 
-def test_profile_writes_persistent_active_and_defaults_keys():
-    writes = b1k_observation.profile_setting_writes({
-        "/rtx/rendermode": "RaytracedLighting",
-        "/rtx/post/aa/op": 2,
-        "/rtx-transient/post/aa/limitedOps": False,
-    })
+def test_runtime_does_not_override_official_renderer_settings(monkeypatch):
+    from pipeline.b1k_sim import _OmniGibsonRuntime
 
-    assert writes == {
-        "/rtx/rendermode": "RaytracedLighting",
-        "/rtx-defaults/rendermode": "RaytracedLighting",
-        "/rtx/post/aa/op": 2,
-        "/rtx-defaults/post/aa/op": 2,
-        "/rtx-transient/post/aa/limitedOps": False,
-    }
+    writes = []
+
+    class Settings:
+        def __init__(self):
+            self.values = {}
+
+        def set(self, key, value):
+            writes.append((key, value))
+            self.values[key] = value
+
+        def get(self, key):
+            return self.values.get(key)
+
+    settings = Settings()
+    lazy = SimpleNamespace(carb=SimpleNamespace(settings=SimpleNamespace(
+        get_settings=lambda: settings)))
+    monkeypatch.setitem(
+        sys.modules, "omnigibson", SimpleNamespace(lazy=lazy))
+    gm = SimpleNamespace(RENDER_VIEWER_CAMERA=True)
+    og = SimpleNamespace(gm=gm, launch=lambda: None)
+
+    _OmniGibsonRuntime(og, None, None, mesh_converter=None)
+
+    assert writes == []
 
 
-def test_sync_render_count_adds_one_safety_frame_and_enforces_cost():
-    result = b1k_observation.derive_sync_render_count(
-        first_stable_renders=[3, 5, 4, 5],
-        worst_render_seconds=0.10,
+def test_runtime_resets_accumulation_before_main_observation(monkeypatch):
+    from pipeline.b1k_sim import _OmniGibsonRuntime
+
+    events = []
+    lazy = SimpleNamespace(omni=SimpleNamespace(usd=SimpleNamespace(
+        get_context=lambda: SimpleNamespace(
+            reset_renderer_accumulation=lambda: events.append("reset")))))
+    monkeypatch.setitem(
+        sys.modules, "omnigibson", SimpleNamespace(lazy=lazy))
+    og = SimpleNamespace(
+        sim=SimpleNamespace(render=lambda: events.append("render")))
+    runtime = _OmniGibsonRuntime(og, None, None, mesh_converter=None)
+    runtime._read_observation = lambda _sensor: ({"rgb": object()}, {})
+
+    runtime.render(object())
+
+    assert events == ["reset"] + ["render"] * 6
+
+
+def test_legacy_runtime_restores_profile_settings_without_reset(monkeypatch):
+    from pipeline.b1k_sim import _OmniGibsonRuntime
+
+    writes = []
+
+    class Settings:
+        def __init__(self):
+            self.values = {}
+
+        def set(self, key, value):
+            writes.append((key, value))
+            self.values[key] = value
+
+        def get(self, key):
+            return self.values.get(key)
+
+    events = []
+    settings = Settings()
+    lazy = SimpleNamespace(
+        carb=SimpleNamespace(settings=SimpleNamespace(
+            get_settings=lambda: settings)),
+        omni=SimpleNamespace(usd=SimpleNamespace(
+            get_context=lambda: SimpleNamespace(
+                reset_renderer_accumulation=lambda: events.append("reset")))),
     )
+    monkeypatch.setitem(
+        sys.modules, "omnigibson", SimpleNamespace(lazy=lazy))
+    og = SimpleNamespace(
+        launch=lambda: events.append("launch"),
+        sim=SimpleNamespace(render=lambda: events.append("render")))
 
-    assert result == 6
+    runtime = _OmniGibsonRuntime(
+        og, None, None, mesh_converter=None,
+        contract_version=record.B1K_V5_COLLECTION_CONTRACT_VERSION)
+    runtime._read_observation = lambda _sensor: ({"rgb": object()}, {})
+    runtime.render(object())
 
-    with pytest.raises(ValueError, match="transaction exceeds"):
-        b1k_observation.derive_sync_render_count(
-            first_stable_renders=[8], worst_render_seconds=0.12)
-
-
-def test_profile_atom_binds_semantics_resolution_and_readbacks():
-    atom = b1k_observation.build_profile_atom(
-        settings={
-            "/rtx/rendermode": "RaytracedLighting",
-            "/rtx/post/aa/op": 2,
-        },
-        settings_readback={
-            "/rtx/rendermode": "RaytracedLighting",
-            "/rtx-defaults/rendermode": "RaytracedLighting",
-            "/rtx/post/aa/op": 2,
-            "/rtx-defaults/post/aa/op": 2,
-        },
-        antialiasing_name="FXAA",
-        renderer_input_resolution=(640, 480),
-        renderer_output_resolution=(640, 480),
-        sync_render_count=6,
-        modalities=("rgb", "depth_linear", "seg_instance_id"),
-        runtime_identity={"omnigibson": "3.9.1", "isaac_sim": "5.1.0"},
-        reset_accumulation=True,
-    )
-
-    assert atom["protocol"] == "b1k-observation.v5"
-    assert atom["antialiasing"] == "FXAA"
-    assert atom["renderer_input_resolution"] == [640, 480]
-    assert atom["renderer_output_resolution"] == [640, 480]
-    assert atom["sync_render_count"] == 6
-    assert atom["sha256"] == b1k_observation.profile_atom_sha256(atom)
+    assert events == ["launch"] + ["render"] * 6
+    assert dict(writes)["/rtx/rendermode"] == "RaytracedLighting"
+    assert dict(writes)["/rtx-defaults/rendermode"] == "RaytracedLighting"
+    assert dict(writes)["/rtx/post/aa/op"] == 2
 
 
-def test_profile_atom_refuses_neural_upscaling():
-    with pytest.raises(ValueError, match="input and output resolution"):
-        b1k_observation.build_profile_atom(
-            settings={"/rtx/rendermode": "RaytracedLighting"},
-            settings_readback={
-                "/rtx/rendermode": "RaytracedLighting",
-                "/rtx-defaults/rendermode": "RaytracedLighting",
-            },
-            antialiasing_name="DLSS",
-            renderer_input_resolution=(320, 240),
-            renderer_output_resolution=(640, 480),
-            sync_render_count=6,
-            modalities=("rgb", "depth_linear"),
-            runtime_identity={"omnigibson": "3.9.1"},
-            reset_accumulation=False,
-        )
+def test_legacy_runtime_restores_profile_settings_after_scene_open(monkeypatch):
+    """OmniGibson scene construction may restore its renderer defaults."""
+    from pipeline.b1k_sim import _OmniGibsonRuntime
 
+    class Settings:
+        def __init__(self):
+            self.values = {}
 
-def _passing_probe_row(*, rgb_pose_pure: bool = False) -> dict:
-    return {
-        "profile_id": "fxaa",
-        "antialiasing": "FXAA",
-        "settings": {
-            "/rtx/rendermode": "RaytracedLighting",
-            "/rtx/post/aa/op": 2,
-            "/rtx/post/scaling/staticRatio": 1.0,
-        },
-        "settings_readback": b1k_observation.profile_setting_writes({
-            "/rtx/rendermode": "RaytracedLighting",
-            "/rtx/post/aa/op": 2,
-            "/rtx/post/scaling/staticRatio": 1.0,
-        }),
-        "renderer_input_resolution": [640, 480],
-        "renderer_output_resolution": [640, 480],
-        "first_stable_render": {
-            "depth_linear": 3,
-            "seg_instance_id": 4,
-        },
-        "current_pose_differs": {
-            "depth_linear": True,
-            "seg_instance_id": True,
-        },
-        "history_independent": {
-            "rgb": rgb_pose_pure,
-            "depth_linear": True,
-            "seg_instance_id": True,
-        },
-        "worst_render_seconds": 0.1,
-        "reset_accumulation": True,
-    }
+        def set(self, key, value):
+            self.values[key] = value
 
+        def get(self, key):
+            return self.values.get(key)
 
-def test_select_profile_freezes_geometry_modalities_and_routes_c1_batch():
-    report = b1k_observation.select_profile_from_probe(
-        [_passing_probe_row()],
-        runtime_identity={"omnigibson": "3.9.1", "isaac_sim": "5.1.0"},
-    )
+    settings = Settings()
+    lazy = SimpleNamespace(carb=SimpleNamespace(settings=SimpleNamespace(
+        get_settings=lambda: settings)))
+    monkeypatch.setitem(
+        sys.modules, "omnigibson", SimpleNamespace(lazy=lazy))
 
-    assert report["sync_render_count"] == 5
-    assert report["rgb_pose_pure"] is False
-    assert report["c1_render_mode"] == \
-        "temporary-counterfactual-bank-batch.v1"
-    assert report["profile_atom"]["protocol"] == "b1k-observation.v5"
+    expected = b1k_observation.profile_setting_writes(
+        b1k_observation.load_frozen_profile(
+            contract_version=record.B1K_V5_COLLECTION_CONTRACT_VERSION
+        )["profile_atom"]["settings"])
 
+    class Environment:
+        def __init__(self, *, configs):
+            for key in expected:
+                settings.set(key, "runtime-default")
+            self._external_sensors = {
+                "pbench_vision_sensor_0": object(),
+            }
 
-def test_select_profile_prefers_measured_quality_rank_before_speed():
-    fxaa = _passing_probe_row(rgb_pose_pure=True)
-    fxaa["quality_rank"] = 0
-    off = _passing_probe_row(rgb_pose_pure=True)
-    off.update({
-        "profile_id": "aa-off",
-        "antialiasing": "OFF",
-        "quality_rank": 1,
-        "worst_render_seconds": 0.01,
-    })
+    runtime = _OmniGibsonRuntime(
+        SimpleNamespace(launch=lambda: None), Environment, None,
+        mesh_converter=None,
+        contract_version=record.B1K_V5_COLLECTION_CONTRACT_VERSION)
+    scene = runtime.open_scene(
+        scene_id="synthetic", scene_json_path=__file__)
 
-    selected = b1k_observation.select_profile_from_probe(
-        [off, fxaa], runtime_identity={"omnigibson": "3.9.1"})
+    sensors = runtime.create_vision_sensors(scene, [{
+        "width": 640,
+        "height": 480,
+        "hfov_deg": 79.0,
+        "vfov_deg": 63.453048374758716,
+        "modalities": ("rgb", "depth_linear", "seg_instance_id"),
+    }])
 
-    assert selected["selected_profile_id"] == "fxaa"
-
-
-def test_select_profile_refuses_stale_segmentation_or_unknown_resolution():
-    stale = _passing_probe_row()
-    stale["history_independent"]["seg_instance_id"] = False
-    with pytest.raises(ValueError, match="no B1K renderer profile"):
-        b1k_observation.select_profile_from_probe(
-            [stale], runtime_identity={"omnigibson": "3.9.1"})
-
-    upscaled = _passing_probe_row()
-    upscaled["renderer_input_resolution"] = None
-    with pytest.raises(ValueError, match="no B1K renderer profile"):
-        b1k_observation.select_profile_from_probe(
-            [upscaled], runtime_identity={"omnigibson": "3.9.1"})
-
-
-def test_first_stable_render_requires_the_remaining_suffix_to_be_exact():
-    frames = [
-        np.array([0], dtype=np.int32),
-        np.array([1], dtype=np.int32),
-        np.array([1], dtype=np.int32),
-        np.array([2], dtype=np.int32),
-        np.array([2], dtype=np.int32),
-        np.array([2], dtype=np.int32),
-    ]
-
-    assert b1k_observation.first_stable_render(frames) == 4
-    assert b1k_observation.first_stable_render(frames[:3]) == 2
-    assert b1k_observation.first_stable_render(
-        [np.array([0]), np.array([1])]) is None
-
-
-def test_array_sha256_binds_dtype_shape_and_bytes():
-    first = np.array([[1, 2]], dtype=np.int16)
-    same_bytes_new_shape = first.reshape(2, 1)
-    same_values_new_dtype = first.astype(np.int32)
-
-    assert b1k_observation.array_sha256(first) != \
-        b1k_observation.array_sha256(same_bytes_new_shape)
-    assert b1k_observation.array_sha256(first) != \
-        b1k_observation.array_sha256(same_values_new_dtype)
+    assert len(sensors) == 1
+    assert {key: settings.get(key) for key in expected} == expected
 
 
 def test_remap_native_instance_mask_uses_per_frame_prim_paths():

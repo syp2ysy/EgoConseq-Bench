@@ -102,7 +102,6 @@ def validate_job_command(job: Mapping, paths: Mapping[str, str]) -> None:
             expected.extend([
                 "--gs-data-root", paths["gs_data_root"],
                 "--gs-source-manifest", paths["gs_source_manifest"],
-                "--min-objects", "0",
             ])
     _reject_duplicate_options(command)
     if command != expected:

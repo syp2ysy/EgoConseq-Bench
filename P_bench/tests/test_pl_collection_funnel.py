@@ -239,7 +239,7 @@ def test_collection_funnel_resume_rejects_provenance_changes(
 
 
 @pytest.mark.parametrize("name", [
-    "B_TARGET_EXCLUDED_MATERIAL_TOKENS",
+    "SURFACE_TARGET_EXCLUDED_MATERIAL_TOKENS",
     "NON_CONTACT_GROUND_CATEGORIES",
     "NON_SPECIFIC_SEMANTIC_CATEGORIES",
     "STRUCTURAL_CATEGORIES",

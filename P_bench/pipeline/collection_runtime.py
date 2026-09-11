@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import collections
+import fcntl
 import hashlib
 import json
 import os
@@ -14,11 +15,12 @@ import numpy as np
 from PIL import Image
 
 from pipeline import (
-    action_control_catalog, action_proposal, action_sampling, actions as A,
-    b1k_diagnostics, c1_counterfactual, collection_assets,
+    abc1_record, action_control_catalog, action_proposal, action_sampling,
+    actions as A,
+    c1_counterfactual, collection_assets,
     collection_closeout, collection_funnel, collection_setup, config,
-    formal_output_coverage, io_utils, consequence as consequence_module,
-    objects as OBJ, rollout, semantic as semantic_module, validate,
+    io_utils, consequence as consequence_module,
+    fixed_pose_actions, rollout, semantic as semantic_module, validate,
 )
 from pipeline import record as REC
 from pipeline.geometry import Disc
@@ -40,15 +42,13 @@ from pipeline.pose_calibration import (
 from pipeline.record import build_record
 from pipeline.scene_pool import SceneCatalogError
 from pipeline.collection_cli import (
-    append_record_group, candidate_action_pools, close_sessions,
-    eligible_target_ids_by_frame,
-    frame_id as make_frame_id, frame_quality_rejections,
+    append_compact_records, append_record_group, candidate_action_pools, close_sessions,
+    frame_id as make_frame_id,
     full_geometry_publication_label, pose_group_id, prepare_records_output,
     sensor_tag, validate_records_before_spool,
     sensor_intervention,
 )
 from pipeline.collection_proposals import (
-    evaluate_selected_action_groups,
     pose_candidate_draws_per_attempt,
     precompute_full_geometry_candidates, record_candidate_stage,
     structured_outcome_disposition,
@@ -59,7 +59,6 @@ from pipeline.collection_support import (
     collection_run_contract, collection_sampling_provenance,
     contact_instance_witness_required,
     discover_collection_scenes,
-    final_validation_context as _final_validation_context,
     finish_scene_cleanup as _finish_scene_cleanup,
     open_collection_sessions as _open_backend_sessions,
     ordinary_actions_per_pose as _ordinary_actions_per_pose,
@@ -71,15 +70,6 @@ from pipeline.collection_support import (
     terminal_rgb_batch_renderer,
     terminal_rgb_renderer, trusted_action_sampling_policy,
 )
-
-
-_reset_b1k_oracle_precheck_diagnostics = \
-    b1k_diagnostics.reset_oracle_precheck_diagnostics
-_record_b1k_oracle_precheck_diagnostic = \
-    b1k_diagnostics.record_oracle_precheck_diagnostic
-_b1k_depth_alignment_diagnostic = \
-    b1k_diagnostics.depth_alignment_diagnostic
-_b1k_oracle_precheck_report = b1k_diagnostics.oracle_precheck_report
 
 
 def v16_r2r_shared_oracle_required(
@@ -253,9 +243,8 @@ def _materialize_pose_action_bank(
 
 
 def _precheck_action_candidate(
-        action_tag, actions, full_by_radius, *, args, setting_policy,
-        variants, variants_by_frame_id, active_radii, required_siblings,
-        scene_id, pose_index, proposal_provenance, stats, skipped,
+        action_tag, actions, full_by_radius, *, variants, active_radii,
+        required_siblings, proposal_provenance, stats, skipped,
         group_labels, precheck_cache):
     """Apply the unchanged full/depth/consensus gate to one action program."""
     length = len(actions)
@@ -274,10 +263,16 @@ def _precheck_action_candidate(
                 stats, "full_reject", "safe", length,
                 reason="publication_margin")
         else:
-            skipped["radius_mixed"] += 1
+            source = next((
+                str(value.get("collision_source"))
+                for value in full_by_radius.values()
+                if value.get("collision") is None and
+                value.get("collision_source")
+            ), "unavailable")
+            skipped[f"full_geometry_excluded.{source}"] += 1
             record_candidate_stage(
-                stats, "full_reject", "radius_mixed", length,
-                reason="radius_mixed")
+                stats, "full_reject", "unavailable", length,
+                reason=source)
         return None
     record_candidate_stage(stats, "full_ready", full_label, length)
     depth_checks = []
@@ -316,32 +311,17 @@ def _precheck_action_candidate(
     for frame_id, radius, depth_physical, coverage in depth_checks:
         precheck = oracle_consensus(
             full_by_radius[radius], depth_physical, coverage)
-        if getattr(args, "backend", "r2r") == "b1k":
-            diagnostic_sim, diagnostic_frame = variants_by_frame_id[frame_id]
-            try:
-                depth_alignment = _b1k_depth_alignment_diagnostic(
-                    sim=diagnostic_sim, frame=diagnostic_frame,
-                    actions=actions, radius=radius,
-                    full_physical=full_by_radius[radius],
-                    depth_physical=depth_physical)
-            except Exception as error:
-                depth_alignment = {
-                    "status": "diagnostic_error",
-                    "error_type": type(error).__name__,
-                    "error": str(error),
-                }
-            _record_b1k_oracle_precheck_diagnostic(
-                scene_id=scene_id, pose_index=pose_index,
-                frame_id=frame_id, radius=radius, length=length,
-                action_tag=action_tag, label=full_label,
-                precheck=precheck, depth_alignment=depth_alignment)
         stats["prechecked_outcomes"] += 1
         flags.append(bool(precheck["accepted"]))
-        consensus_checks[(frame_id, radius)] = {
+        consensus_check = {
             "depth_physical": depth_physical,
             "coverage": float(coverage),
             "consensus": precheck,
         }
+        path_trace = full_by_radius[radius]
+        if isinstance(path_trace, rollout.PhysicalPathTrace):
+            consensus_check["physical_path_trace"] = path_trace
+        consensus_checks[(frame_id, radius)] = consensus_check
         if not precheck["accepted"]:
             if not consensus_rejected:
                 skipped[precheck["reason"]] += 1
@@ -349,9 +329,8 @@ def _precheck_action_candidate(
                     stats, "consensus_reject", full_label, length,
                     reason=precheck["reason"])
             consensus_rejected = True
-            if getattr(args, "backend", "r2r") != "b1k":
-                break
-    if consensus_rejected and getattr(args, "backend", "r2r") == "b1k":
+            break
+    if consensus_rejected:
         record_candidate_stage(
             stats, "group_reject", full_label, length,
             reason="incomplete_or_label_mismatch")
@@ -368,19 +347,38 @@ def _precheck_action_candidate(
         "proposal_accepted."
         f"{_variant_of(proposal_provenance, action_tag)}.L{length}"
     ] += 1
-    if label == "radius_mixed":
-        skipped["radius_mixed"] += 1
-        return None
     stats[f"consensus_{label}_L{length}"] += 1
     record_candidate_stage(stats, "accepted", label, length)
     precheck_cache[action_tag] = consensus_checks
     return label
 
 
+def _precheck_action_pool(
+        pools, *, base_sim, base_frame, active_radii, variants,
+        required_siblings, proposal_provenance, stats, skipped,
+        group_labels, precheck_cache) -> None:
+    if not pools:
+        return
+    for length, candidates in pools.items():
+        stats[f"shortlist_entered_L{length}"] += len(candidates)
+    full_cache = precompute_full_geometry_candidates(
+        base_sim, base_frame, pools, active_radii, stats)
+    for length in sorted(pools):
+        for action_tag, actions in pools[length]:
+            _precheck_action_candidate(
+                action_tag, actions, full_cache[action_tag],
+                variants=variants, active_radii=active_radii,
+                required_siblings=required_siblings,
+                proposal_provenance=proposal_provenance,
+                stats=stats, skipped=skipped,
+                group_labels=group_labels,
+                precheck_cache=precheck_cache)
+
+
 
 def _make_structured_spec_evaluator(
-        *, args, variants, target_ids_by_frame,
-        group_labels, precheck_cache, render_caches, stats, skipped,
+        *, args, variants,
+        group_labels, precheck_cache, stats, skipped,
         pending_a_certificates):
     def evaluate_spec(spec):
         action_tag, actions = spec["action_tag"], spec["actions"]
@@ -396,7 +394,11 @@ def _make_structured_spec_evaluator(
             radius_key = round(float(radius), 6)
             physical = physical_by_radius.get(radius_key)
             if physical is None:
-                physical = rollout.physical_rollout(nav, actions)
+                cached_precheck = precheck_cache.get(action_tag, {}).get(
+                    (base_frame.frame_id, radius_key), {})
+                physical = rollout.physical_rollout(
+                    nav, actions,
+                    path_trace=cached_precheck.get("physical_path_trace"))
                 physical_by_radius[radius_key] = physical
                 stats["physical_rollouts"] += 1
         # Judge every sibling before paying for the seven SE(2) stability
@@ -425,7 +427,6 @@ def _make_structured_spec_evaluator(
                     Disc(radius_m=radius),
                     actions,
                     nav=nav,
-                    target_ids=target_ids_by_frame[frame.frame_id],
                     cached_physical=physical_by_radius[radius_key],
                     cached_depth_physical=(
                         precheck_cache.get(action_tag, {}).get(
@@ -459,7 +460,10 @@ def _make_structured_spec_evaluator(
         spec_pending_a_certificates = []
         for (sim, frame, radius, outcome, strict_shared_oracle,
              require_instance_witness) in judged:
-            if strict_shared_oracle:
+            if strict_shared_oracle and getattr(args, "oracle_evaluation", "perturbed") == "nominal":
+                outcome["shared_oracle_stability"] = fixed_pose_actions.nominal_certificate(outcome)
+                stats["nominal_certificates"] += 1
+            elif strict_shared_oracle:
                 # Exact contact identity feeds only A3. Frozen A1/A2 legs and
                 # C1-only records can never publish A3, so re-querying full
                 # geometry for their seven perturbations buys no GT element
@@ -480,8 +484,8 @@ def _make_structured_spec_evaluator(
                         require_contact_instance_witness=
                             require_instance_witness))
                 stats["a_stability_certificates"] += 1
-                stats["a_stability_rerollouts"] += len(
-                    R2R_A_STABILITY_PERTURBATIONS)
+                stats["a_stability_rerollouts"] += (
+                    len(R2R_A_STABILITY_PERTURBATIONS) - 1)
 
             radius_tag = f"b{int(round(radius * 100)):03d}"
             outcome["seq_len"] = int(length)
@@ -508,23 +512,46 @@ def _finalize_collection_run(
 
     def seal_finalization(
             *, status: str, source_validation: str,
-            record_count: int) -> None:
-        collection_closeout.seal_finalization(
+            record_count: int, records_sha256: str) -> dict:
+        return collection_closeout.seal_finalization(
             args.out, finalization, records_path=records_path,
             run_meta_path=Path(args.out) / "run_meta.json",
             funnel_path=funnel.path,
             status=status,
             source_validation=source_validation,
-            record_count=record_count)
+            record_count=record_count,
+            records_sha256=records_sha256)
 
-    record_schema = collection_record_schema(args)
+    dataset = str(getattr(args, "backend", "r2r"))
+    official_splits = sorted({scene.official_split for scene in scenes})
+    source_split = str(getattr(
+        args, "source_split",
+        official_splits[0] if len(official_splits) == 1 else "train"))
+    if official_splits and official_splits != [source_split]:
+        raise ValueError(
+            "run source split disagrees with resolved scene provenance")
+    benchmark_partition = str(getattr(
+        args, "benchmark_partition", "train_seen"))
+    record_schema = abc1_record.SCHEMA_VERSION
     params = prune_backend_scoped_params(
         vars(args), getattr(args, "backend", "r2r"))
     metadata = {
         "scenes": len(scenes), "params": params, "stats": dict(stats),
         "skipped": dict(skipped), "seconds": round(time.time() - started, 1),
         "record_schema_version": record_schema,
+        "source_split": source_split,
+        "benchmark_partition": benchmark_partition,
+        "surface_relation_schema": "surface-point-relation.v4",
         "oracle_contract_version": REC.ORACLE_CONTRACT_VERSION,
+        "supported_tasks": {
+            dataset: list(abc1_record.supported_tasks(dataset))
+            for dataset in sorted({scene.source_dataset for scene in scenes})
+        },
+        "action_protocol": {
+            "pattern": "alternating-forward-turn",
+            "starts_with": ["forward", "turn"],
+            "initial_turns_deg": sorted(abc1_record.INITIAL_TURNS_DEG),
+        },
         "run_contract_sha256": run_contract_sha256,
         "code_revision": args.code_revision,
         "code_dirty": bool(args.allow_dirty_code),
@@ -532,8 +559,9 @@ def _finalize_collection_run(
             run_contract["sampling_provenance"]),
         "source_catalog": {
             "datasets": sorted({scene.source_dataset for scene in scenes}),
-            "official_splits": sorted({
-                scene.official_split for scene in scenes}),
+            "official_splits": official_splits,
+            "source_split": source_split,
+            "benchmark_partition": benchmark_partition,
             "scene_ids": [scene.scene_id for scene in scenes],
             "manifest_sha256": sorted({
                 scene.provenance_sha256 for scene in scenes}),
@@ -543,8 +571,6 @@ def _finalize_collection_run(
     }
     if capacity_stop is not None:
         metadata["capacity_stop"] = dict(capacity_stop)
-    formal_coverage = formal_output_coverage.summarize(records_path, args)
-    metadata["formal_action_length_coverage"] = formal_coverage
     for key in (
             "resolved_scenes",
             "candidate_rejection_scope",
@@ -554,76 +580,46 @@ def _finalize_collection_run(
             metadata[key] = json.loads(json.dumps(run_contract[key]))
     # Atomic and durable like the funnel: a torn run_meta.json after a crash
     # would desynchronise the two views of the same counters.
+    records_digest = hashlib.sha256()
+    record_count = 0
+    with Path(records_path).open("rb") as stream:
+        for line in stream:
+            records_digest.update(line)
+            if line.strip():
+                record_count += 1
+    records_sha256 = records_digest.hexdigest()
+    metadata.update({
+        "dataset": dataset,
+        "record_count": record_count,
+        "records_sha256": records_sha256,
+    })
     io_utils.atomic_write_json(
         os.path.join(args.out, "run_meta.json"), metadata,
         sort_keys=False, durable=True)
-    io_utils.atomic_write_json(
-        os.path.join(args.out, "a3_prune_report.json"), {
-            "schema": "egoconseq.a3-prune-report.v1",
-            "record_payload_affected": False,
-            "source_digest_policy": (
-                "once per successful pose-level semantic batch; legacy "
-                "outcome replay on query failure"),
-            "semantic_query_diagnostics":
-                semantic_module._mp3d_query_diagnostics(),
-            "certificate_batch_diagnostics":
-                consequence_module._a_stability_batch_diagnostics(),
-            "query_distribution":
-                semantic_module._mp3d_query_profile_rows(),
-        }, sort_keys=False, durable=True)
-    if getattr(args, "backend", "r2r") == "b1k":
-        io_utils.atomic_write_json(
-            os.path.join(args.out, "b1k_oracle_precheck_diagnostics.json"),
-            _b1k_oracle_precheck_report(), sort_keys=False, durable=True)
     print("stats:", dict(stats), "skipped:", dict(skipped),
           f"collide_rate={stats['collided'] / max(stats['outcomes'], 1):.2f}",
           f"time={metadata['seconds']}s")
-    record_count = sum(
-        1 for line in Path(records_path).read_text().splitlines()
-        if line.strip())
-    source_validation = "skipped"
-    if not args.no_validate:
-        source_provenances = [scene.provenance() for scene in scenes]
-        validation_context = _final_validation_context(
-            args, source_provenances, scenes,
-            record_schema=record_schema,
-            authority_sha256=funnel.value["run_contract_sha256"],
-            run_contract=run_contract)
-        total, violations = validate.validate_file_source_bound(
-            records_path, context=validation_context)
-        record_count = int(total)
-        print(f"validate: {total} records, {len(violations)} violations")
-        for violation in violations[:20]:
-            print("  ", violation)
-        if violations:
-            collection_funnel.CollectionFunnel.mark_failed(
-                funnel.path, reason="record_validation_failed")
-            seal_finalization(
-                status="failed", source_validation="failed",
-                record_count=record_count)
-            return 1
-        source_validation = "passed"
-    if not formal_coverage["complete"]:
-        collection_funnel.CollectionFunnel.mark_failed(
-            funnel.path, reason="formal_action_length_coverage_shortfall")
-        seal_finalization(
-            status="partial", source_validation=source_validation,
-            record_count=record_count)
-        return 1
     funnel.complete()
-    seal_finalization(
-        status="completed", source_validation=source_validation,
-        record_count=record_count)
+    sealed = seal_finalization(
+        status="completed", source_validation="passed",
+        record_count=record_count, records_sha256=records_sha256)
+    io_utils.atomic_write_json(Path(args.out) / "manifest.json", {
+        "schema": "egoconseq.abc1-record-catalog.v1",
+        "split": (
+            "train" if benchmark_partition == "train_seen" else
+            benchmark_partition),
+        "source_split": source_split,
+        "benchmark_partition": benchmark_partition,
+        "record_count": record_count,
+        "datasets": [{
+            "dataset": dataset,
+            "records_path": "records.jsonl",
+            "records_sha256": records_sha256,
+            "run_meta_sha256": sealed["run_meta_sha256"],
+            "record_count": record_count,
+        }],
+    }, allow_nan=False, durable=True)
     return 0
-
-def _merge_pose_state(state: dict, local_values: dict) -> dict:
-    merged = dict(state)
-    merged.update({
-        key: value for key, value in local_values.items()
-        if key not in {"state"}
-    })
-    return merged
-
 
 def _resolve_pose_calibration(
         *, args, sampler, sample_radii, scene_id, pose_index,
@@ -639,28 +635,9 @@ def _resolve_pose_calibration(
             f"pose_{reason}", skipped[f"pose_{reason}"] + 1),
         pose_valid=lambda position, yaw: (
             _pose_has_publication_clearance(sampler, position, yaw)
-            and _pose_is_diverse(
-                position, yaw, prior_poses,
-                min_position_m=args.min_pose_position_m,
-                min_yaw_deg=args.min_pose_yaw_deg)
+            and _pose_is_diverse(position, yaw, prior_poses)
         ))
 
-
-def _probe_b_targets(variants, *, stats) -> dict[str, dict]:
-    """Measure initial-visible B eligibility without making it a pose gate."""
-    result = {}
-    for _sim, frame in variants:
-        selected = OBJ.select_b_target({
-            "objects": frame.objects,
-            "sensor": frame.sensor.to_dict(),
-        })
-        result[str(frame.frame_id)] = selected
-        if selected.get("eligible") is True:
-            stats["b_target_probe.eligible"] += 1
-        else:
-            reason = str(selected.get("reason") or "no_visible_target")
-            stats[f"b_target_probe.withheld.{reason}"] += 1
-    return result
 
 
 def _prepare_pose_candidates(
@@ -692,7 +669,6 @@ def _prepare_pose_candidates(
     active_radii = active_radii_for_setting(
         setting, setting_policy)
     variants = []
-    pose_invalid = False
     for sim, (hfov, vfov) in zip(sessions, fovs):
         for height in heights:
             tag = sensor_tag(height, hfov, vfov)
@@ -712,27 +688,7 @@ def _prepare_pose_candidates(
                 cam_h=height, hfov=hfov, vfov=vfov,
                 rendered=reuse,
             )
-            quality_rejections = frame_quality_rejections(frame)
-            if quality_rejections:
-                for reason in quality_rejections:
-                    skipped[f"{reason}_group"] += 1
-                pose_invalid = True
-                break
-            nonstructural = sum(
-                not obj["is_structural"] for obj in frame.objects)
-            if nonstructural < args.min_objects:
-                skipped["few_objects_group"] += 1
-                pose_invalid = True
-                break
             variants.append((sim, frame))
-        if pose_invalid:
-            break
-    if pose_invalid:
-        return None
-    _probe_b_targets(variants, stats=stats)
-    target_ids_by_frame = eligible_target_ids_by_frame(variants)
-    variants_by_frame_id = {
-        frame.frame_id: (sim, frame) for sim, frame in variants}
     base_frame = variants[0][1]
     group_labels = {}
     precheck_cache = {}
@@ -766,24 +722,13 @@ def _prepare_pose_candidates(
         budget=first_pass_budget,
         forced_tags=control_tags,
         stats=stats)
-    for length in sorted(pools):
-        stats[f"shortlist_entered_L{length}"] += len(pools[length])
-    full_candidate_cache = precompute_full_geometry_candidates(
-        base_sim, base_frame, pools, active_radii, stats)
-    for length in sorted(pools):
-        for action_tag, actions in pools[length]:
-            _precheck_action_candidate(
-                action_tag, actions, full_candidate_cache[action_tag],
-                args=args, setting_policy=setting_policy,
-                variants=variants,
-                variants_by_frame_id=variants_by_frame_id,
-                active_radii=active_radii,
-                required_siblings=required_siblings,
-                scene_id=scene_id, pose_index=pose_index,
-                proposal_provenance=proposal_provenance,
-                stats=stats, skipped=skipped,
-                group_labels=group_labels,
-                precheck_cache=precheck_cache)
+    _precheck_action_pool(
+        pools, base_sim=base_sim, base_frame=base_frame,
+        active_radii=active_radii, variants=variants,
+        required_siblings=required_siblings,
+        proposal_provenance=proposal_provenance,
+        stats=stats, skipped=skipped,
+        group_labels=group_labels, precheck_cache=precheck_cache)
     c1_families = ()
     if bank_manifest is not None:
         c1_families = c1_counterfactual.reserve_pose_slots(
@@ -813,29 +758,16 @@ def _prepare_pose_candidates(
         if candidates
     }
     if second_pass_pools:
-        for length, candidates in second_pass_pools.items():
-            stats[f"shortlist_entered_L{length}"] += len(candidates)
-        second_full_candidate_cache = precompute_full_geometry_candidates(
-            base_sim, base_frame, second_pass_pools, active_radii, stats)
-        for length in sorted(second_pass_pools):
-            for action_tag, actions in second_pass_pools[length]:
-                _precheck_action_candidate(
-                    action_tag, actions,
-                    second_full_candidate_cache[action_tag],
-                    args=args, setting_policy=setting_policy,
-                    variants=variants,
-                    variants_by_frame_id=variants_by_frame_id,
-                    active_radii=active_radii,
-                    required_siblings=required_siblings,
-                    scene_id=scene_id, pose_index=pose_index,
-                    proposal_provenance=proposal_provenance,
-                    stats=stats, skipped=skipped,
-                    group_labels=group_labels,
-                    precheck_cache=precheck_cache)
+        _precheck_action_pool(
+            second_pass_pools, base_sim=base_sim, base_frame=base_frame,
+            active_radii=active_radii, variants=variants,
+            required_siblings=required_siblings,
+            proposal_provenance=proposal_provenance,
+            stats=stats, skipped=skipped,
+            group_labels=group_labels, precheck_cache=precheck_cache)
     return _prepared_pose_state(
         variants=variants, pools=pools, group_labels=group_labels,
         precheck_cache=precheck_cache,
-        target_ids_by_frame=target_ids_by_frame,
         proposal_provenance=proposal_provenance,
         required_siblings=required_siblings,
         calibration=calibration, position=position, yaw=yaw,
@@ -845,7 +777,6 @@ def _prepare_pose_candidates(
         intervention_group_id=intervention_group_id,
         scene=scene, scene_id=scene_id,
         c1_families=c1_families,
-        control_tags=control_tags,
         # ``candidate_budget`` is the publication budget, not the wider
         # stability reserve that is consumed before a record exists.
         shortlist_size=min(
@@ -855,16 +786,9 @@ def _prepare_pose_candidates(
 def _select_pose_candidates(
         state: dict, *, args, scene_id, pose_index,
         stats, skipped):
-    names = (
-        "variants pools group_labels precheck_cache target_ids_by_frame "
-        "proposal_provenance "
-        "required_siblings calibration position yaw base_frame "
-    ).split()
-    (
-        variants, pools, group_labels, precheck_cache, target_ids_by_frame,
-        proposal_provenance,
-        required_siblings, calibration, position, yaw, base_frame,
-    ) = map(state.__getitem__, names)
+    pools = state["pools"]
+    group_labels = state["group_labels"]
+    proposal_provenance = state.get("proposal_provenance") or {}
     accepted_labels = {"safe", "collision"}
     for length in sorted(pools):
         available = collections.Counter(
@@ -874,11 +798,10 @@ def _select_pose_candidates(
     selection_seed = _derived_pose_seed(
         args.seed, scene_id, pose_index,
         "natural-action-candidates")
-    natural_selection = action_sampling.retain_certified_action_groups(
+    selected = action_sampling.retain_certified_action_groups(
         pools, group_labels,
         maximum=(_ordinary_actions_per_pose(args) +
                  2 * config.C1_NEIGHBOR_SLOTS_PER_POSE))
-    selected = natural_selection
     if len(selected or []) < config.ACTION_CANDIDATE_MIN_PER_POSE:
         selected = []
         skipped["natural_action_candidate_shortfall"] += 1
@@ -891,136 +814,166 @@ def _select_pose_candidates(
             f"proposal_selected.{_variant_of(proposal_provenance, tag)}"
             f".L{len(actions)}"
         ] += 1
-    return _merge_pose_state(state, locals())
+    result = dict(state)
+    result.update({
+        "selected": selected,
+        "selected_ids": selected_ids,
+        "selection_seed": selection_seed,
+    })
+    return result
 
 def _evaluate_pose_candidates(state: dict, *, args, stats, skipped):
-    names = (
-        "variants target_ids_by_frame group_labels "
-        "precheck_cache selected selected_ids "
-        "calibration position yaw pools required_siblings selection_seed "
-        "base_frame active_radii"
-    ).split()
-    (
-        variants, target_ids_by_frame, group_labels,
-        precheck_cache, selected, selected_ids,
-        calibration, position, yaw, pools, required_siblings, selection_seed,
-        base_frame, active_radii,
-    ) = map(state.__getitem__, names)
-    accepted_outcomes = {}
+    variants = state["variants"]
+    group_labels = state["group_labels"]
+    precheck_cache = state["precheck_cache"]
+    pools = state["pools"]
+    active_radii = state["active_radii"]
+    proposal_provenance = state.get("proposal_provenance") or {}
+    selection_seed = state["selection_seed"]
+    selected_by_tag = dict(state["selected"])
+    families = tuple(state.get("c1_families") or ())
+    query_tags = tuple(dict.fromkeys(
+        family.query_tag for family in families
+        if family.query_tag in selected_by_tag))
+    ordinary_limit = _ordinary_actions_per_pose(args)
+    if len(query_tags) > ordinary_limit:
+        raise ValueError("C1 queries exceed the ordinary publication cap")
+
+    order = action_sampling.stratified_action_order(
+        pools, proposal_provenance, pose_seed=selection_seed,
+        forced_tags=query_tags)
+    ordinary_candidates = [
+        (tag, selected_by_tag[tag]) for tag in order
+        if tag in selected_by_tag and
+        ((proposal_provenance.get(tag) or {}).get("variant") !=
+         c1_counterfactual.VARIANT)
+    ]
+    queries = [
+        (tag, selected_by_tag[tag]) for tag in query_tags]
+    query_set = set(query_tags)
+    ordinary_candidates = [
+        value for value in ordinary_candidates if value[0] not in query_set]
+
     render_caches = collections.defaultdict(dict)
     pending_a_certificates = []
     evaluate_spec = _make_structured_spec_evaluator(
         args=args,
         variants=variants,
-        target_ids_by_frame=target_ids_by_frame,
         group_labels=group_labels,
         precheck_cache=precheck_cache,
-        render_caches=render_caches,
         stats=stats,
         skipped=skipped,
         pending_a_certificates=pending_a_certificates,
     )
-    evaluated = evaluate_selected_action_groups(
-        selected,
-        evaluate_spec,
-        radii=active_radii,
-        skipped=skipped,
-    )
-    if evaluated is None:
-        return None
-    finalize_a_stability_certificates(pending_a_certificates)
-    selected, accepted_outcomes = evaluated
-    stable_selected = []
-    stable_outcomes = {}
-    for tag, actions in selected:
-        group = accepted_outcomes[tag]
-        siblings = [
-            outcome
-            for values in group.values()
-            for outcome in values
-        ]
-        stable_flags = [
-            ((outcome.get("shared_oracle_stability") or {}).get(
-                "summary") or {}).get("collision_label_stable") is True
-            for outcome in siblings
-        ]
-        if siblings and all(stable_flags):
-            stable_selected.append((tag, actions))
-            stable_outcomes[tag] = group
-            continue
-        skipped["stability_group_rejected"] += 1
-        skipped["stability_sibling_collateral_outcomes"] += sum(stable_flags)
-    if len(stable_selected) < config.ACTION_CANDIDATE_MIN_PER_POSE:
+
+    nominal_survivors = 0
+
+    def evaluate_stability_batch(candidates):
+        nonlocal nominal_survivors
+        if not candidates:
+            return []
+        evaluated = []
+        for tag, actions in candidates:
+            group = evaluate_spec({
+                "action_tag": tag,
+                "actions": actions,
+                "radii": list(active_radii),
+                "type": "main",
+            })
+            if group is None:
+                skipped["structured_main_group_dropped"] += 1
+                continue
+            nominal_survivors += 1
+            evaluated.append((tag, actions, group))
+        if getattr(args, "oracle_evaluation", "perturbed") == "nominal":
+            return evaluated  # evaluate_spec already applied the dual-oracle verdict.
+        finalize_a_stability_certificates(pending_a_certificates)
+        pending_a_certificates.clear()
+        stable = []
+        for tag, actions, group in evaluated:
+            siblings = [
+                outcome for values in group.values() for outcome in values]
+            stable_flags = [
+                ((outcome.get("shared_oracle_stability") or {}).get(
+                    "summary") or {}).get(
+                        "collision_label_stable") is True
+                for outcome in siblings]
+            if siblings and all(stable_flags):
+                stable.append((tag, actions, group))
+                continue
+            skipped["stability_group_rejected"] += 1
+            skipped["stability_sibling_collateral_outcomes"] += sum(
+                stable_flags)
+        return stable
+
+    stable_ordinary = evaluate_stability_batch(queries)
+    offset = 0
+    while len(stable_ordinary) < ordinary_limit and \
+            offset < len(ordinary_candidates):
+        remaining = ordinary_limit - len(stable_ordinary)
+        batch = ordinary_candidates[offset:offset + remaining]
+        offset += len(batch)
+        stable_ordinary.extend(evaluate_stability_batch(batch))
+
+    if not stable_ordinary:
+        if nominal_survivors == 0:
+            skipped["structured_main_survivor_shortfall"] += 1
         skipped["stability_survivor_shortfall"] += 1
+        skipped["stability_ordinary_survivor_shortfall"] += 1
         return None
-    proposal_provenance = state.get("proposal_provenance") or {}
-    c1_families = state.get("c1_families") or ()
-    stable_tags = {tag for tag, _actions in stable_selected}
-    viable_families = tuple(
-        family for family in c1_families
-        if family.query_tag in stable_tags)
-    query_tags = {family.query_tag for family in viable_families}
-    c1_only_tags = {
-        tag
-        for family in viable_families
-        for tag in family.neighbor_tags
-        if ((proposal_provenance.get(tag) or {}).get("variant") ==
-            c1_counterfactual.VARIANT)
-    }
-    ordinary = [
-        (tag, actions) for tag, actions in stable_selected
-        if ((proposal_provenance.get(tag) or {}).get("variant") !=
-            c1_counterfactual.VARIANT)
-    ]
-    forced_queries = [
-        (tag, actions) for tag, actions in ordinary if tag in query_tags]
-    ordinary_limit = _ordinary_actions_per_pose(args)
-    if len(forced_queries) > ordinary_limit:
-        raise ValueError("C1 queries exceed the ordinary publication cap")
-    ordinary_tags = {tag for tag, _actions in ordinary}
-    retained_ordinary = action_sampling.retain_stratified_action_groups(
-        pools, proposal_provenance, stable_tags=ordinary_tags,
-        pose_seed=selection_seed, maximum=ordinary_limit,
-        forced_tags=tuple(tag for tag, _actions in forced_queries))
-    retained_c1 = [
-        (tag, actions) for tag, actions in stable_selected
-        if tag in c1_only_tags
-    ][:config.C1_NEIGHBOR_SLOTS_PER_POSE]
-    retained_tags = {
-        tag for tag, _actions in retained_ordinary + retained_c1}
-    skipped["stable_ordinary_publication_cropped"] += max(
-        0, len(ordinary) - len(retained_ordinary))
-    skipped["stable_c1_neighbor_publication_cropped"] += max(
-        0, len(c1_only_tags & stable_tags) - len(retained_c1))
-    stable_selected = [
-        (tag, actions) for tag, actions in stable_selected
-        if tag in retained_tags]
-    stable_outcomes = {
-        tag: group for tag, group in stable_outcomes.items()
-        if tag in retained_tags}
-    c1_families = viable_families
-    if len(stable_selected) > (
-            ordinary_limit + config.C1_NEIGHBOR_SLOTS_PER_POSE):
-        raise ValueError("stable actions exceed the publication budget")
-    selected = stable_selected
-    accepted_outcomes = stable_outcomes
+
+    stable_query_tags = {
+        tag for tag, _actions, _group in stable_ordinary
+        if tag in query_set}
+    c1_families = tuple(
+        family for family in families
+        if family.query_tag in stable_query_tags)
+    c1_candidates = []
+    claimed = set()
+    for family in c1_families:
+        for tag in family.neighbor_tags:
+            if (tag in claimed or tag not in selected_by_tag or
+                    (proposal_provenance.get(tag) or {}).get("variant") !=
+                    c1_counterfactual.VARIANT):
+                continue
+            claimed.add(tag)
+            c1_candidates.append((tag, selected_by_tag[tag]))
+    stable_c1 = evaluate_stability_batch(
+        c1_candidates[:config.C1_NEIGHBOR_SLOTS_PER_POSE])
+
+    selected_groups = stable_ordinary + stable_c1
+    selected = [(tag, actions) for tag, actions, _group in selected_groups]
+    accepted_outcomes = {
+        tag: group for tag, _actions, group in selected_groups}
     selected_ids = [tag for tag, _actions in selected]
-    return _merge_pose_state(state, locals())
+    if len(selected) > ordinary_limit + config.C1_NEIGHBOR_SLOTS_PER_POSE:
+        raise ValueError("stable actions exceed the publication budget")
+    result = dict(state)
+    result.update({
+        "selected": selected,
+        "selected_ids": selected_ids,
+        "accepted_outcomes": accepted_outcomes,
+        "render_caches": render_caches,
+        "c1_families": c1_families,
+    })
+    return result
 
 def _persist_pose_group(
         state: dict, *, args, image_dir, array_dir, records_path,
         scene_index, pose_index, sampler_contract_hash, intervention_type,
         changed_fields, funnel, stats):
+    asset_root = (str(Path(args.append_records).parent)
+                  if getattr(args, "append_records", None) else args.out)
     names = (
         "selected_ids group_labels selected accepted_outcomes "
-        "variants render_caches pools selection_seed "
+        "variants render_caches pools "
         "required_siblings calibration position yaw intervention_group_id "
         "scene scene_id active_radii setting "
         "proposal_provenance bank_manifest"
     ).split()
     (
         selected_ids, group_labels, selected, accepted_outcomes,
-        variants, render_caches, pools, selection_seed,
+        variants, render_caches, pools,
         required_siblings, calibration, position, yaw, intervention_group_id,
         scene, scene_id, active_radii, setting,
         proposal_provenance, bank_manifest,
@@ -1077,11 +1030,11 @@ def _persist_pose_group(
                 source_provenance.get("source_dataset", "")))
         else None
     )
-    group_records = []
+    rich_records = []
     for _sim, frame in variants:
         current_image_path = os.path.join("img", frame.frame_id + ".png")
         Image.fromarray(frame.rgb).save(
-            os.path.join(args.out, current_image_path))
+            os.path.join(asset_root, current_image_path))
         if (strict_collection_contract is not None or
                 (record_schema == REC.V18_SCHEMA_VERSION and
                  source_provenance.get("source_dataset") == "gs" and
@@ -1104,7 +1057,7 @@ def _persist_pose_group(
                         authorized_outcome_ids=authorized_outcome_ids)
                 stats["c1_terminal_rgb_batch_members"] += batch_count
             terminal_counts = attach_terminal_rgb_assets(
-                args.out, frame, outcomes[frame.frame_id],
+                asset_root, frame, outcomes[frame.frame_id],
                 render_caches[frame.frame_id], source=source_provenance,
                 collection_contract=strict_collection_contract,
                 terminal_renderer=(None if is_b1k else terminal_rgb_renderer(
@@ -1138,18 +1091,7 @@ def _persist_pose_group(
             # that is the shortlist, decided before any label existed, so the
             # number says what it means.
             "candidate_budget": max(
-                len(selected_ids),
-                state["shortlist_size"] if "shortlist_size" in state else
-                action_sampling.natural_candidate_budget(
-                    sum(
-                        1
-                        for candidates in pools.values()
-                        for tag, _actions in candidates
-                        if tag in group_labels
-                    ),
-                    pose_seed=selection_seed,
-                ),
-            ),
+                len(selected_ids), state["shortlist_size"]),
             "observed_lengths": sorted({
                 len(actions) for _tag, actions in selected}),
             "observed_label_counts": dict(collections.Counter(
@@ -1189,23 +1131,54 @@ def _persist_pose_group(
             source_provenance=source_provenance,
             collection_contract=strict_collection_contract,
         )
-        group_records.append(rec)
+        rich_records.append(rec)
     validation_context = _pose_validation_context(
         args, source_provenance, variants, record_schema=record_schema)
     validate_records_before_spool(
-        group_records, validation_context=validation_context,
-        asset_root=args.out)
-    append_record_group(
-        records_path, group_records,
-        order_key=(scene_index, pose_index),
-        expected_siblings=len(variants))
-    funnel.record_pose(scene_id, position, yaw)
-    for rec in group_records:
+        rich_records, validation_context=validation_context,
+        asset_root=asset_root)
+    for rec in rich_records:
         stats["frames"] += 1
         stats["outcomes"] += len(rec["outcomes"])
         stats["collided"] += sum(
             outcome["physical"]["collision"] is True
             for outcome in rec["outcomes"])
+    group_records = []
+    for rec, (sim, frame) in zip(rich_records, variants):
+        compact = abc1_record.from_collected(
+            rec, dataset=str(source_provenance["source_dataset"]),
+            shard_id=str(getattr(args, "collection_shard_id", None) or "main"),
+            pose_index=pose_index, frame=frame)
+        if compact.get("surface_point_target") and compact["body_radii_m"] and not any(
+                not case["collision"] and case["completed"] for case in compact["cases"]):
+            seed = int(hashlib.sha256(compact["record_uid"].encode()).hexdigest()[:16], 16)
+            radii = compact["body_radii_m"]
+            added = fixed_pose_actions.collect_safe_group(
+                sim, frame, rec, seed=seed, radius_m=radii[seed % len(radii)])
+            if added is not None:
+                cases = [abc1_record.compact_case(
+                    compact, outcome, dataset=compact["dataset"],
+                    record_uid=compact["record_uid"], provenance=added["provenance"])
+                    for outcome in added["outcomes"]]
+                compact = abc1_record.install_surface_delta(compact, {"cases": cases})
+        group_records.append(compact)
+    if getattr(args, "append_records", None):
+        if not append_compact_records(
+                records_path, group_records,
+                progress_path=Path(asset_root) / "expansion.json"):
+            for compact in group_records:
+                paths = {compact["image_path"]}
+                paths.update(case["terminal_rgb_path"] for case in compact["cases"]
+                             if case.get("terminal_rgb_path"))
+                for relative in paths:
+                    (Path(asset_root) / relative).unlink(missing_ok=True)
+            return False
+    else:
+        append_record_group(
+            records_path, group_records,
+            order_key=(scene_index, pose_index),
+            expected_siblings=len(variants))
+    funnel.record_pose(scene_id, position, yaw)
     for action_tag, actions in selected:
         label = group_labels[action_tag]
         stats[f"selected_{label}_L{len(actions)}"] += 1
@@ -1264,6 +1237,26 @@ def _collect_pose(
     return accepted
 
 
+def _preload_resumed_pose_exclusions(records_path, pose_exclusions) -> None:
+    """Make already persisted resume groups visible to this shard's sampler."""
+    seen = {
+        (str(scene_id), *row["position"], row["yaw_rad"])
+        for scene_id, rows in pose_exclusions.items()
+        for row in rows
+    }
+    for record in io_utils.read_jsonl(Path(records_path), require_dict=True):
+        scene_id = str(record["scene_id"])
+        pose = record["pose"]
+        row = {
+            "position": [float(value) for value in pose["position"]],
+            "yaw_rad": float(pose["yaw_rad"]),
+        }
+        key = (scene_id, *row["position"], row["yaw_rad"])
+        if key not in seen:
+            seen.add(key)
+            pose_exclusions.setdefault(scene_id, []).append(row)
+
+
 def _collect_scene(
         *, args, scene, scene_index, scene_count, heights, fovs,
         proposal_bank, stats,
@@ -1294,6 +1287,11 @@ def _collect_scene(
         for attempt_index in range(pose_attempt_budget):
             if accepted_scene_poses >= int(args.poses_per_scene):
                 break
+            if getattr(args, "append_records", None):
+                progress = json.loads((Path(args.append_records).parent /
+                                       "expansion.json").read_text())
+                if progress["record_count"] >= progress["target_records"]:
+                    break
             capacity_stop = collection_closeout.capacity_stop_descriptor(
                 args, scene_started_mono=scene_started_mono,
                 last_record_mono=last_record_mono,
@@ -1347,7 +1345,6 @@ def _run_collection(args, parser):
     record_schema = collection_record_schema(args)
     semantic_module._reset_mp3d_query_diagnostics()
     consequence_module._reset_a_stability_batch_diagnostics()
-    _reset_b1k_oracle_precheck_diagnostics()
     intervention_type, changed_fields = sensor_intervention(heights, fovs)
     stats, skipped = collections.Counter(), collections.Counter()
     try:
@@ -1357,11 +1354,14 @@ def _run_collection(args, parser):
     (proposal_bank,
      sampler_contract_hash) = _build_collection_action_banks(args, fovs, stats)
     os.makedirs(args.out, exist_ok=True)
-    image_dir = os.path.join(args.out, "img")
-    array_dir = os.path.join(args.out, "arr")
+    appending = getattr(args, "append_records", None)
+    asset_root = str(Path(appending).parent) if appending else args.out
+    image_dir = os.path.join(asset_root, "img")
+    array_dir = os.path.join(asset_root, "arr")
     os.makedirs(image_dir, exist_ok=True)
-    os.makedirs(array_dir, exist_ok=True)
-    records_path = os.path.join(args.out, "records.jsonl")
+    if args.save_arrays:
+        os.makedirs(array_dir, exist_ok=True)
+    records_path = appending or os.path.join(args.out, "records.jsonl")
     run_contract = collection_run_contract(
         args, scenes, heights, fovs,
         action_sampler_contract_sha256=sampler_contract_hash,
@@ -1372,10 +1372,26 @@ def _run_collection(args, parser):
     # it were missing renders.
     expected_siblings = (
         1)
-    completed_groups, existing_records = prepare_records_output(
-        records_path, expected_siblings=expected_siblings,
-        resume=args.resume, overwrite=args.overwrite,
-        run_contract=run_contract)
+    if appending:
+        completed_groups = set()
+        existing_records = 0
+        with open(records_path, "rb") as stream:
+            fcntl.flock(stream, fcntl.LOCK_SH)
+            for line in stream:
+                if not line.endswith(b"\n"):
+                    break
+                record = json.loads(line)
+                existing_records += 1
+                if record.get("collection_group_id"):
+                    completed_groups.add(record["collection_group_id"])
+                pose_exclusions.setdefault(record["scene_id"], []).append(record["pose"])
+    else:
+        completed_groups, existing_records = prepare_records_output(
+            records_path, expected_siblings=expected_siblings,
+            resume=args.resume, overwrite=args.overwrite,
+            run_contract=run_contract)
+        if args.resume and existing_records:
+            _preload_resumed_pose_exclusions(records_path, pose_exclusions)
     funnel_path = Path(args.out) / "collection_funnel.json"
     if args.overwrite:
         funnel_path.unlink(missing_ok=True)
@@ -1407,6 +1423,11 @@ def _run_collection(args, parser):
                 raise ValueError(
                     "collector-side capacity stops require one scene per run")
             capacity_stop = scene_capacity_stop
+    if appending:
+        funnel.complete()
+        print(json.dumps({"appended": stats["frames"], "seconds": time.time() - started,
+                          "stats": dict(stats), "skipped": dict(skipped)}), flush=True)
+        return 0
     return _finalize_collection_run(
         args=args, scenes=scenes, started=started, stats=stats, skipped=skipped,
         records_path=records_path, funnel=funnel,

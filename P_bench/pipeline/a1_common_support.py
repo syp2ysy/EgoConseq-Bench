@@ -17,23 +17,15 @@ V3_POLICY = "a1-three-source-balance.v1"
 V3_PUBLICATION_PROTOCOLS = frozenset({
     action_proposal.PROPOSAL_PROTOCOL_V3,
     action_proposal.PROPOSAL_PROTOCOL_V4,
+    action_proposal.PROPOSAL_PROTOCOL_V5,
 })
 
 
-def v3_source_rejection(record: dict, outcome: dict) -> str | None:
-    """Reject v3 sources whose generator encodes an A1 label.
-
-    This runs before task caps. Otherwise paired outcomes appearing first in a
-    record could consume the A1 quota and leave no room for the eligible
-    dynamic-natural or exact-control outcomes that follow them.
-    """
-    tag = str(outcome.get("action_group_id") or "")
-    row = ((record.get("selection") or {}).get(
-        "proposal_provenance") or {}).get(tag)
-    if not isinstance(row, dict):
-        return None
-    protocol = str(row.get("protocol") or "")
-    variant = str(row.get("variant") or "")
+def v3_source_rejection_for(
+        protocol: str | None, variant: str | None) -> str | None:
+    """Reject proposal sources whose generator encodes an A1 label."""
+    protocol = str(protocol or "")
+    variant = str(variant or "")
     if variant == c1_counterfactual.VARIANT:
         return "a1_nonpublication_source"
     if protocol not in V3_PUBLICATION_PROTOCOLS:
@@ -43,6 +35,16 @@ def v3_source_rejection(record: dict, outcome: dict) -> str | None:
             action_proposal.A1_CONTROL_VARIANT}:
         return None
     return "a1_nonpublication_source"
+
+
+def v3_source_rejection(record: dict, outcome: dict) -> str | None:
+    """Read one legacy provenance row and apply the publication policy."""
+    tag = str(outcome.get("action_group_id") or "")
+    row = ((record.get("selection") or {}).get(
+        "proposal_provenance") or {}).get(tag)
+    if not isinstance(row, dict):
+        return None
+    return v3_source_rejection_for(row.get("protocol"), row.get("variant"))
 
 
 def ordinary_proposal_protocols(records: Iterable[dict]) -> set[str]:
@@ -88,9 +90,9 @@ def default_for_protocols(protocols: Iterable[str]) -> bool:
 
 
 def v3_default_for_protocols(protocols: Iterable[str]) -> bool:
-    """Select v3 only for one uniform, explicitly bound source population."""
+    """Select v3 balance for any supported action-bank population."""
     values = set(protocols)
-    return len(values) == 1 and values <= V3_PUBLICATION_PROTOCOLS
+    return bool(values) and values <= V3_PUBLICATION_PROTOCOLS
 
 
 def default_for_records(records: Iterable[dict]) -> bool:

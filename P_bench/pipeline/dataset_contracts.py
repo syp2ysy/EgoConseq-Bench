@@ -16,6 +16,7 @@ from pipeline import config
 SOURCE_ASSET_IDENTITY_VERSION = "egoconseq.source-assets.v1"
 GS_OFFICIAL_COORDINATE_BINDING_SCHEMA = \
     "gs-official-coordinate-binding.v1"
+OFFICIAL_SOURCE_SPLITS = ("train", "val", "val_unseen", "test")
 
 
 @dataclass(frozen=True)
@@ -131,6 +132,11 @@ _IDENTITY_BINDINGS = MappingProxyType({
     "b1k": ("b1k-contact-triangle-identity.v1", "scene_authority"),
     "gs": ("gs-visible-contact-instance-identity.v1", "source_bundle"),
 })
+_COLLECTION_GPU_BY_DATASET = MappingProxyType({
+    "gs": 0,
+    "b1k": 1,
+    "r2r": 2,
+})
 
 
 def dataset_source_contract(source_dataset: str) -> DatasetSourceContract:
@@ -151,6 +157,12 @@ def main_collection_datasets() -> tuple[str, ...]:
     return tuple(
         name for name, contract in DATASET_SOURCE_CONTRACTS.items()
         if contract.main_collection_enabled)
+
+
+def collection_gpu_id(source_dataset: str) -> int:
+    """Return the fixed collection GPU assigned to one dataset."""
+    dataset_source_contract(source_dataset)
+    return _COLLECTION_GPU_BY_DATASET[source_dataset]
 
 
 def source_path_key(source_dataset: str) -> str:

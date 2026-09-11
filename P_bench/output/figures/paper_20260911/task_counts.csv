@@ -1,0 +1,9 @@
+task_id,task_name,prediction_family,seen,unseen,total
+A1,Collision occurrence,Body–scene contact,600,250,850
+A2,First-collision action,Body–scene contact,800,250,1050
+A3,First-contact object category,Body–scene contact,599,250,849
+A4,Intermediate target direction,Target-relative spatial relations,600,250,850
+B1,Final target distance,Target-relative spatial relations,600,250,850
+B2,Final target direction,Target-relative spatial relations,600,250,850
+B3,Intermediate target distance,Target-relative spatial relations,600,250,850
+C1,Future-view selection,Future-view discrimination,600,250,850

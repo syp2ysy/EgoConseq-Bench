@@ -134,16 +134,63 @@ def planar_distance_m(x_m: float, z_m: float) -> float:
     return math.sqrt(x * x + z * z)
 
 
-def bearing_sector(bearing_deg: float) -> str:
-    """Map an egocentric bearing to the public four-sector label."""
-    bearing = wrap_deg(float(bearing_deg))
-    if -45.0 <= bearing < 45.0:
-        return "front"
-    if 45.0 <= bearing < 135.0:
-        return "right"
-    if -135.0 < bearing < -45.0:
-        return "left"
-    return "rear"
+HORIZONTAL_DIRECTION_LABELS = (
+    "front", "front-right", "right", "rear-right",
+    "rear", "rear-left", "left", "front-left",
+)
+VERTICAL_DIRECTION_LABELS = ("above", "level", "below")
+DIRECTION_CONVENTION = (
+    "Use the camera frame at the queried moment. Front, right, rear, and left "
+    "each span ±7.5° around their corresponding horizontal axes. Front-right, "
+    "rear-right, rear-left, and front-left cover the intervals between these "
+    "ranges. Elevation greater than 7.5° is above; less than −7.5° is below; "
+    "otherwise it is at camera level."
+)
+
+
+def horizontal_direction(azimuth_deg: float) -> str:
+    """Classify camera-centred azimuth into eight horizontal directions.
+
+    Axis-aligned directions span 15 degrees total (plus or minus 7.5 degrees);
+    each intervening diagonal direction spans 75 degrees.
+    """
+    azimuth = wrap_deg(float(azimuth_deg))
+    if abs(azimuth) <= 7.5:
+        direction = "front"
+    elif abs(azimuth - 90.0) <= 7.5:
+        direction = "right"
+    elif abs(azimuth + 90.0) <= 7.5:
+        direction = "left"
+    elif abs(azimuth) >= 172.5:
+        direction = "rear"
+    elif 0.0 < azimuth < 90.0:
+        direction = "front-right"
+    elif 90.0 < azimuth < 180.0:
+        direction = "rear-right"
+    elif -90.0 < azimuth < 0.0:
+        direction = "front-left"
+    else:
+        direction = "rear-left"
+    return direction
+
+
+def vertical_direction(elevation_deg: float) -> str:
+    """Classify elevation relative to the camera-level plane."""
+    elevation = float(elevation_deg)
+    if elevation > 7.5:
+        return "above"
+    if elevation < -7.5:
+        return "below"
+    return "level"
+
+
+def spatial_direction_key(horizontal: str, vertical: str) -> str:
+    """Compose a compact internal key; level is the unqualified direction."""
+    if horizontal not in HORIZONTAL_DIRECTION_LABELS:
+        raise ValueError(f"unknown horizontal direction: {horizontal}")
+    if vertical not in VERTICAL_DIRECTION_LABELS:
+        raise ValueError(f"unknown vertical direction: {vertical}")
+    return horizontal if vertical == "level" else f"{horizontal}|{vertical}"
 
 
 def net_turn_deg(actions: Sequence[Action]) -> float:
@@ -260,57 +307,40 @@ def program_progress_at_contact(actions: Sequence[Action], action_index: int,
 
 
 def inside_initial_fov(actions: Sequence[Action], half_fov_deg: float, *,
-                       max_arc_m: float = None,
-                       radius_m: float = 0.0) -> bool:
-    """Whether the swept body stays inside the initial view cone.
+                       max_arc_m: float = None) -> bool:
+    """Whether the executed centreline stays inside the initial view cone.
 
     ``max_arc_m`` limits the check to the prefix actually executed. A colliding
     program never runs its nominal remainder, so requiring the full nominal path
     to stay in view would reject candidates the physical oracle would accept --
     the formal corridor gate truncates at first contact for the same reason.
 
-    Near the origin the camera cannot see both sides of a finite-radius body;
-    that frozen horizontal blind strip is exempt exactly as in corridor
-    coverage. Beyond it, both lateral disc edges must remain in view. Passing
-    the default zero radius preserves the historical centerline predicate.
+    Body radius is intentionally absent here.  The physical and depth oracles
+    use the real disc radius, while this predicate asks only whether the path
+    being reasoned about remains in the initial camera view.  Corridor coverage
+    separately checks whether that view contains enough evidence for the body.
     """
-    radius = float(radius_m)
     half_fov = float(half_fov_deg)
-    if not math.isfinite(radius) or radius < 0.0:
-        raise ValueError("body radius must be finite and nonnegative")
-    half_fov_rad = math.radians(half_fov)
-    horizontal_near_field = (
-        radius / max(math.tan(half_fov_rad), 1e-9)
-        if radius > 0.0 and 0.0 < half_fov < 90.0 else 0.0)
-    for x, z, heading, arc in sample_path(actions, config.MARCH_STEP_M):
+    for x, z, _heading, arc in sample_path(actions, config.MARCH_STEP_M):
         if arc <= 0:
             continue
         if max_arc_m is not None and float(arc) > float(max_arc_m) + 1e-9:
             break
         if z <= 0 or abs(math.degrees(math.atan2(x, z))) > half_fov + 1e-9:
             return False
-        if radius <= 0.0 or math.hypot(x, z) <= horizontal_near_field + 1e-9:
-            continue
-        for lateral in (-radius, radius):
-            px = x + lateral * math.cos(heading)
-            pz = z - lateral * math.sin(heading)
-            if (pz <= 0.0 or
-                    abs(math.degrees(math.atan2(px, pz))) > half_fov + 1e-9):
-                return False
     return True
-
-
-_inside_initial_fov = inside_initial_fov
 
 
 def _random_action(rng: np.random.Generator, previous: Action = None, *,
                    turns=tuple(config.GEN_TURNS_DEG),
-                   forwards=tuple(config.GEN_FORWARDS_M)) -> Action:
+                   forwards=tuple(config.GEN_FORWARDS_M),
+                   initial_turns=tuple(config.INITIAL_TURNS_DEG)) -> Action:
     choose_turn = (bool(rng.integers(0, 2)) if previous is None
                    else isinstance(previous, Forward))
     if not choose_turn:
         return Forward(float(rng.choice(forwards)))
-    return Turn(float(rng.choice(turns)))
+    return Turn(float(rng.choice(
+        initial_turns if previous is None else turns)))
 
 
 def validate_alternating_actions(actions: Sequence[Action]) -> None:
@@ -357,6 +387,7 @@ def balanced_action_pool(rng: np.random.Generator,
                          max_attempts: int = None, *,
                          turns=tuple(config.GEN_TURNS_DEG),
                          forwards=tuple(config.GEN_FORWARDS_M),
+                         initial_turns=tuple(config.INITIAL_TURNS_DEG),
                          require_initial_fov: bool = True) -> Dict[int, List[ActionSeq]]:
     """Randomly draw benchmark programs and keep paths in the initial FOV.
     Adjacent primitives strictly alternate between Turn and Forward. Duplicate
@@ -377,12 +408,13 @@ def balanced_action_pool(rng: np.random.Generator,
             for _ in range(int(length)):
                 seq.append(_random_action(
                     rng, seq[-1] if seq else None,
-                    turns=turns, forwards=forwards))
+                    turns=turns, forwards=forwards,
+                    initial_turns=initial_turns))
             validate_alternating_actions(seq)
             key = _action_key(seq)
             if (key in seen or not any(isinstance(a, Forward) for a in seq) or
                     (require_initial_fov and
-                     not _inside_initial_fov(seq, float(half_fov_deg)))):
+                     not inside_initial_fov(seq, float(half_fov_deg)))):
                 continue
             seen.add(key)
             candidates.append(seq)

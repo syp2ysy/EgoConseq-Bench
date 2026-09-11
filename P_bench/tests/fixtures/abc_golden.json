@@ -1,0 +1,34 @@
+{
+  "purpose": "Historical source-record fixtures for compatibility tests and B1K pose exclusions. The retired candidate-preview replay is not part of the current benchmark.",
+  "inputs": [
+    {
+      "collection_funnel.json": "95d98704b6a21ec8cf51686202c8214340a83890713de55edcad0db137467585",
+      "dataset": "r2r",
+      "expected_zero_tasks": [
+        "A1_collision"
+      ],
+      "record_count": 3,
+      "records.jsonl": "100ba00a513b35cd2a3ffc3b806fe81c8fc4a138c2c9820a035a057e9ba9b523",
+      "run_meta.json": "0727f3990b930ace605fb0083b110c02224a1f812f24fc85b79d80476d56ef41",
+      "shard": "data/metadata/golden/abc1_three_dataset_1h_20260813_aa04f8e/records/r2r/g0/gZ6f7yhEvPG"
+    },
+    {
+      "collection_funnel.json": "67e10f1f9223c6447e318ce41d86e634386681510d3adca5387d3e97c42f85f4",
+      "dataset": "gs",
+      "expected_zero_tasks": [],
+      "record_count": 27,
+      "records.jsonl": "5a830c0c18c71b5225a90f5a627defdeeb4bcbd98ab5d5763a5cfdd4a8bc5287",
+      "run_meta.json": "529031d511a21258dd56e52353ed29ae7dc4d08e4cd87938d369a883e7b3bc90",
+      "shard": "data/metadata/golden/abc1_three_dataset_1h_20260813_aa04f8e/records/gs/g1/interior_0107_839992"
+    },
+    {
+      "collection_funnel.json": "d4ed97ad414db733b02e7bd6e211ca10762980ffe2877396095c305e8b587b48",
+      "dataset": "b1k",
+      "expected_zero_tasks": [],
+      "record_count": 11,
+      "records.jsonl": "1ead7abe8088a5422641ee0c02523bfc5818e9948e25af1b10d66f199d1e317e",
+      "run_meta.json": "a03c57c82011d93f6f4a803b264e910fadd6721a6058d9c305fd0f359a37cd73",
+      "shard": "data/metadata/golden/abc1_three_dataset_1h_20260813_aa04f8e/records/b1k/g3/gates_bedroom-transaction/gates_bedroom"
+    }
+  ]
+}

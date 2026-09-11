@@ -28,6 +28,55 @@ class _PoseGeometryQuery:
     geometry_source: str | None = None
 
 
+@dataclass(frozen=True)
+class PhysicalPathTrace:
+    """Coarse path and contact refinement shared by precheck and rollout."""
+
+    authority: str
+    collision: bool | None
+    collision_source: str | None
+    first_contact_arc_m: float | None
+    stop_arc_m: float | None
+    minimum_clearance_m: float | None
+    geometry_authority_sha256: str | None
+
+    def precheck(self) -> dict:
+        value = {
+            "authority": self.authority,
+            "collision": self.collision,
+            "first_contact_arc_m": self.first_contact_arc_m,
+            "minimum_clearance_m": self.minimum_clearance_m,
+        }
+        if self.geometry_authority_sha256 is not None:
+            value["geometry_authority_sha256"] = \
+                self.geometry_authority_sha256
+        if self.collision_source is not None:
+            value["collision_source"] = self.collision_source
+        return value
+
+    def __getitem__(self, key: str):
+        if key == "authority":
+            return self.authority
+        if key == "collision":
+            return self.collision
+        if key == "first_contact_arc_m":
+            return self.first_contact_arc_m
+        if key == "minimum_clearance_m":
+            return self.minimum_clearance_m
+        if key == "geometry_authority_sha256" and \
+                self.geometry_authority_sha256 is not None:
+            return self.geometry_authority_sha256
+        if key == "collision_source" and self.collision_source is not None:
+            return self.collision_source
+        raise KeyError(key)
+
+    def get(self, key: str, default=None):
+        try:
+            return self[key]
+        except KeyError:
+            return default
+
+
 def _query_pose(nav, pose) -> _PoseGeometryQuery:
     query = getattr(nav, "query_pose", None)
     if query is not None:
@@ -162,33 +211,25 @@ def summarize_execution(actions: Sequence[A.Action], *, collision: bool,
     }
 
 
-def physical_collision_precheck(nav, actions: Sequence[A.Action]) -> dict:
-    """Return collision and clearance fields needed by candidate gates."""
-    authority = getattr(nav, "authority", "unavailable") if nav is not None else "unavailable"
+def _physical_path_trace_from_queries(
+        nav, actions: Sequence[A.Action], samples, queries,
+        ) -> PhysicalPathTrace:
+    """Preserve scalar contact refinement after a coarse batched query."""
+    authority = getattr(nav, "authority", "unavailable")
     authority_fields = _geometry_authority_fields(nav, authority)
-    if nav is None or authority == "unavailable":
-        return {"authority": "unavailable", "collision": None,
-                "first_contact_arc_m": None, "minimum_clearance_m": None}
+    authority_digest = authority_fields.get("geometry_authority_sha256")
     previous_arc = 0.0
     clearances = []
-    samples = A.sample_path(actions, config.MARCH_STEP_M)
-    poses = [
-        (x, z, math.degrees(heading_rad))
-        for x, z, heading_rad, _arc in samples
-    ]
-    queries = _query_many(nav, poses)
     for sample, query in zip(samples, queries):
         _x, _z, _heading_rad, arc = sample
         excluded_source = _excluded_geometry_source(query)
         if excluded_source is not None:
-            return {
-                "authority": authority,
-                **authority_fields,
-                "collision": None,
-                "collision_source": excluded_source,
-                "first_contact_arc_m": None,
-                "minimum_clearance_m": None,
-            }
+            return PhysicalPathTrace(
+                authority=authority, collision=None,
+                collision_source=excluded_source,
+                first_contact_arc_m=None, stop_arc_m=None,
+                minimum_clearance_m=None,
+                geometry_authority_sha256=authority_digest)
         if query.navigable:
             clearances.append(max(0.0, float(query.clearance_m)))
             previous_arc = arc
@@ -200,95 +241,109 @@ def physical_collision_precheck(nav, actions: Sequence[A.Action]) -> dict:
             mid_query = _query_pose(nav, A.pose_at_arc(actions, mid))
             excluded_source = _excluded_geometry_source(mid_query)
             if excluded_source is not None:
-                return {
-                    "authority": authority,
-                    **authority_fields,
-                    "collision": None,
-                    "collision_source": excluded_source,
-                    "first_contact_arc_m": None,
-                    "minimum_clearance_m": None,
-                }
+                return PhysicalPathTrace(
+                    authority=authority, collision=None,
+                    collision_source=excluded_source,
+                    first_contact_arc_m=None, stop_arc_m=None,
+                    minimum_clearance_m=None,
+                    geometry_authority_sha256=authority_digest)
             if mid_query.navigable:
                 lo = mid
             else:
                 hi = mid
                 contact_query = mid_query
-        result = {
-            "authority": authority,
-            **authority_fields,
-            "collision": True,
-            "first_contact_arc_m": float(hi),
-            "minimum_clearance_m": 0.0,
-        }
         source = getattr(contact_query, "geometry_source", None)
-        if source is not None:
-            result["collision_source"] = source
-        return result
-    return {"authority": authority, **authority_fields, "collision": False,
-            "first_contact_arc_m": None,
-            "minimum_clearance_m": (
-                float(min(clearances)) if clearances else
-                max(0.0, float(
-                    _query_pose(nav, (0.0, 0.0, 0.0)).clearance_m)))}
+        return PhysicalPathTrace(
+            authority=authority, collision=True, collision_source=source,
+            first_contact_arc_m=float(hi), stop_arc_m=float(lo),
+            minimum_clearance_m=0.0,
+            geometry_authority_sha256=authority_digest)
+    minimum_clearance = (
+        float(min(clearances)) if clearances else
+        max(0.0, float(
+            _query_pose(nav, (0.0, 0.0, 0.0)).clearance_m)))
+    return PhysicalPathTrace(
+        authority=authority, collision=False, collision_source=None,
+        first_contact_arc_m=None, stop_arc_m=None,
+        minimum_clearance_m=minimum_clearance,
+        geometry_authority_sha256=authority_digest)
 
 
-def physical_rollout(nav, actions: Sequence[A.Action],
-                     checkpoints=config.CHECKPOINT_PROGRESS) -> dict:
-    """Roll a circular footprint through a radius-conditioned navigation oracle."""
-    authority = getattr(nav, "authority", "unavailable") if nav is not None else "unavailable"
-    authority_fields = _geometry_authority_fields(nav, authority)
+def physical_path_trace(
+        nav, actions: Sequence[A.Action]) -> PhysicalPathTrace:
+    """Walk and refine a path without materializing rollout checkpoints."""
+    authority = (
+        getattr(nav, "authority", "unavailable")
+        if nav is not None else "unavailable")
     if nav is None or authority == "unavailable":
+        return PhysicalPathTrace(
+            authority="unavailable", collision=None, collision_source=None,
+            first_contact_arc_m=None, stop_arc_m=None,
+            minimum_clearance_m=None, geometry_authority_sha256=None)
+    samples = A.sample_path(actions, config.MARCH_STEP_M)
+    queries = _query_many(nav, [
+        (x, z, math.degrees(heading_rad))
+        for x, z, heading_rad, _arc in samples])
+    return _physical_path_trace_from_queries(nav, actions, samples, queries)
+
+
+def physical_path_traces(
+        nav, action_programs: Sequence[Sequence[A.Action]],
+        ) -> list[PhysicalPathTrace]:
+    """Batch coarse geometry for independent paths on one bound B1K nav."""
+    programs = list(action_programs)
+    authority = (
+        getattr(nav, "authority", "unavailable")
+        if nav is not None else "unavailable")
+    if nav is None or authority == "unavailable":
+        return [physical_path_trace(nav, actions) for actions in programs]
+    sample_groups = [
+        A.sample_path(actions, config.MARCH_STEP_M) for actions in programs]
+    poses = [
+        (x, z, math.degrees(heading_rad))
+        for samples in sample_groups
+        for x, z, heading_rad, _arc in samples
+    ]
+    queries = _query_many(nav, poses)
+    traces = []
+    offset = 0
+    for actions, samples in zip(programs, sample_groups):
+        end = offset + len(samples)
+        traces.append(_physical_path_trace_from_queries(
+            nav, actions, samples, queries[offset:end]))
+        offset = end
+    return traces
+
+
+def physical_collision_precheck(
+        nav, actions: Sequence[A.Action], *,
+        path_trace: PhysicalPathTrace | None = None) -> dict:
+    """Return collision and clearance fields needed by candidate gates."""
+    trace = path_trace or physical_path_trace(nav, actions)
+    return trace.precheck()
+
+
+def physical_rollout(
+        nav, actions: Sequence[A.Action],
+        checkpoints=config.CHECKPOINT_PROGRESS, *,
+        path_trace: PhysicalPathTrace | None = None) -> dict:
+    """Roll a circular footprint through a radius-conditioned navigation oracle."""
+    trace = path_trace or physical_path_trace(nav, actions)
+    authority = trace.authority
+    authority_fields = (
+        {"geometry_authority_sha256": trace.geometry_authority_sha256}
+        if trace.geometry_authority_sha256 is not None else {})
+    if trace.collision is None:
         return _unavailable_physical_rollout(
-            "unavailable", actions, checkpoints)
+            authority, actions, checkpoints,
+            geometry_source=trace.collision_source,
+            geometry_authority_fields=authority_fields)
     nominal_arc = A.total_forward_m(actions)
     nominal_pose = A.pose_at_progress(actions, 1.0)
-    samples = A.sample_path(actions, config.MARCH_STEP_M)
-    collision = False
-    contact_arc = None
-    stop_arc = None
-    previous_arc = 0.0
-    clearances = []
-    poses = [
-        (x, z, math.degrees(heading_rad))
-        for x, z, heading_rad, _arc in samples
-    ]
-    queries = _query_many(nav, poses)
-    collision_source = None
-    for sample, query in zip(samples, queries):
-        _x, _z, _heading_rad, arc = sample
-        excluded_source = _excluded_geometry_source(query)
-        if excluded_source is not None:
-            return _unavailable_physical_rollout(
-                authority, actions, checkpoints,
-                geometry_source=excluded_source,
-                geometry_authority_fields=authority_fields)
-        if query.navigable:
-            clearances.append(max(0.0, float(query.clearance_m)))
-            previous_arc = arc
-            continue
-        collision = True
-        lo, hi = previous_arc, arc
-        contact_query = query
-        for _ in range(config.CONTACT_REFINE_ITERS):
-            mid = (lo + hi) / 2.0
-            mid_query = _query_pose(nav, A.pose_at_arc(actions, mid))
-            excluded_source = _excluded_geometry_source(mid_query)
-            if excluded_source is not None:
-                return _unavailable_physical_rollout(
-                    authority, actions, checkpoints,
-                    geometry_source=excluded_source,
-                    geometry_authority_fields=authority_fields)
-            if mid_query.navigable:
-                lo = mid
-            else:
-                hi = mid
-                contact_query = mid_query
-        contact_arc = hi
-        stop_arc = lo
-        collision_source = getattr(
-            contact_query, "geometry_source", None)
-        clearances.append(0.0)
-        break
+    collision = bool(trace.collision)
+    contact_arc = trace.first_contact_arc_m
+    stop_arc = trace.stop_arc_m
+    collision_source = trace.collision_source
     contact_index = contact_local = None
     stop_progress = 1.0
     if collision:
@@ -336,6 +391,8 @@ def physical_rollout(nav, actions: Sequence[A.Action],
                 "configuration_boundary_distance_m"),
             "surface_protocol": hit.get("surface_protocol"),
         }
+        if "obstacle_identity" in hit:
+            contact["obstacle_identity"] = hit["obstacle_identity"]
         if "gaussian_index" in hit:
             contact["geometry_element_index"] = int(
                 hit["gaussian_index"])
@@ -343,10 +400,7 @@ def physical_rollout(nav, actions: Sequence[A.Action],
         "authority": authority,
         **authority_fields,
         "collision": bool(collision),
-        "minimum_clearance_m": (
-            float(min(clearances)) if clearances else
-            max(0.0, float(
-                _query_pose(nav, (0, 0, 0)).clearance_m))),
+        "minimum_clearance_m": trace.minimum_clearance_m,
         "first_contact_arc_m": (
             float(contact_arc) if contact_arc is not None else None),
         "contact_action_index": contact_index,
@@ -371,57 +425,6 @@ def physical_rollout(nav, actions: Sequence[A.Action],
         },
         "checkpoints": cps,
         "physical": physical_result,
-    }
-
-
-def target_view_stats(frame, target_id: int) -> dict:
-    choose = np.asarray(frame.pts_sem) == int(target_id)
-    uv = np.asarray(frame.pts_uv)[choose]
-    if len(uv):
-        uv = np.unique(uv.astype(np.int64), axis=0)
-        valid = ((uv[:, 0] >= 0) & (uv[:, 0] < frame.depth.shape[1]) &
-                 (uv[:, 1] >= 0) & (uv[:, 1] < frame.depth.shape[0]))
-        uv = uv[valid]
-    count = int(len(uv))
-    visible = count >= config.TARGET_VISIBLE_MIN_PX
-    if count:
-        bbox = [int(uv[:, 0].min()), int(uv[:, 1].min()),
-                int(uv[:, 0].max()), int(uv[:, 1].max())]
-        center = [float(uv[:, 0].mean()), float(uv[:, 1].mean())]
-        depths = frame.depth[uv[:, 1], uv[:, 0]]
-        depths = depths[np.isfinite(depths) & (depths > 0)]
-        median_depth = float(np.median(depths)) if len(depths) else None
-    else:
-        bbox = center = median_depth = None
-    return {"target_instance_id": int(target_id), "visible": bool(visible),
-            "pixel_count": count,
-            "image_area_ratio": count / float(frame.depth.size),
-            "bbox_xyxy": bbox, "center_xy": center, "median_depth_m": median_depth}
-
-
-def future_view_rollout(frame, checkpoints: Sequence[dict], target_ids) -> dict:
-    """Record initial target evidence without rendering a second C1 route.
-
-    Counterfactual C1 obtains its terminal observations exclusively from
-    source-bound ``terminal_rgb_asset`` atoms.  The consequence record keeps
-    the initial target snapshot used by existing A/B validation, but no longer
-    contains an executable terminal-semantic selector.
-    """
-    if not checkpoints:
-        raise ValueError("future-view rollout requires an initial checkpoint")
-    initial = checkpoints[0]
-    return {
-        "status": "not_computed",
-        "checkpoints": [{
-            "requested_progress": initial["requested_progress"],
-            "realized_progress": initial["realized_progress"],
-            "targets": [
-                target_view_stats(frame, target_id)
-                for target_id in target_ids
-            ],
-        }],
-        "objects_entering_view": [],
-        "objects_leaving_view": [],
     }
 
 

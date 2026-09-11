@@ -61,9 +61,15 @@ def test_pose_sampling_rejects_only_no_finite_depth_and_continues():
     """A no-hit RTX view is a failed pose, not a failed scene process."""
     from pipeline.b1k_sim import B1KSimSession, NoFiniteDepthObservation
 
+    nav = SimpleNamespace(
+        authority="b1k_geometry", geometry_authority_sha256="a" * 64,
+        query_many=lambda poses: [SimpleNamespace(
+            navigable=True, clearance_m=1.0, geometry_source=None)
+            for _pose in poses])
     session = object.__new__(B1KSimSession)
     session._geometry = SimpleNamespace(
-        sample_position=lambda *_args, **_kwargs: np.zeros(3))
+        sample_position=lambda *_args, **_kwargs: np.zeros(3),
+        bind=lambda *_args, **_kwargs: nav)
     session.render = lambda *_args, **_kwargs: (
         (_ for _ in ()).throw(NoFiniteDepthObservation(
             "B1K linear depth contains no finite hit")))
@@ -82,6 +88,35 @@ def test_pose_sampling_rejects_only_no_finite_depth_and_continues():
         session.sample_random_pose(
             np.random.default_rng(0), [0.2], yaws=[0.0], max_tries=1,
             on_reject=rejected.append)
+
+
+def test_pose_sampling_skips_pose_with_no_minimum_action_support():
+    """A pose no public action can leave must not spend an RTX render."""
+    from pipeline.b1k_sim import B1KSimSession
+
+    class UnsupportedNav:
+        authority = "b1k_geometry"
+        geometry_authority_sha256 = "a" * 64
+
+        def query_many(self, poses):
+            return [SimpleNamespace(
+                navigable=False, clearance_m=0.0,
+                geometry_source="unsupported_floor") for _pose in poses]
+
+    session = object.__new__(B1KSimSession)
+    session._geometry = SimpleNamespace(
+        sample_position=lambda *_args, **_kwargs: np.zeros(3),
+        bind=lambda *_args, **_kwargs: UnsupportedNav())
+    session.render = lambda *_args, **_kwargs: pytest.fail(
+        "unsupported pose reached RTX render")
+    rejected = []
+
+    result = session.sample_random_pose(
+        np.random.default_rng(0), [0.2], yaws=[0.0], max_tries=2,
+        on_reject=rejected.append)
+
+    assert result is None
+    assert rejected == ["action_support_unavailable"] * 2
 
 
 @pytest.mark.parametrize(
@@ -235,41 +270,6 @@ def test_completed_runner_output_is_bound_to_outer_child_contract(
         runner._validate_completed_output(output, scene_id, expected=contract)
 
 
-def test_completed_runner_requires_nonempty_supported_formal_scope(
-        tmp_path, monkeypatch):
-    """Completed reuse needs records and an authenticated supported scope."""
-    from scripts import run_b1k_collection_shard as runner
-    from tests.test_pl_b1k_pilot_tools import (
-        _seal_collection_output, _write_completed_collection_output,
-    )
-
-    scene_id = "scene-0"
-    output = tmp_path / "collection" / scene_id
-    manifest = tmp_path / "source.json"
-    manifest.write_text("{}")
-    contract = runner._expected_child_contract(
-        scene_id=scene_id, output=output, data_root=tmp_path,
-        source_manifest=manifest, shard_id="shard",
-        revision="a" * 40, code_dirty=False)
-    _write_completed_collection_output(output, scene_id, contract=contract)
-
-    marker_path = output / "collection_finalization.json"
-    marker = json.loads(marker_path.read_text())
-    marker["record_count"] = 0
-    marker_path.write_text(json.dumps(marker))
-    with pytest.raises(ValueError, match="no source-valid records"):
-        runner._validate_completed_output(output, scene_id, expected=contract)
-
-    _seal_collection_output(output, status="completed", record_count=6)
-    metadata_path = output / "run_meta.json"
-    metadata = json.loads(metadata_path.read_text())
-    metadata["formal_action_length_coverage"]["scope"] = "unsupported"
-    metadata_path.write_text(json.dumps(metadata))
-    _seal_collection_output(output, status="completed", record_count=6)
-    with pytest.raises(ValueError, match="scope"):
-        runner._validate_completed_output(output, scene_id, expected=contract)
-
-
 @pytest.mark.parametrize(("name", "partial"), (
     ("_validate_completed_output", False),
     ("_validate_partial_output", True),
@@ -336,148 +336,16 @@ def test_collection_runner_rejects_stale_effective_collect_policy(
     assert "child contract" in progress["failed_scenes"][0]["error"]
 
 
-def test_probe_parent_isolates_scenes_and_durably_continues(
-        tmp_path, monkeypatch):
-    """One native probe child crash cannot abort diagnostics for later scenes."""
-    from scripts import probe_b1k
-
-    scene_ids = ["scene-0", "scene-1", "scene-2"]
-    monkeypatch.setattr(
-        probe_b1k, "discover_b1k_train_scenes",
-        lambda *_args: [SimpleNamespace(scene_id=value) for value in scene_ids])
-    calls = []
-
-    def fake_child(command, *, timeout_s):
-        calls.append((list(command), timeout_s))
-        scene_id = command[command.index("--_child-scene") + 1]
-        if scene_id == scene_ids[0]:
-            return -11
-        output_dir = Path(command[command.index("--output-dir") + 1])
-        output_dir.mkdir(parents=True, exist_ok=True)
-        (output_dir / f"{scene_id}.json").write_text(json.dumps({
-            "schema": "b1k-adapter-probe.v1",
-            "scene_id": scene_id,
-            "smoke_pass": True,
-            "semantic_resolution": {"resolution_rate": 0.5},
-            "collision_visual": {"status": "completed"},
-        }))
-        return 0
-
-    monkeypatch.setattr(probe_b1k, "_run_isolated_probe_child", fake_child)
-    args = SimpleNamespace(
-        data_root=str(tmp_path), source_manifest=str(tmp_path / "source.json"),
-        output_dir=str(tmp_path / "probe"), scenes=scene_ids, seed=5,
-        semantic_sample_count=32, scene_timeout_s=1200,
-        _child_scene=None)
-
-    result = probe_b1k._run_parent(args)
-
-    assert result == 1
-    assert [command[command.index("--_child-scene") + 1]
-            for command, _timeout in calls] == scene_ids
-    assert all(timeout == 1200 for _command, timeout in calls)
-    summary = json.loads(
-        (tmp_path / "probe" / "probe-summary.json").read_text())
-    assert summary["completed_scene_ids"] == scene_ids[1:]
-    assert summary["failed_scenes"] == [{
-        "scene_id": scene_ids[0],
-        "returncode": -11,
-        "error": "probe child returned nonzero",
-    }]
-    assert summary["complete"] is False
-
-
-def test_probe_child_closes_scene_before_process_shutdown(tmp_path, monkeypatch):
-    """Successful cleanup removes sensor/scene before SimulationApp.close."""
-    from pipeline import b1k_probe, b1k_sim
-    from scripts import probe_b1k
-
-    events = []
-
-    class Session:
-        def __init__(self, *_args, **_kwargs):
-            events.append("open")
-
-        def close(self):
-            events.append("close")
-
-    monkeypatch.setattr(
-        probe_b1k, "discover_b1k_train_scenes",
-        lambda *_args: [SimpleNamespace(scene_id="scene-0")])
-    monkeypatch.setattr(b1k_sim, "B1KSimSession", Session)
-    monkeypatch.setattr(
-        b1k_probe, "run_adapter_probe",
-        lambda *_args, **_kwargs: events.append("probe") or {
-            "schema": "b1k-adapter-probe.v1",
-            "scene_id": "scene-0", "smoke_pass": True,
-            "semantic_resolution": {"resolution_rate": 1.0},
-            "collision_visual": {"status": "completed"},
-        })
-    monkeypatch.setattr(
-        probe_b1k, "_shutdown", lambda: events.append("shutdown"))
-    args = SimpleNamespace(
-        data_root=str(tmp_path), source_manifest=str(tmp_path / "source.json"),
-        output_dir=str(tmp_path / "probe"), scenes=None, seed=5,
-        semantic_sample_count=32, scene_timeout_s=1200,
-        _child_scene="scene-0")
-
-    assert probe_b1k._run_scene_child(args, hard_exit=lambda _status: None) == 0
-    assert events == ["open", "probe", "close", "shutdown"]
-
-
-def test_probe_child_fail_closes_required_cspace_query(tmp_path, monkeypatch):
-    """A required C-space failure is blocked, not a successful diagnostic."""
-    from pipeline import b1k_probe, b1k_sim
-    from scripts import probe_b1k
-
-    events = []
-
-    class Session:
-        scene_authority_sha256 = "a" * 64
-
-        def __init__(self, *_args, **_kwargs):
-            events.append("open")
-
-        def close(self):
-            events.append("close")
-
-    monkeypatch.setattr(
-        probe_b1k, "discover_b1k_train_scenes",
-        lambda *_args: [SimpleNamespace(scene_id="scene-0")])
-    monkeypatch.setattr(b1k_sim, "B1KSimSession", Session)
-    monkeypatch.setattr(
-        b1k_probe, "run_adapter_probe",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            b1k_probe.B1KProbeBlockingError("C-space query failed")))
-    monkeypatch.setattr(
-        probe_b1k, "_shutdown", lambda: events.append("shutdown"))
-    exits = []
-    args = SimpleNamespace(
-        data_root=str(tmp_path), source_manifest=str(tmp_path / "source.json"),
-        output_dir=str(tmp_path / "probe"), scenes=None, seed=5,
-        semantic_sample_count=32, scene_timeout_s=1200,
-        _child_scene="scene-0")
-
-    assert probe_b1k._run_scene_child(args, hard_exit=exits.append) == 1
-    assert exits == [1]
-    assert events == ["open"]
-    result = json.loads((tmp_path / "probe" / "scene-0.json").read_text())
-    assert result["blocked"] == {
-        "stage": "runtime_geometry_or_cspace",
-        "error_type": "B1KProbeBlockingError",
-        "error": "C-space query failed",
-    }
-
-
 def test_isolated_supervisors_reap_children_on_keyboard_interrupt(
         tmp_path, monkeypatch):
     """Ctrl-C cannot orphan a start-new-session OmniGibson child."""
-    from scripts import build_b1k_source_manifest, probe_b1k
+    from pipeline import b1k_process
+    from scripts import build_b1k_source_manifest
     from scripts import run_b1k_collection_shard
 
     kills = []
     monkeypatch.setattr(
-        probe_b1k.os, "killpg",
+        b1k_process.os, "killpg",
         lambda process_id, sig: kills.append((process_id, sig)))
 
     class InterruptedProcess:
@@ -493,7 +361,6 @@ def test_isolated_supervisors_reap_children_on_keyboard_interrupt(
             return -signal.SIGTERM
 
     cases = [
-        (probe_b1k, probe_b1k._run_isolated_probe_child, {}),
         (build_b1k_source_manifest,
          build_b1k_source_manifest._run_isolated_scene_child, {}),
         (run_b1k_collection_shard,
@@ -510,9 +377,9 @@ def test_isolated_supervisors_reap_children_on_keyboard_interrupt(
         with pytest.raises(KeyboardInterrupt):
             run_child(["fake-child"], timeout_s=1200, **extra)
 
-    assert kills == [(4321, signal.SIGTERM)] * 3
+    assert kills == [(4321, signal.SIGTERM)] * 2
     assert [process.waits for process in processes] == [
-        [1200.0, 10], [1200.0, 10], [30.0, 10]]
+        [1200.0, 10], [30.0, 10]]
 
 
 def test_derive_scene_persists_runtime_initialization_failure(

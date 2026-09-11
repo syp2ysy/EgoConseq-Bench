@@ -13,8 +13,10 @@ calibration path is testable without a simulator.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import fcntl
 import hashlib
 import json
+from typing import Iterable, Sequence
 
 import numpy as np
 
@@ -152,8 +154,7 @@ def visible_floor_ratio(plane, points_local, pixel_count) -> float:
     return float((distance <= VISIBLE_FLOOR_BAND_M).sum()) / float(count)
 
 
-def pose_is_diverse(position, yaw_rad: float, exclusions, *,
-                    min_position_m: float, min_yaw_deg: float) -> bool:
+def pose_is_diverse(position, yaw_rad: float, exclusions) -> bool:
     """Reject a pose only when position and heading both repeat a prior pose."""
     candidate = np.asarray(position, dtype=np.float64)
     for prior in exclusions:
@@ -161,16 +162,56 @@ def pose_is_diverse(position, yaw_rad: float, exclusions, *,
         distance = float(np.linalg.norm(candidate - prior_position))
         yaw_delta = abs(_wrap_deg(np.rad2deg(
             float(yaw_rad) - float(prior["yaw_rad"]))))
-        if (distance < float(min_position_m) and
-                yaw_delta < float(min_yaw_deg)):
+        if (distance < config.POSE_DIVERSITY_POSITION_M and
+                yaw_delta < config.POSE_DIVERSITY_YAW_DEG):
             return False
     return True
 
 
+def pose_diversity_policy() -> dict[str, float | str]:
+    """Describe the one pose-diversity rule used by collection and export."""
+    return {
+        "predicate": "distance-and-yaw-strict",
+        "min_position_m": config.POSE_DIVERSITY_POSITION_M,
+        "min_yaw_deg": config.POSE_DIVERSITY_YAW_DEG,
+    }
+
+
+def pose_diverse_representative_ids(
+        rows: Iterable[
+            tuple[str, str, tuple[str, str], Sequence[float], float]]) -> set[str]:
+    """Select stable pose-grid representatives within dataset/scene groups."""
+    grouped = {}
+    for identity, order_key, group, position, yaw_rad in rows:
+        grouped.setdefault(tuple(group), []).append((
+            str(order_key), str(identity), list(position), float(yaw_rad)))
+    selected = set()
+    for group in sorted(grouped):
+        representatives = []
+        for _order_key, identity, position, yaw_rad in sorted(grouped[group]):
+            if pose_is_diverse(position, yaw_rad, representatives):
+                selected.add(identity)
+                representatives.append({
+                    "position": position,
+                    "yaw_rad": yaw_rad,
+                })
+    return selected
+
+
 def load_pose_exclusions(path) -> dict:
-    """Read the collector's pose-exclusion payload, or {} when absent."""
+    """Read historical records directly, or an existing pose-only seed."""
     if not path:
         return {}
+    if str(path).endswith(".jsonl"):
+        scenes = {}
+        with open(path, "rb") as handle:
+            fcntl.flock(handle, fcntl.LOCK_SH)
+            for line in handle:
+                if not line.endswith(b"\n"):
+                    break  # An interrupted append is not a committed pose.
+                record = json.loads(line)
+                scenes.setdefault(str(record["scene_id"]), []).append(record["pose"])
+        return scenes
     with open(path) as handle:
         payload = json.load(handle)
     if payload.get("schema_version") != "egoconseq.pose_exclusions.v1":

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -11,19 +12,15 @@ from types import SimpleNamespace
 import pytest
 
 from pipeline import (
-    background_capacity, background_collection, collection_runtime,
+    background_capacity, background_collection, background_scheduler,
+    collection_runtime,
 )
 from scripts import run_background_collection
 from tests._synthetic import capacity_evidence
 
 
 TASKS = (
-    "A1_collision",
-    "A2_collision_step_grounding",
-    "A3_contact_object",
-    "B1_endpoint_distance",
-    "B2_endpoint_direction",
-    "C1_future_view_selection",
+    "A1", "A2", "A3", "A4", "B1", "B2", "C1",
 )
 
 
@@ -55,12 +52,9 @@ def _synthetic_capacity_record_validation(monkeypatch):
                           for canary in row["canary_scenes"]]
                 for dataset, row in value["datasets"].items()},
         }, object()))
-    monkeypatch.setattr(
-        background_capacity, "_validate_candidate_artifact",
-        lambda *_args, **_kwargs: None)
-
-
-def _manifest(tmp_path: Path, *, rounds=1) -> dict:
+def _manifest(tmp_path: Path, *, rounds=1, seed_pose_exclusions=None,
+              baseline_checkpoint=None, target_pose_diverse_frames=None,
+              collection_seed=None, saturated_datasets=()) -> dict:
     r2r_scenes = [f"r2r-{index}" for index in range(8)]
     gs_scenes = [f"gs-{index}" for index in range(8)]
     b1k_scenes = [f"b1k-{index}" for index in range(12)]
@@ -75,6 +69,11 @@ def _manifest(tmp_path: Path, *, rounds=1) -> dict:
         "accepted": [{"scene_id": scene_id} for scene_id in b1k_scenes],
         "excluded": [{"scene_id": "excluded"}],
     }
+    optional = {}
+    if collection_seed is not None:
+        optional["collection_seed"] = collection_seed
+    if saturated_datasets:
+        optional["saturated_datasets"] = saturated_datasets
     return background_collection.build_manifest(
         revision="a" * 40,
         output_root=tmp_path / "run",
@@ -102,20 +101,25 @@ def _manifest(tmp_path: Path, *, rounds=1) -> dict:
         b1k_source_scene_ids=b1k_scenes,
         capacity_profile=capacity_profile,
         capacity_profile_sha256=capacity_profile["sha256"],
+        seed_pose_exclusions=seed_pose_exclusions,
+        baseline_checkpoint=baseline_checkpoint,
+        target_pose_diverse_frames=target_pose_diverse_frames,
         rounds=rounds,
+        **optional,
     )
 
 
 def test_manifest_schedules_every_scene_as_one_transaction(tmp_path):
     manifest = _manifest(tmp_path)
 
-    assert manifest["schema"] == \
-        "egoconseq.three-dataset-background-controller.v3"
+    assert manifest["schema"] == background_collection.CONTROLLER_SCHEMA
     assert manifest["revision"] == "a" * 40
-    assert manifest["quota"]["r2r"]["min_total_items"] == 6000
-    assert manifest["quota"]["r2r"]["min_unique_frames"] == 15000
-    assert manifest["quota"]["b1k"]["min_unique_frames"] == 6000
-    assert len(manifest["rounds"]) == 7
+    assert manifest["quota"]["r2r"]["task_totals"] == \
+        dict(background_collection.seen_spec.DATASET_TASK_TOTALS["r2r"])
+    assert manifest["quota"]["gs"]["supported_tasks"] == [
+        "A1", "A2", "A4", "B2", "C1"]
+    assert len(manifest["rounds"]) == 12
+    gpu_by_dataset = {"gs": 0, "b1k": 1, "r2r": 2}
     scheduled = {dataset: [] for dataset in ("r2r", "gs", "b1k")}
     for round_value in manifest["rounds"]:
         jobs = round_value["jobs"]
@@ -124,6 +128,7 @@ def test_manifest_schedules_every_scene_as_one_transaction(tmp_path):
         assert len({job["output_dir"] for job in jobs}) == len(jobs)
         for job in jobs:
             assert len(job["scenes"]) == 1
+            assert job["gpu_id"] == gpu_by_dataset[job["dataset"]]
             scheduled[job["dataset"]].extend(job["scenes"])
             command = job["command"]
             assert "--poses-per-scene" in command
@@ -158,6 +163,138 @@ def test_manifest_schedules_every_scene_as_one_transaction(tmp_path):
     assert "scene_wallclock_s" not in manifest["collection"]
 
 
+def test_continuous_manifest_freezes_one_catalog_pass(tmp_path):
+    manifest = _manifest(tmp_path, rounds=0)
+
+    assert manifest["collection"]["catalog_passes"] == 0
+    assert {row["catalog_pass"] for row in manifest["rounds"]} == {0}
+    scheduled = {dataset: [] for dataset in ("r2r", "gs", "b1k")}
+    for round_value in manifest["rounds"]:
+        for job in round_value["jobs"]:
+            scheduled[job["dataset"]].extend(job["scenes"])
+    assert scheduled == manifest["scene_catalog"]
+    background_collection.validate_manifest(manifest)
+
+
+def test_continuous_job_derivation_is_deterministic(tmp_path):
+    manifest = _manifest(tmp_path, rounds=0)
+
+    first = background_collection.continuous_job(
+        manifest, "gs", catalog_pass=1, scene_index=0)
+    second = background_collection.continuous_job(
+        manifest, "gs", catalog_pass=1, scene_index=0)
+
+    assert first == second
+    assert first["job_id"] == "gs-r08-g0"
+    assert first["round_index"] == 8
+    assert first["catalog_pass"] == 1
+    assert first["scenes"] == ["gs-0"]
+    assert first["pose_exclusions_path"].endswith(
+        "/gs/gs-0-pass01.json")
+    assert first["transaction_binding"]["seed"] == 20260811 + 8 * 101
+
+
+def test_continuous_scheduler_retries_scenes_after_zero_yield_pass(tmp_path):
+    manifest = _manifest(tmp_path, rounds=0)
+    state = background_collection.initial_state(manifest)
+    state["dataset_cursors"]["gs"] = {
+        "catalog_pass": 1, "scene_index": 0}
+    state["exhausted_datasets"] = ["b1k", "r2r"]
+    for scene_index in range(8):
+        job = background_collection.continuous_job(
+            manifest, "gs", catalog_pass=0, scene_index=scene_index)
+        state["jobs"][job["job_id"]] = {
+            "dataset": "gs",
+            "scene_id": f"gs-{scene_index}",
+            "catalog_pass": 0,
+            "status": "completed_zero_yield",
+            "catalog_status": "zero_yield",
+        }
+
+    ready = background_scheduler.next_continuous_jobs(
+        manifest, state,
+        job_factory=background_collection.continuous_job)
+
+    assert [job["job_id"] for job in ready] == ["gs-r08-g0"]
+    assert state["exhausted_datasets"] == ["b1k", "r2r"]
+
+
+def test_continuous_manifest_binds_seed_and_starts_saturated_dataset_exhausted(
+        tmp_path):
+    seeds = {}
+    for dataset, representatives, records in (
+            ("r2r", 4000, 4200), ("gs", 3000, 3200),
+            ("b1k", 2500, 2700)):
+        path = tmp_path / f"{dataset}-seed.json"
+        path.write_text(json.dumps({
+            "schema_version": "egoconseq.pose_exclusions.v1",
+            "scenes": {},
+        }))
+        seeds[dataset] = {
+            "path": str(path.resolve()),
+            "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+            "representative_count": representatives,
+            "record_count": records,
+        }
+    checkpoint = tmp_path / "checkpoint.json"
+    checkpoint.write_text("{}")
+    manifest = _manifest(
+        tmp_path, rounds=0, collection_seed=700,
+        saturated_datasets=("gs",), seed_pose_exclusions=seeds,
+        baseline_checkpoint={
+            "path": str(checkpoint.resolve()),
+            "sha256": hashlib.sha256(checkpoint.read_bytes()).hexdigest(),
+        })
+
+    assert manifest["schema"] == background_collection.CONTROLLER_SCHEMA
+    assert manifest["collection"]["seed_base"] == 700
+    assert manifest["collection"]["saturated_datasets"] == ["gs"]
+    assert background_collection.initial_state(manifest)[
+        "exhausted_datasets"] == ["gs"]
+    first = background_collection.continuous_job(
+        manifest, "b1k", catalog_pass=1, scene_index=0)
+    assert first["transaction_binding"]["seed"] == 700 + 12 * 101 + 1
+
+
+def test_continuous_state_validates_a_derived_runtime_job(tmp_path):
+    manifest = _manifest(tmp_path, rounds=0)
+    state = background_collection.initial_state(manifest)
+    assert state["dataset_cursors"] == {
+        dataset: {"catalog_pass": 0, "scene_index": 0}
+        for dataset in ("r2r", "gs", "b1k")
+    }
+    job = background_collection.continuous_job(
+        manifest, "gs", catalog_pass=1, scene_index=0)
+    state["status"] = "running"
+    state["current_round"] = job["round_index"]
+    state["jobs"][job["job_id"]] = {
+        "job_id": job["job_id"],
+        "dataset": "gs",
+        "scene_id": "gs-0",
+        "gpu_id": 0,
+        "round_index": job["round_index"],
+        "catalog_pass": 1,
+        "scene_index": 0,
+        "pid": 99,
+        "status": "running",
+        "attempt": 1,
+        "started_time_unix": 1.0,
+        "finished_time_unix": None,
+        "durable_records": 0,
+    }
+
+    background_collection.validate_state(manifest, state)
+
+
+def test_continuous_state_allows_terminal_scene_exhaustion(tmp_path):
+    manifest = _manifest(tmp_path, rounds=0)
+    state = background_collection.initial_state(manifest)
+    state["status"] = "capacity_shortfall"
+    state["exhausted_datasets"] = list(background_collection.DATASETS)
+
+    background_collection.validate_state(manifest, state)
+
+
 def test_revisit_jobs_bind_the_existing_pose_exclusion_protocol(tmp_path):
     manifest = _manifest(tmp_path, rounds=2)
 
@@ -173,6 +310,44 @@ def test_revisit_jobs_bind_the_existing_pose_exclusion_protocol(tmp_path):
                 f"/{job['dataset']}/{job['scenes'][0]}-pass01.json")
             assert command[command.index("--pose-exclusions") + 1] == path
             assert job["transaction_binding"]["pose_exclusions_path"] == path
+
+
+def test_manifest_binds_seed_exclusions_from_pass_zero(tmp_path):
+    seeds = {}
+    for dataset in ("r2r", "gs", "b1k"):
+        path = tmp_path / f"{dataset}-seed.json"
+        path.write_text(json.dumps({
+            "schema_version": "egoconseq.pose_exclusions.v1",
+            "scenes": {},
+        }))
+        seeds[dataset] = {
+            "path": str(path.resolve()),
+            "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+            "representative_count": 0,
+            "record_count": 0,
+        }
+
+    checkpoint = tmp_path / "checkpoint.json"
+    checkpoint.write_text("{}")
+    baseline = {
+        "path": str(checkpoint.resolve()),
+        "sha256": hashlib.sha256(checkpoint.read_bytes()).hexdigest(),
+    }
+    manifest = _manifest(
+        tmp_path, rounds=2, seed_pose_exclusions=seeds,
+        baseline_checkpoint=baseline, target_pose_diverse_frames=40000)
+
+    assert manifest["seed_pose_exclusions"] == seeds
+    assert manifest["baseline_checkpoint"] == baseline
+    assert manifest["target_pose_diverse_frames"] == 40000
+    for round_value in manifest["rounds"]:
+        for job in round_value["jobs"]:
+            path = job["pose_exclusions_path"]
+            assert path.endswith(
+                f"/{job['dataset']}/{job['scenes'][0]}-"
+                f"pass{job['catalog_pass']:02d}.json")
+            assert job["command"][
+                job["command"].index("--pose-exclusions") + 1] == path
 
 
 def test_manifest_rejects_scene_reuse_and_nonclean_revision(tmp_path):
@@ -231,11 +406,45 @@ def test_start_round_launches_one_process_per_gpu_and_persists_state(tmp_path):
     assert set(processes) == {
         job["job_id"] for job in manifest["rounds"][0]["jobs"]}
     assert {value["pid"] for value in state["jobs"].values()} == {
-        1001, 1002, 1003, 1004}
+        1001, 1002, 1003}
     assert {value["status"] for value in state["jobs"].values()} == {
         "running"}
-    assert len({value["gpu_id"] for value in state["jobs"].values()}) == 4
+    assert len({value["gpu_id"] for value in state["jobs"].values()}) == 3
     assert all(call[1]["PYTHONUNBUFFERED"] == "1" for call in calls)
+
+
+def test_scheduler_retires_only_normally_exhausted_scenes(tmp_path):
+    manifest = _manifest(tmp_path, rounds=2)
+    state = background_collection.initial_state(manifest)
+    pass_zero = background_scheduler.jobs_for_pass(manifest, 0)
+    pass_one = background_scheduler.jobs_for_pass(manifest, 1)
+    target = pass_one[0]
+    previous = next(
+        job for job in pass_zero
+        if (job["dataset"], job["scenes"][0]) ==
+        (target["dataset"], target["scenes"][0]))
+    for job in pass_zero:
+        state["jobs"][job["job_id"]] = {
+            "status": "completed", "catalog_status": "completed"}
+    state["jobs"][previous["job_id"]] = {
+        "status": "completed_zero_yield", "catalog_status": "zero_yield"}
+
+    ready = background_scheduler.next_jobs(
+        manifest, state, catalog_pass=1)
+
+    assert target["job_id"] not in {job["job_id"] for job in ready}
+    for job in pass_one[1:]:
+        state["jobs"][job["job_id"]] = {
+            "status": "completed", "catalog_status": "completed"}
+    assert background_scheduler.catalog_pass_complete(
+        manifest, state, catalog_pass=1) is True
+
+    state["jobs"][previous["job_id"]]["status"] = "failed_zero_yield"
+    assert background_scheduler.catalog_pass_complete(
+        manifest, state, catalog_pass=1) is False
+    ready = background_scheduler.next_jobs(
+        manifest, state, catalog_pass=1)
+    assert target["job_id"] in {job["job_id"] for job in ready}
 
 
 def test_gs_catalog_coverage_requires_every_clean_scene_transaction(tmp_path):
@@ -429,7 +638,7 @@ def test_scene_wallclock_starts_at_backend_ready_not_process_launch(tmp_path):
     assert health["backend_ready_time"] == 700.0
 
 
-def test_finalization_marker_protects_closeout_without_new_runtime_status(
+def test_finalizing_marker_allows_authenticated_validation_to_finish(
         tmp_path):
     output = tmp_path / "job"
     output.mkdir()
@@ -443,12 +652,30 @@ def test_finalization_marker_protects_closeout_without_new_runtime_status(
 
     assert background_collection.capacity_watchdog_action(
         job, runtime, health_status="inter_record_slow",
-        now=129.0) is None
+        now=399.0) is None
     assert runtime["status"] == "running"
     assert background_collection.capacity_watchdog_action(
         job, runtime, health_status="inter_record_slow",
-        now=131.0) == signal.SIGKILL
+        now=401.0) == signal.SIGKILL
     assert runtime["status"] == "stopping_sigkill"
+
+
+def test_sealed_marker_keeps_short_process_exit_grace(tmp_path):
+    output = tmp_path / "job"
+    output.mkdir()
+    marker = output / "collection_finalization.json"
+    marker.write_text(json.dumps({
+        "schema": "egoconseq.collection-finalization.v2",
+        "status": "completed", "started_time_unix": 100.0,
+    }))
+    runtime = {"status": "running", "started_time_unix": 1.0}
+    job = {"dataset": "r2r", "output_dir": str(output)}
+
+    assert background_collection.capacity_watchdog_action(
+        job, runtime, health_status="healthy", now=200.0) is None
+    assert background_collection.capacity_watchdog_action(
+        job, runtime, health_status="healthy", now=231.0) == signal.SIGKILL
+    assert runtime["performance_violation"] == "sealed_exit_timeout"
 
 
 def test_slow_records_are_metrics_and_never_parent_signals(tmp_path):
@@ -537,11 +764,21 @@ def test_cli_exposes_build_run_status_and_stop(monkeypatch):
         "--capacity-profile", "/tmp/capacity.json",
         "--capacity-profile-sha256", "1" * 64,
         "--b1k-catalog-audit", "/tmp/audit.json",
-        "--b1k-catalog-audit-sha256", "2" * 64])
+        "--b1k-catalog-audit-sha256", "2" * 64,
+        "--collection-seed", "700",
+        "--baseline-checkpoint", "/tmp/checkpoint.json",
+        "--baseline-checkpoint-sha256", "3" * 64,
+        "--seed-checkpoint", "/tmp/seed-checkpoint.json",
+        "--seed-checkpoint-sha256", "4" * 64])
     assert build.command == "build"
     assert build.python == Path("/opt/egoconseq/bin/python")
     assert build.b1k_data_root == Path("/datasets/behavior-1k")
     assert build.b1k_source_manifest == Path("/tmp/source.json")
+    assert build.baseline_checkpoint == Path("/tmp/checkpoint.json")
+    assert build.seed_checkpoint == Path("/tmp/seed-checkpoint.json")
+    assert build.seed_checkpoint_sha256 == "4" * 64
+    assert build.collection_seed == 700
+    assert build.target_pose_diverse_frames == 40000
     canary = parser.parse_args([
         "canary-build", "--output-root", "/tmp/canary",
         "--r2r-scenes", "r2r-a", "r2r-b",

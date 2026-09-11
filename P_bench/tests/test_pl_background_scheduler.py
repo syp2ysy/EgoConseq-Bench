@@ -109,3 +109,84 @@ def test_launch_jobs_allows_other_gpus_to_keep_running():
     assert initialized == ["g0-second"]
     assert state["jobs"]["g0-second"]["round_index"] == 1
     assert state["jobs"]["g1-first"]["status"] == "running"
+
+
+def _continuous_manifest() -> dict:
+    return {
+        "collection": {"catalog_passes": 0},
+        "scene_catalog": {
+            "gs": ["gs-0", "gs-1"],
+            "b1k": ["b1k-0", "b1k-1"],
+            "r2r": ["r2r-0", "r2r-1"],
+        },
+    }
+
+
+def _continuous_factory(_manifest, dataset, *, catalog_pass, scene_index):
+    gpu_ids = {"gs": 0, "b1k": 1, "r2r": 2}
+    job = _job(
+        f"{dataset}-p{catalog_pass}-s{scene_index}",
+        gpu_id=gpu_ids[dataset], round_index=catalog_pass * 2 + scene_index,
+        dataset=dataset, catalog_pass=catalog_pass)
+    job["scene_index"] = scene_index
+    return job
+
+
+def test_continuous_scheduler_advances_datasets_independently():
+    manifest = _continuous_manifest()
+    state = {
+        "dataset_cursors": {
+            "gs": {"catalog_pass": 1, "scene_index": 0},
+            "b1k": {"catalog_pass": 0, "scene_index": 1},
+            "r2r": {"catalog_pass": 0, "scene_index": 1},
+        },
+        "jobs": {},
+    }
+
+    ready = background_scheduler.next_continuous_jobs(
+        manifest, state, job_factory=_continuous_factory)
+
+    assert {(job["dataset"], job["catalog_pass"], job["round_index"])
+            for job in ready} == {
+        ("gs", 1, 2), ("b1k", 0, 1), ("r2r", 0, 1)}
+
+
+def test_continuous_scheduler_does_not_wait_for_a_busy_dataset_gpu():
+    manifest = _continuous_manifest()
+    state = {
+        "dataset_cursors": {
+            dataset: {"catalog_pass": 0, "scene_index": 0}
+            for dataset in ("gs", "b1k", "r2r")
+        },
+        "jobs": {
+            "b1k-running": {
+                "status": "running", "gpu_id": 1, "dataset": "b1k"}
+        },
+    }
+
+    ready = background_scheduler.next_continuous_jobs(
+        manifest, state, job_factory=_continuous_factory)
+
+    assert [job["dataset"] for job in ready] == ["gs", "r2r"]
+
+
+def test_continuous_cursor_wraps_only_its_dataset():
+    manifest = _continuous_manifest()
+    state = {
+        "dataset_cursors": {
+            "gs": {"catalog_pass": 0, "scene_index": 1},
+            "b1k": {"catalog_pass": 0, "scene_index": 0},
+            "r2r": {"catalog_pass": 0, "scene_index": 0},
+        },
+        "jobs": {},
+    }
+    job = _continuous_factory(
+        manifest, "gs", catalog_pass=0, scene_index=1)
+
+    background_scheduler.advance_dataset_cursor(manifest, state, job)
+
+    assert state["dataset_cursors"] == {
+        "gs": {"catalog_pass": 1, "scene_index": 0},
+        "b1k": {"catalog_pass": 0, "scene_index": 0},
+        "r2r": {"catalog_pass": 0, "scene_index": 0},
+    }

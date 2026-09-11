@@ -2,15 +2,12 @@
 
 from __future__ import annotations
 
-import copy
 import hashlib
 import json
 
-import numpy as np
-
-from pipeline import config, dataset_contracts, gs_semantic, objects, record
+from pipeline import dataset_contracts, gs_semantic, record
 from tests._synthetic import (
-    LEVEL_FLOOR, LEVEL_FLOOR_FIT, make_frame, source_provenance,
+    LEVEL_FLOOR_FIT, make_frame, source_provenance,
 )
 
 
@@ -82,42 +79,3 @@ def test_conseq_v17_has_no_decoder_or_compatibility_route():
         assert "unsupported" in str(error)
     else:
         raise AssertionError("obsolete GS conseq.v17 remained readable")
-
-
-def test_visible_support_grid_is_canonical_and_tamper_evident():
-    points = np.array([
-        [-0.001, 0.15, 0.001],
-        [0.049, 0.15, 0.051],
-        [0.051, 0.15, 0.049],
-        [9.0, 0.80, 9.0],
-    ])
-    first = objects.initial_ground_support_grid(points, LEVEL_FLOOR)
-    second = objects.initial_ground_support_grid(points[::-1], LEVEL_FLOOR)
-    assert first == second
-    assert first["cells_ix_iz"] == [[-1, 0], [0, 1], [1, 0]]
-    assert first["raw_point_count"] == 3
-    assert first["cell_size_m"] == \
-        config.INITIAL_VISIBLE_SUPPORT_GRID_CELL_M
-    changed = copy.deepcopy(first)
-    changed["cells_ix_iz"][0][1] += 1
-    assert "sha256" in " ".join(
-        objects.initial_ground_support_errors(changed))
-
-
-def test_v18_materializes_and_validates_initial_visible_support():
-    frame, source, _binding = _v18_frame_and_source()
-    current = record.build_record(
-        frame, [], image_path="img/f.png",
-        floor_calibration=LEVEL_FLOOR_FIT)
-    candidate = record.build_record_v18(
-        frame, [], image_path="img/f.png",
-        floor_calibration=LEVEL_FLOOR_FIT,
-        source_provenance=source)
-
-    assert "initial_ground_support" not in current["objects"][0]
-    support = candidate["objects"][0]["initial_ground_support"]
-    assert support["raw_point_count"] == 5
-    assert objects.initial_ground_support_errors(support) == []
-    support["cells_ix_iz"][0][0] += 1
-    assert any("initial ground support sha256" in error
-               for error in record.validate_record_v18(candidate))

@@ -5,6 +5,8 @@ from __future__ import annotations
 import hashlib
 import json
 import copy
+import os
+import sys
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -59,12 +61,33 @@ def _identity(root: Path, relative: str) -> dict:
     }
 
 
-def _write_manifest(tmp_path: Path, *, count: int = 3) -> Path:
+def _write_manifest(
+        tmp_path: Path, *, count: int = 3,
+        canonical_replay: bool = True) -> Path:
     floor, obstacle, instances = _authority_inputs()
+    replay_kwargs = {}
+    if canonical_replay:
+        from pipeline.b1k_sim import _canonical_physical_state_sha256
+
+        replay_kwargs = {
+            "canonical_replay_protocol":
+                b1k_semantic.B1K_CANONICAL_REPLAY_PROTOCOL,
+            "canonical_state_sha256": _canonical_physical_state_sha256({
+                "object_poses": {
+                    "/World/table": (
+                        np.array([0.0, 2.0, 0.0]),
+                        np.array([0.0, 0.0, 0.0, 1.0])),
+                },
+                "joint_positions_rad": {
+                    "/World/table/joint": np.array([0.25]),
+                },
+            }),
+        }
     _geometry, _semantics, authority = b1k_semantic.build_b1k_authorities(
         floor_components=floor,
         collision_components=obstacle,
         instances=instances,
+        **replay_kwargs,
     )
     scenes = []
     for index in range(count):
@@ -124,6 +147,18 @@ def test_b1k_discovery_authenticates_actual_installed_catalog(tmp_path):
         scene_pool.discover_b1k_train_scenes(tmp_path, manifest)
 
 
+def test_b1k_scene_job_authenticates_only_its_requested_assets(tmp_path):
+    manifest = _write_manifest(tmp_path)
+    (tmp_path / "asset-1.encrypted.usd").unlink()
+    scenes = scene_pool.discover_b1k_train_scenes(
+        tmp_path, manifest, requested=["scene-0"])
+    assert [scene.scene_id for scene in scenes] == ["scene-0"]
+    (tmp_path / "asset-0.encrypted.usd").write_bytes(b"substituted")
+    with pytest.raises(scene_pool.SceneCatalogError, match="digest changed"):
+        scene_pool.discover_b1k_train_scenes(
+            tmp_path, manifest, requested=["scene-0"])
+
+
 def test_b1k_discovery_refuses_an_incomplete_install(tmp_path):
     """Catches treating a one-scene partial install as a valid catalog."""
     manifest = _write_manifest(tmp_path, count=2)
@@ -134,7 +169,7 @@ def test_b1k_discovery_refuses_an_incomplete_install(tmp_path):
 
 def test_b1k_discovery_rejects_partial_canonical_replay_binding(tmp_path):
     """Catches admitting a hash-valid authority with only one replay key."""
-    manifest = _write_manifest(tmp_path)
+    manifest = _write_manifest(tmp_path, canonical_replay=False)
     payload = json.loads(manifest.read_text())
     authority = payload["scenes"][0]["scene_authority"]
     authority["canonical_state_sha256"] = "a" * 64
@@ -246,8 +281,10 @@ class _FakeRuntime:
             "seg_instance_id": {1: "/World/table/visual"},
         }
 
-    def render_rgb_batch(self, scene, requests):
+    def render_rgb_batch(
+            self, scene, requests, *, render_transaction=None):
         del scene
+        self.last_render_transaction = render_transaction
         self.rgb_batch_requests.append(copy.deepcopy(list(requests)))
         result = []
         for index, request in enumerate(requests, 1):
@@ -295,6 +332,11 @@ class _FixedSnapshotReplayRuntime(_FakeRuntime):
         super().__init__()
         self.dump_count = 0
         self.loaded_serialized = []
+        self.authority_input_count = 0
+
+    def authority_inputs(self, scene):
+        self.authority_input_count += 1
+        return super().authority_inputs(scene)
 
     def dump_state(self, scene):
         del scene
@@ -394,8 +436,19 @@ def test_b1k_session_rederives_versioned_canonical_replay_authority(tmp_path):
             "max_object_position_error_m"] == 0.0
 
 
+def test_b1k_session_requires_a_versioned_canonical_snapshot(tmp_path):
+    """Normal collection must use the already-audited source authority."""
+    from pipeline.b1k_sim import B1KSimSession
+
+    scene = scene_pool.discover_b1k_train_scenes(
+        tmp_path, _write_manifest(tmp_path, canonical_replay=False))[0]
+
+    with pytest.raises(ValueError, match="canonical replay binding"):
+        B1KSimSession(scene, runtime=_FakeRuntime())
+
+
 def test_b1k_session_reuses_the_frozen_canonical_snapshot(tmp_path):
-    """Catches retaining the seed snapshot or re-dumping during rendering."""
+    """Collection loads the canonical snapshot without replaying its audit."""
     from pipeline.b1k_sim import B1KSimSession, bootstrap_scene_authority
 
     manifest = _write_manifest(tmp_path)
@@ -412,10 +465,9 @@ def test_b1k_session_reuses_the_frozen_canonical_snapshot(tmp_path):
         session.render([0.0, 0.0, 0.0], 0.0)
         session.render([0.0, 0.0, 0.0], 0.0)
 
-    assert runtime.loaded_serialized[0] == b"snapshot-0"
-    # Four canonical/open checks; ordinary renders never reload the scene.
-    assert runtime.loaded_serialized[1:] == [b"snapshot-1"] * 4
+    assert runtime.loaded_serialized == [b"snapshot-0", b"snapshot-1"]
     assert runtime.dump_count == 2
+    assert runtime.authority_input_count == 1
 
 
 def test_b1k_session_rejects_partial_canonical_replay_binding(tmp_path):
@@ -425,7 +477,7 @@ def test_b1k_session_rejects_partial_canonical_replay_binding(tmp_path):
     scene = scene_pool.discover_b1k_train_scenes(
         tmp_path, _write_manifest(tmp_path))[0]
     authority = dict(scene.b1k_scene_authority)
-    authority["canonical_state_sha256"] = "a" * 64
+    authority.pop("canonical_replay_protocol")
     authority["sha256"] = record.canonical_atom_sha256({
         key: value for key, value in authority.items() if key != "sha256"
     })
@@ -587,7 +639,7 @@ def test_b1k_render_uses_current_frame_native_instance_prim_paths(tmp_path):
     assert np.all(rendered.semantic_instance_ids[1:, :] == 1)
 
 
-def test_b1k_c1_renders_real_terminal_views_in_one_temporary_batch(tmp_path):
+def test_b1k_c1_renders_real_terminal_views_in_one_simultaneous_batch(tmp_path):
     from pipeline.b1k_sim import B1KSimSession
 
     scene = scene_pool.discover_b1k_train_scenes(
@@ -613,6 +665,141 @@ def test_b1k_c1_renders_real_terminal_views_in_one_temporary_batch(tmp_path):
     assert all(value.sensor == base.sensor for value in rendered)
     assert np.array_equal(rendered[0].position, base.position)
     assert rendered[0].yaw_rad == base.yaw_rad
+
+
+def test_b1k_session_dispatches_the_stored_legacy_c1_transaction(tmp_path):
+    from pipeline.b1k_sim import B1KSimSession
+
+    scene = scene_pool.discover_b1k_train_scenes(
+        tmp_path, _write_manifest(tmp_path))[0]
+    runtime = _FakeRuntime()
+
+    with B1KSimSession(
+            scene, runtime=runtime,
+            contract_version=record.B1K_V5_COLLECTION_CONTRACT_VERSION
+            ) as session:
+        base = frame_module.build_frame(
+            session, [1.0, 0.0, -2.0], 0.25,
+            frame_id="b1k-c1-v5", scene_id=scene.scene_id,
+            scene_glb=scene.scene_path, floor_plane=LEVEL_FLOOR)
+        session.render_terminal_rgb_batch(base, [(0.0, 0.0, 0.0)])
+
+    assert runtime.last_render_transaction == record.B1K_V5_C1_RENDER_MODE
+
+
+def test_real_runtime_dispatches_legacy_and_persistent_c1_transactions(
+        monkeypatch):
+    from pipeline.b1k_sim import _OmniGibsonRuntime
+
+    runtime = _OmniGibsonRuntime(
+        SimpleNamespace(sim=SimpleNamespace()), None, None,
+        mesh_converter=None,
+        contract_version=record.B1K_V5_COLLECTION_CONTRACT_VERSION)
+    calls = []
+    monkeypatch.setattr(
+        runtime, "_render_rgb_batch_temporary",
+        lambda _scene, _requests: calls.append("temporary") or ["v5"])
+    monkeypatch.setattr(
+        runtime, "_render_rgb_batch_persistent",
+        lambda _scene, _requests: calls.append("persistent") or ["v6"])
+
+    assert runtime.render_rgb_batch(
+        {}, [{}], render_transaction=record.B1K_V5_C1_RENDER_MODE) == ["v5"]
+    assert runtime.render_rgb_batch(
+        {}, [{}], render_transaction=record.B1K_C1_RENDER_MODE) == ["v6"]
+    assert calls == ["temporary", "persistent"]
+
+
+def test_real_runtime_reuses_c1_render_products_across_batches(monkeypatch):
+    """C1 batches keep one stable render graph and refresh handles once."""
+    from pipeline.b1k_sim import _OmniGibsonRuntime
+
+    created = []
+    resets = []
+    handle_refreshes = []
+    physics_valid = {"value": True}
+
+    class Sensor:
+        def __init__(self, name, request):
+            self.name = name
+            self.prim_path = f"/{name}"
+            self.image_width = int(request["image_width"])
+            self.image_height = int(request["image_height"])
+            self.horizontal_aperture = request["horizontal_aperture"]
+            self.focal_length = request["focal_length"]
+            self.modalities = {"rgb"}
+            self.removed = False
+
+        def load(self, _scene):
+            pass
+
+        def initialize(self):
+            physics_valid["value"] = False
+
+        def set_position_orientation(self, **_values):
+            pass
+
+        def get_obs(self):
+            assert "rgb" in self.modalities
+            index = created.index(self) + 1
+            return {"rgb": np.full(
+                (self.image_height, self.image_width, 3), index,
+                dtype=np.uint8)}, {}
+
+        def remove(self):
+            self.removed = True
+
+    def create_sensor(*, name, sensor_kwargs, **_kwargs):
+        sensor = Sensor(name, sensor_kwargs)
+        created.append(sensor)
+        return sensor
+
+    def update_handles():
+        physics_valid["value"] = True
+        handle_refreshes.append(True)
+
+    sim = SimpleNamespace(render=lambda: None, update_handles=update_handles)
+    og = SimpleNamespace(sim=sim, clear=lambda: None)
+    lazy = SimpleNamespace(omni=SimpleNamespace(usd=SimpleNamespace(
+        get_context=lambda: SimpleNamespace(
+            reset_renderer_accumulation=lambda: resets.append(True)))))
+    monkeypatch.setitem(
+        sys.modules, "omnigibson", SimpleNamespace(lazy=lazy))
+    monkeypatch.setitem(sys.modules, "omnigibson.sensors", SimpleNamespace(
+        create_sensor=create_sensor))
+
+    runtime = _OmniGibsonRuntime(og, None, None, mesh_converter=None)
+
+    def capture_physical_state(_scene):
+        assert physics_valid["value"]
+        return {
+            "object_poses": {"/World/floor": (
+                np.zeros(3), np.array([0.0, 0.0, 0.0, 1.0]))},
+            "joint_positions_rad": {},
+        }
+
+    runtime.capture_physical_state = capture_physical_state
+    scene = {"environment": SimpleNamespace(scene=object(),
+                                              _external_sensors={})}
+    request = {
+        "width": 8, "height": 6,
+        "hfov_deg": config.HFOV_DEG, "vfov_deg": config.VFOV_DEG,
+        "position_og": np.zeros(3), "yaw_rad": 0.0,
+    }
+
+    first = runtime.render_rgb_batch(scene, [request, request])
+    second = runtime.render_rgb_batch(scene, [request])
+
+    assert len(created) == 2
+    assert len(first) == 2 and len(second) == 1
+    assert resets == [True, True]
+    runtime.capture_physical_state(scene)
+    assert handle_refreshes == [True]
+    assert all(sensor.modalities == {"rgb"} for sensor in created)
+    assert not any(sensor.removed for sensor in created)
+
+    runtime.close(scene, [])
+    assert all(sensor.removed for sensor in created)
 
 
 def test_b1k_session_opens_both_default_fovs_in_one_scene(tmp_path):
@@ -779,6 +966,45 @@ def test_real_runtime_config_and_loaded_triangle_extraction():
         "floor.n.01", "breakfast_table.n.01"]
 
 
+def test_collection_runtime_configures_rt2_and_viewer_before_launch(
+        monkeypatch):
+    """Catches launching Kit before RT2 registration or viewer suppression."""
+    from pipeline.b1k_sim import _launch_omnigibson_for_collection
+
+    class SimulationApp:
+        DEFAULT_LAUNCHER_CONFIG = {
+            "extra_args": ["--keep-existing"],
+        }
+
+    monkeypatch.setitem(
+        sys.modules, "isaacsim",
+        SimpleNamespace(SimulationApp=SimulationApp))
+    monkeypatch.delenv("OMNI_KIT_ACCEPT_EULA", raising=False)
+    gm = SimpleNamespace(RENDER_VIEWER_CAMERA=True)
+    launch_values = []
+    og = SimpleNamespace(
+        gm=gm,
+        launch=lambda: launch_values.append({
+            "viewer": gm.RENDER_VIEWER_CAMERA,
+            "extra_args": list(
+                SimulationApp.DEFAULT_LAUNCHER_CONFIG["extra_args"]),
+            "eula": os.environ.get("OMNI_KIT_ACCEPT_EULA"),
+        }),
+    )
+
+    _launch_omnigibson_for_collection(og)
+
+    assert launch_values == [{
+        "viewer": False,
+        "eula": "YES",
+        "extra_args": [
+            "--keep-existing",
+            "--/persistent/rtx/modes/rt/enabled=true",
+            "--/persistent/rtx/modes/rt2/enabled=true",
+        ],
+    }]
+
+
 def test_real_runtime_visual_probe_extracts_only_loaded_meshes():
     """Catches probing encrypted USDs instead of the loaded OG scene."""
     from pipeline.b1k_sim import _OmniGibsonRuntime
@@ -880,11 +1106,16 @@ def test_fake_runtime_reaches_record_and_source_bound_b1_b2(tmp_path):
             "bbox_xyxy_px": [200, 150, 439, 329],
             "centroid_px": [320.0, 240.0],
             "dist_nearest_m": 2.0,
+            "surface_anchor": {
+                "protocol": "b1k-rendered-instance-depth.v1",
+                "pixel_xy_px": [320, 240],
+                "initial_robot_xyz_m": [0.0, 0.0, 2.0],
+            },
         })
         program = [actions.Forward(0.5)]
         outcome = consequence.judge(
             frame, Disc(radius_m=0.2), program,
-            nav=_B1KSafeNav(10.0), target_ids=[],
+            nav=_B1KSafeNav(10.0),
             require_contact_instance_witness=True)
         rows = []
         for perturbation in consensus.R2R_A_STABILITY_PERTURBATIONS:
@@ -909,11 +1140,18 @@ def test_fake_runtime_reaches_record_and_source_bound_b1_b2(tmp_path):
             floor_calibration=LEVEL_FLOOR_FIT,
             source_provenance=source,
             collection_contract=contract)
-        stored = rec["outcomes"][0]
-        assert benchmark_tasks.b_candidate_eligibility(
-            "B1_endpoint_distance", rec, stored).eligible is True
-        assert benchmark_tasks.b_candidate_eligibility(
-            "B2_endpoint_direction", rec, stored).eligible is True
+        from pipeline import abc1_record, surface_points
+
+        rec["outcomes"][0].update(action_group_id="safe", outcome_id="b020-safe")
+        compact = abc1_record.from_legacy(
+            rec, dataset="b1k", source_records_sha256="a" * 64, byte_offset=0)
+        compact["surface_point_target"] = {
+            "instance_id": 1, "category": "table",
+            "points": [{"point_id": "p1", "pixel_xy_px": [320, 240],
+                        "world_xyz_m": [0.0, 0.0, -2.0]}],
+        }
+        surface_points.refresh_outputs(compact)
+        assert {"B1", "B2"} <= compact["cases"][0]["task_outputs"].keys()
         context = source_manifest.b1k_v16_registered_validation_context(
             [source], collection_mode="main",
             expected_schema_version=record.SCHEMA_VERSION,

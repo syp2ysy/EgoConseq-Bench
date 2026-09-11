@@ -77,76 +77,6 @@ def candidate_sort_key(
     ).hexdigest()
 
 
-def select_natural_action_groups(
-    pools: Mapping[int, Sequence[tuple[str, Sequence[A.Action]]]],
-    group_labels: Mapping[str, str],
-    *,
-    pose_seed: int,
-    min_actions: int = config.ACTION_CANDIDATE_MIN_PER_POSE,
-    max_actions: int = config.ACTION_CANDIDATE_MAX_PER_POSE,
-    reserved_tags: Sequence[str] = (),
-) -> list[tuple[str, Sequence[A.Action]]]:
-    """Select a variable-size candidate set without consulting outcome labels.
-    Membership in ``group_labels`` marks candidates whose physical precheck
-    completed.  Label *values* are intentionally never read.  Reserved C1
-    members are kept first, then every certified action length gets one seat
-    before the remaining deterministic hash order is filled.
-    """
-    minimum = int(min_actions)
-    maximum = int(max_actions)
-    if minimum < 1 or maximum < minimum:
-        raise ValueError("natural action count bounds are invalid")
-    candidates = [
-        (str(group_id), actions, int(length))
-        for length in sorted(pools)
-        for group_id, actions in pools[length]
-        if str(group_id) in group_labels
-    ]
-    if not candidates:
-        return []
-    by_tag = {tag: (actions, length)
-              for tag, actions, length in candidates}
-    reserved = []
-    for raw_tag in reserved_tags:
-        tag = str(raw_tag)
-        # A reserved program rejected by certification is absent from
-        # ``group_labels`` and simply costs one distractor, never the pose.
-        if tag in by_tag and tag not in reserved:
-            reserved.append(tag)
-    if len(reserved) > maximum:
-        raise ValueError("certified reserved actions exceed selection budget")
-    covered_lengths = {by_tag[tag][1] for tag in reserved}
-    length_floor = []
-    for length in sorted({length for _tag, _actions, length in candidates}):
-        if length in covered_lengths:
-            continue
-        choices = sorted(
-            [(tag, actions) for tag, actions, candidate_length in candidates
-             if candidate_length == length and tag not in reserved],
-            key=lambda item: candidate_sort_key(
-                int(pose_seed), item[0], item[1]),
-        )
-        if choices:
-            length_floor.append(choices[0][0])
-            covered_lengths.add(length)
-    required = reserved + length_floor
-    if len(required) > maximum:
-        raise ValueError(
-            "certified action-length floor exceeds selection budget")
-    budget = max(len(required), natural_candidate_budget(
-        len(candidates), pose_seed=pose_seed,
-        min_actions=minimum, max_actions=maximum))
-    required_set = set(required)
-    remainder = sorted(
-        [(tag, actions) for tag, actions, _length in candidates
-         if tag not in required_set],
-        key=lambda item: candidate_sort_key(
-            int(pose_seed), item[0], item[1]),
-    )
-    return [(tag, by_tag[tag][0]) for tag in required] + \
-        remainder[:budget - len(required)]
-
-
 def retain_certified_action_groups(
     pools: Mapping[int, Sequence[tuple[str, Sequence[A.Action]]]],
     group_labels: Mapping[str, str],
@@ -312,40 +242,10 @@ def shortlist_action_bank(
     forced_tags: Sequence[str] = (),
     stats=None,
 ) -> dict[int, list[tuple[str, Sequence[A.Action]]]]:
-    """Cut the pose's proposal bank down to what full geometry will pay for.
-
-    Certification is the expensive half of a pose -- every candidate costs a
-    publication label plus two variants times three radii of rollout, coverage
-    and consensus -- and it used to run over the entire bank, several hundred
-    programs, before anything trimmed it.  Trimming first is the whole point,
-    so this returns a pools-shaped bank and the caller certifies only that.
-
-    Two properties make the trim safe rather than merely cheap.
-
-    It is label-blind by construction, not by discipline: ``group_labels`` is
-    the *product* of certification and does not exist yet at this point, so
-    there is no label here to read even by accident.  What it stratifies on is
-    ``(length, variant)`` -- both fixed when the program was proposed.
-
-    And it is stratified rather than uniform.  A flat hash order over a bank
-    whose lengths are unevenly populated routinely left whole lengths with no
-    survivors, which is what starved L5/L6.  Cells are served round-robin, so
-    the first round *is* the "every non-empty cell gets one" floor and no
-    separate pass is needed to guarantee it.
-
-    Frozen family tags are admitted before the round-robin because they cannot
-    be substituted: a frozen member that misses the shortlist never gets a
-    certificate and takes its whole family down.  C1 neighbours are different:
-    they are derived only after this first pass identifies a certified-clear
-    query, then consume the explicitly reserved second-pass budget.
-    """
+    """Return one bounded, label-blind stratified certification bank."""
     limit = int(budget)
     if limit < 1:
         raise ValueError("shortlist budget must be positive")
-    known = {str(tag): (length, actions)
-             for length in pools
-             for tag, actions in pools[length]}
-
     reserved = list(dict.fromkeys(str(tag) for tag in forced_tags))
     if len(reserved) > limit:
         raise ValueError(
@@ -353,23 +253,23 @@ def shortlist_action_bank(
 
     cells: dict[tuple[int, str, str], list[str]] = defaultdict(list)
     for length in sorted(pools):
-        for tag, actions in pools[length]:
+        for tag, _actions in pools[length]:
             tag = str(tag)
             cell = _candidate_cell(length, tag, provenance)
             cells[cell].append(tag)
             _, variant, stratum = cell
             name = variant if stratum == "na" else f"{variant}.{stratum}"
             _tally(stats, f"shortlist_offered.{name}.L{length}")
+
     order = stratified_action_order(
         pools, provenance, pose_seed=int(pose_seed),
         forced_tags=reserved)
     admitted = order[:limit]
-    taken = set(admitted)
-
+    admitted_set = set(admitted)
     for cell in sorted(cells, key=_cell_rank):
         length, variant, stratum = cell
         name = variant if stratum == "na" else f"{variant}.{stratum}"
-        count = sum(1 for tag in cells[cell] if tag in taken)
+        count = sum(1 for tag in cells[cell] if tag in admitted_set)
         if count:
             for _ in range(count):
                 _tally(stats, f"shortlist_admitted.{name}.L{length}")
@@ -378,27 +278,11 @@ def shortlist_action_bank(
 
     return {
         length: [(tag, actions) for tag, actions in pools[length]
-                 if str(tag) in taken]
+                 if str(tag) in admitted_set]
         for length in sorted(pools)
-        if any(str(tag) in taken for tag, _actions in pools[length])
+        if any(str(tag) in admitted_set
+               for tag, _actions in pools[length])
     }
-
-
-def natural_candidate_budget(
-    available: int,
-    *,
-    pose_seed: int,
-    min_actions: int = config.ACTION_CANDIDATE_MIN_PER_POSE,
-    max_actions: int = config.ACTION_CANDIDATE_MAX_PER_POSE,
-) -> int:
-    """Return the deterministic variable budget before label observation."""
-    minimum = int(min_actions)
-    maximum = int(max_actions)
-    if minimum < 1 or maximum < minimum:
-        raise ValueError("natural action count bounds are invalid")
-    span = maximum - minimum + 1
-    return min(max(0, int(available)),
-               minimum + int(pose_seed) % span)
 
 
 def _pair_id(match_key: dict, safe_group_id: str,
@@ -497,11 +381,11 @@ def expected_pair_id(match_key: dict, safe_group_id: str,
 
 def classify_action_group(
         sibling_acceptance, radius_collisions, required_siblings: int):
-    """Return safe/collision/radius_mixed after the atomic consensus gate."""
+    """Return the shared safe/collision label after the consensus gate."""
     if (len(sibling_acceptance) != int(required_siblings) or
             not all(sibling_acceptance)):
         return None
     labels = {bool(value) for value in radius_collisions.values()}
     if len(labels) != 1:
-        return "radius_mixed"
+        return None
     return "collision" if labels.pop() else "safe"

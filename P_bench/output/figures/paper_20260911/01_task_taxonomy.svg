@@ -1,0 +1,436 @@
+<?xml version="1.0" encoding="utf-8" standalone="no"?>
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN"
+  "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+<svg xmlns:xlink="http://www.w3.org/1999/xlink" width="1026pt" height="603.72pt" viewBox="0 0 1026 603.72" xmlns="http://www.w3.org/2000/svg" version="1.1">
+ <metadata>
+  <rdf:RDF xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:cc="http://creativecommons.org/ns#" xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+   <cc:Work>
+    <dc:type rdf:resource="http://purl.org/dc/dcmitype/StillImage"/>
+    <dc:date>2026-09-11T03:06:37.248486</dc:date>
+    <dc:format>image/svg+xml</dc:format>
+    <dc:creator>
+     <cc:Agent>
+      <dc:title>Matplotlib v3.10.7, https://matplotlib.org/</dc:title>
+     </cc:Agent>
+    </dc:creator>
+   </cc:Work>
+  </rdf:RDF>
+ </metadata>
+ <defs>
+  <style type="text/css">*{stroke-linejoin: round; stroke-linecap: butt}</style>
+ </defs>
+ <g id="figure_1">
+  <g id="patch_1">
+   <path d="M 0 603.72 
+L 1026 603.72 
+L 1026 0 
+L 0 0 
+z
+" style="fill: #ffffff"/>
+  </g>
+  <g id="axes_1">
+   <g id="patch_2">
+    <path d="M 31.8924 91.13256 
+L 331.2036 91.13256 
+Q 340.2432 91.13256 340.2432 85.89348 
+L 340.2432 23.02452 
+Q 340.2432 17.78544 331.2036 17.78544 
+L 31.8924 17.78544 
+Q 22.8528 17.78544 22.8528 23.02452 
+L 22.8528 85.89348 
+Q 22.8528 91.13256 31.8924 91.13256 
+z
+" clip-path="url(#p08235d438b)" style="fill: #f6f8fa; stroke: #cad3dc; stroke-linejoin: miter"/>
+   </g>
+   <g id="patch_3">
+    <path d="M 183.543206 92.429957 
+Q 347.274978 103.357145 511.00675 114.284334 
+" clip-path="url(#p08235d438b)" style="fill: none; stroke: #a9b5bf; stroke-linecap: round"/>
+   </g>
+   <g id="patch_4">
+    <path d="M 363.3444 91.13256 
+L 662.6556 91.13256 
+Q 671.6952 91.13256 671.6952 85.89348 
+L 671.6952 23.02452 
+Q 671.6952 17.78544 662.6556 17.78544 
+L 363.3444 17.78544 
+Q 354.3048 17.78544 354.3048 23.02452 
+L 354.3048 85.89348 
+Q 354.3048 91.13256 363.3444 91.13256 
+z
+" clip-path="url(#p08235d438b)" style="fill: #f6f8fa; stroke: #cad3dc; stroke-linejoin: miter"/>
+   </g>
+   <g id="patch_5">
+    <path d="M 513 94.297695 
+Q 513 103.35793 513 112.418165 
+" clip-path="url(#p08235d438b)" style="fill: none; stroke: #a9b5bf; stroke-linecap: round"/>
+   </g>
+   <g id="patch_6">
+    <path d="M 694.7964 91.13256 
+L 994.1076 91.13256 
+Q 1003.1472 91.13256 1003.1472 85.89348 
+L 1003.1472 23.02452 
+Q 1003.1472 17.78544 994.1076 17.78544 
+L 694.7964 17.78544 
+Q 685.7568 17.78544 685.7568 23.02452 
+L 685.7568 85.89348 
+Q 685.7568 91.13256 694.7964 91.13256 
+z
+" clip-path="url(#p08235d438b)" style="fill: #f6f8fa; stroke: #cad3dc; stroke-linejoin: miter"/>
+   </g>
+   <g id="patch_7">
+    <path d="M 842.456794 92.429957 
+Q 678.725022 103.357145 514.99325 114.284334 
+" clip-path="url(#p08235d438b)" style="fill: none; stroke: #a9b5bf; stroke-linecap: round"/>
+   </g>
+   <g id="patch_8">
+    <path d="M 31.8924 516.08016 
+L 301.0716 516.08016 
+Q 310.1112 516.08016 310.1112 510.84108 
+L 310.1112 191.83932 
+Q 310.1112 186.60024 301.0716 186.60024 
+L 31.8924 186.60024 
+Q 22.8528 186.60024 22.8528 191.83932 
+L 22.8528 510.84108 
+Q 22.8528 516.08016 31.8924 516.08016 
+z
+" clip-path="url(#p08235d438b)" style="fill: #fcfcfd; stroke: #bb6146; stroke-linejoin: miter"/>
+   </g>
+   <g id="patch_9">
+    <path d="M 333.2124 516.08016 
+L 743.0076 516.08016 
+Q 752.0472 516.08016 752.0472 510.84108 
+L 752.0472 191.83932 
+Q 752.0472 186.60024 743.0076 186.60024 
+L 333.2124 186.60024 
+Q 324.1728 186.60024 324.1728 191.83932 
+L 324.1728 510.84108 
+Q 324.1728 516.08016 333.2124 516.08016 
+z
+" clip-path="url(#p08235d438b)" style="fill: #fcfcfd; stroke: #307f9f; stroke-linejoin: miter"/>
+   </g>
+   <g id="patch_10">
+    <path d="M 775.1484 516.08016 
+L 994.1076 516.08016 
+Q 1003.1472 516.08016 1003.1472 510.84108 
+L 1003.1472 191.83932 
+Q 1003.1472 186.60024 994.1076 186.60024 
+L 775.1484 186.60024 
+Q 766.1088 186.60024 766.1088 191.83932 
+L 766.1088 510.84108 
+Q 766.1088 516.08016 775.1484 516.08016 
+z
+" clip-path="url(#p08235d438b)" style="fill: #fcfcfd; stroke: #8270af; stroke-linejoin: miter"/>
+   </g>
+   <g id="patch_11">
+    <path d="M 43.9452 328.63752 
+L 289.0188 328.63752 
+Q 298.0584 328.63752 298.0584 323.39844 
+L 298.0584 254.12616 
+Q 298.0584 248.88708 289.0188 248.88708 
+L 43.9452 248.88708 
+Q 34.9056 248.88708 34.9056 254.12616 
+L 34.9056 323.39844 
+Q 34.9056 328.63752 43.9452 328.63752 
+z
+" clip-path="url(#p08235d438b)" style="fill: #ffffff; stroke: #dce2e7; stroke-linejoin: miter"/>
+   </g>
+   <g id="patch_12">
+    <path d="M 43.9452 413.04492 
+L 289.0188 413.04492 
+Q 298.0584 413.04492 298.0584 407.80584 
+L 298.0584 338.53356 
+Q 298.0584 333.29448 289.0188 333.29448 
+L 43.9452 333.29448 
+Q 34.9056 333.29448 34.9056 338.53356 
+L 34.9056 407.80584 
+Q 34.9056 413.04492 43.9452 413.04492 
+z
+" clip-path="url(#p08235d438b)" style="fill: #ffffff; stroke: #dce2e7; stroke-linejoin: miter"/>
+   </g>
+   <g id="patch_13">
+    <path d="M 43.9452 497.45232 
+L 289.0188 497.45232 
+Q 298.0584 497.45232 298.0584 492.21324 
+L 298.0584 422.94096 
+Q 298.0584 417.70188 289.0188 417.70188 
+L 43.9452 417.70188 
+Q 34.9056 417.70188 34.9056 422.94096 
+L 34.9056 492.21324 
+Q 34.9056 497.45232 43.9452 497.45232 
+z
+" clip-path="url(#p08235d438b)" style="fill: #ffffff; stroke: #dce2e7; stroke-linejoin: miter"/>
+   </g>
+   <g id="patch_14">
+    <path d="M 346.2696 381.61044 
+L 527.0616 381.61044 
+Q 536.1012 381.61044 536.1012 376.37136 
+L 536.1012 266.9328 
+Q 536.1012 261.69372 527.0616 261.69372 
+L 346.2696 261.69372 
+Q 337.23 261.69372 337.23 266.9328 
+L 337.23 376.37136 
+Q 337.23 381.61044 346.2696 381.61044 
+z
+" clip-path="url(#p08235d438b)" style="fill: #ffffff; stroke: #dce2e7; stroke-linejoin: miter"/>
+   </g>
+   <g id="patch_15">
+    <path d="M 552.1716 381.61044 
+L 732.9636 381.61044 
+Q 742.0032 381.61044 742.0032 376.37136 
+L 742.0032 266.9328 
+Q 742.0032 261.69372 732.9636 261.69372 
+L 552.1716 261.69372 
+Q 543.132 261.69372 543.132 266.9328 
+L 543.132 376.37136 
+Q 543.132 381.61044 552.1716 381.61044 
+z
+" clip-path="url(#p08235d438b)" style="fill: #ffffff; stroke: #dce2e7; stroke-linejoin: miter"/>
+   </g>
+   <g id="patch_16">
+    <path d="M 346.2696 497.45232 
+L 527.0616 497.45232 
+Q 536.1012 497.45232 536.1012 492.21324 
+L 536.1012 389.76012 
+Q 536.1012 384.52104 527.0616 384.52104 
+L 346.2696 384.52104 
+Q 337.23 384.52104 337.23 389.76012 
+L 337.23 492.21324 
+Q 337.23 497.45232 346.2696 497.45232 
+z
+" clip-path="url(#p08235d438b)" style="fill: #ffffff; stroke: #dce2e7; stroke-linejoin: miter"/>
+   </g>
+   <g id="patch_17">
+    <path d="M 552.1716 497.45232 
+L 732.9636 497.45232 
+Q 742.0032 497.45232 742.0032 492.21324 
+L 742.0032 389.76012 
+Q 742.0032 384.52104 732.9636 384.52104 
+L 552.1716 384.52104 
+Q 543.132 384.52104 543.132 389.76012 
+L 543.132 492.21324 
+Q 543.132 497.45232 552.1716 497.45232 
+z
+" clip-path="url(#p08235d438b)" style="fill: #ffffff; stroke: #dce2e7; stroke-linejoin: miter"/>
+   </g>
+   <g id="patch_18">
+    <path d="M 787.2012 388.01376 
+L 982.0548 388.01376 
+Q 991.0944 388.01376 991.0944 382.77468 
+L 991.0944 258.78312 
+Q 991.0944 253.54404 982.0548 253.54404 
+L 787.2012 253.54404 
+Q 778.1616 253.54404 778.1616 258.78312 
+L 778.1616 382.77468 
+Q 778.1616 388.01376 787.2012 388.01376 
+z
+" clip-path="url(#p08235d438b)" style="fill: #ffffff; stroke: #dce2e7; stroke-linejoin: miter"/>
+   </g>
+   <g id="patch_19">
+    <path d="M 802.2672 437.49396 
+L 832.3992 437.49396 
+Q 841.4388 437.49396 841.4388 432.25488 
+L 841.4388 402.56676 
+Q 841.4388 397.32768 832.3992 397.32768 
+L 802.2672 397.32768 
+Q 793.2276 397.32768 793.2276 402.56676 
+L 793.2276 432.25488 
+Q 793.2276 437.49396 802.2672 437.49396 
+z
+" clip-path="url(#p08235d438b)" style="fill: #f1edf8; stroke: #8270af; stroke-linejoin: miter"/>
+   </g>
+   <g id="patch_20">
+    <path d="M 846.4608 437.49396 
+L 876.5928 437.49396 
+Q 885.6324 437.49396 885.6324 432.25488 
+L 885.6324 402.56676 
+Q 885.6324 397.32768 876.5928 397.32768 
+L 846.4608 397.32768 
+Q 837.4212 397.32768 837.4212 402.56676 
+L 837.4212 432.25488 
+Q 837.4212 437.49396 846.4608 437.49396 
+z
+" clip-path="url(#p08235d438b)" style="fill: #f1edf8; stroke: #8270af; stroke-linejoin: miter"/>
+   </g>
+   <g id="patch_21">
+    <path d="M 890.6544 437.49396 
+L 920.7864 437.49396 
+Q 929.826 437.49396 929.826 432.25488 
+L 929.826 402.56676 
+Q 929.826 397.32768 920.7864 397.32768 
+L 890.6544 397.32768 
+Q 881.6148 397.32768 881.6148 402.56676 
+L 881.6148 432.25488 
+Q 881.6148 437.49396 890.6544 437.49396 
+z
+" clip-path="url(#p08235d438b)" style="fill: #f1edf8; stroke: #8270af; stroke-linejoin: miter"/>
+   </g>
+   <g id="patch_22">
+    <path d="M 934.848 437.49396 
+L 964.98 437.49396 
+Q 974.0196 437.49396 974.0196 432.25488 
+L 974.0196 402.56676 
+Q 974.0196 397.32768 964.98 397.32768 
+L 934.848 397.32768 
+Q 925.8084 397.32768 925.8084 402.56676 
+L 925.8084 432.25488 
+Q 925.8084 437.49396 934.848 437.49396 
+z
+" clip-path="url(#p08235d438b)" style="fill: #f1edf8; stroke: #8270af; stroke-linejoin: miter"/>
+   </g>
+   <g id="text_1">
+    <text style="font-weight: 500; font-size: 12.3px; font-family: 'DejaVu Sans'; text-anchor: middle; fill: #243547" x="181.548" y="45.046391" transform="rotate(-0 181.548 45.046391)">Current egocentric observation</text>
+   </g>
+   <g id="text_2">
+    <text style="font-size: 9.6px; font-family: 'DejaVu Sans'; text-anchor: middle; fill: #647383" x="181.548" y="69.91464" transform="rotate(-0 181.548 69.91464)">Visual evidence of the static scene</text>
+   </g>
+   <g id="text_3">
+    <text style="font-weight: 500; font-size: 12.3px; font-family: 'DejaVu Sans'; text-anchor: middle; fill: #243547" x="513" y="45.046391" transform="rotate(-0 513 45.046391)">Body and camera configuration</text>
+   </g>
+   <g id="text_4">
+    <text style="font-size: 9.6px; font-family: 'DejaVu Sans'; text-anchor: middle; fill: #647383" x="513" y="69.91464" transform="rotate(-0 513 69.91464)">Footprint radius · camera height · field of view</text>
+   </g>
+   <g id="text_5">
+    <text style="font-weight: 500; font-size: 12.3px; font-family: 'DejaVu Sans'; text-anchor: middle; fill: #243547" x="844.452" y="45.046391" transform="rotate(-0 844.452 45.046391)">Given motion sequence</text>
+   </g>
+   <g id="text_6">
+    <text style="font-size: 9.6px; font-family: 'DejaVu Sans'; text-anchor: middle; fill: #647383" x="844.452" y="69.91464" transform="rotate(-0 844.452 69.91464)">Forward distances · turn angles and directions</text>
+   </g>
+   <g id="text_7">
+    <text style="font-size: 19px; font-family: 'DejaVu Sans'; text-anchor: middle; fill: #243547" x="513" y="138.288012" transform="rotate(-0 513 138.288012)">Spatial prediction under ego-motion</text>
+   </g>
+   <g id="text_8">
+    <text style="font-size: 11px; font-family: 'DejaVu Sans'; text-anchor: middle; fill: #647383" x="513" y="156.33" transform="rotate(-0 513 156.33)">Predict before execution · no intermediate execution observations</text>
+   </g>
+   <g id="text_9">
+    <text style="font-weight: 500; font-size: 14px; font-family: 'DejaVu Sans'; text-anchor: middle; fill: #bb6146" x="166.482" y="219.569365" transform="rotate(-0 166.482 219.569365)">Body–scene contact</text>
+   </g>
+   <g id="text_10">
+    <text style="font-weight: 500; font-size: 14px; font-family: 'DejaVu Sans'; fill: #307f9f" transform="translate(461.994844 211.730896)">Target-relative spatial</text>
+    <text style="font-weight: 500; font-size: 14px; font-family: 'DejaVu Sans'; fill: #307f9f" transform="translate(507.793437 227.407834)">relations</text>
+   </g>
+   <g id="text_11">
+    <text style="font-weight: 500; font-size: 14px; font-family: 'DejaVu Sans'; text-anchor: middle; fill: #8270af" x="884.628" y="219.569365" transform="rotate(-0 884.628 219.569365)">Future-view discrimination</text>
+   </g>
+   <g id="text_12">
+    <text style="font-weight: 500; font-size: 11.1px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #bb6146" x="54.9936" y="270.127986" transform="rotate(-0 54.9936 270.127986)">Collision occurrence (A1)</text>
+   </g>
+   <g id="text_13">
+    <text style="font-size: 9.5px; font-family: 'DejaVu Sans'; fill: #243547" transform="translate(54.9936 284.449683)">Will the body collide with any object along</text>
+    <text style="font-size: 9.5px; font-family: 'DejaVu Sans'; fill: #243547" transform="translate(54.9936 295.809457)">the given motion?</text>
+   </g>
+   <g id="text_14">
+    <text style="font-size: 8.7px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #647383" x="54.9936" y="312.857312" transform="rotate(-0 54.9936 312.857312)">Answer: Collision / No collision</text>
+   </g>
+   <g id="text_15">
+    <text style="font-weight: 500; font-size: 11.1px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #bb6146" x="54.9936" y="354.535386" transform="rotate(-0 54.9936 354.535386)">First-collision action (A2)</text>
+   </g>
+   <g id="text_16">
+    <text style="font-size: 9.5px; font-family: 'DejaVu Sans'; fill: #243547" transform="translate(54.9936 368.857083)">At which listed action does the first</text>
+    <text style="font-size: 9.5px; font-family: 'DejaVu Sans'; fill: #243547" transform="translate(54.9936 380.216857)">collision occur?</text>
+   </g>
+   <g id="text_17">
+    <text style="font-size: 8.7px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #647383" x="54.9936" y="397.264712" transform="rotate(-0 54.9936 397.264712)">Answer: action index</text>
+   </g>
+   <g id="text_18">
+    <text style="font-weight: 500; font-size: 11.1px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #bb6146" x="54.9936" y="438.942786" transform="rotate(-0 54.9936 438.942786)">First-contact object category (A3)</text>
+   </g>
+   <g id="text_19">
+    <text style="font-size: 9.5px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #243547" x="54.9936" y="464.624257" transform="rotate(-0 54.9936 464.624257)">What category of object is contacted first?</text>
+   </g>
+   <g id="text_20">
+    <text style="font-size: 8.7px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #647383" x="54.9936" y="481.672112" transform="rotate(-0 54.9936 481.672112)">Answer: object category</text>
+   </g>
+   <g id="text_21">
+    <text style="font-size: 8.6px; font-family: 'DejaVu Sans'; text-anchor: middle; fill: #647383" x="166.482" y="241.90164" transform="rotate(-0 166.482 241.90164)">Entire motion · collision given for A2 / A3</text>
+   </g>
+   <g id="text_22">
+    <text style="font-size: 9.2px; font-family: 'DejaVu Sans'; text-anchor: middle; fill: #647383" x="432.648" y="248.30496" transform="rotate(-0 432.648 248.30496)">INTERMEDIATE POSITION</text>
+   </g>
+   <g id="text_23">
+    <text style="font-size: 9.2px; font-family: 'DejaVu Sans'; text-anchor: middle; fill: #647383" x="643.572" y="248.30496" transform="rotate(-0 643.572 248.30496)">FINAL POSITION</text>
+   </g>
+   <g id="text_24">
+    <text style="font-weight: 500; font-size: 11.1px; font-family: 'DejaVu Sans'; fill: #307f9f" transform="translate(357.318 282.934626)">Intermediate target</text>
+    <text style="font-weight: 500; font-size: 11.1px; font-family: 'DejaVu Sans'; fill: #307f9f" transform="translate(357.318 295.364197)">distance (B3)</text>
+   </g>
+   <g id="text_25">
+    <text style="font-size: 9.5px; font-family: 'DejaVu Sans'; fill: #243547" transform="translate(357.318 332.183523)">How far is the fixed target from</text>
+    <text style="font-size: 9.5px; font-family: 'DejaVu Sans'; fill: #243547" transform="translate(357.318 343.543297)">the camera at the query position?</text>
+   </g>
+   <g id="text_26">
+    <text style="font-size: 8.7px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #647383" x="357.318" y="365.830232" transform="rotate(-0 357.318 365.830232)">Answer: 3D distance in meters</text>
+   </g>
+   <g id="text_27">
+    <text style="font-weight: 500; font-size: 11.1px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #307f9f" x="563.22" y="282.934626" transform="rotate(-0 563.22 282.934626)">Final target distance (B1)</text>
+   </g>
+   <g id="text_28">
+    <text style="font-size: 9.5px; font-family: 'DejaVu Sans'; fill: #243547" transform="translate(563.22 332.183523)">How far is the fixed target from</text>
+    <text style="font-size: 9.5px; font-family: 'DejaVu Sans'; fill: #243547" transform="translate(563.22 343.543297)">the camera after all actions?</text>
+   </g>
+   <g id="text_29">
+    <text style="font-size: 8.7px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #647383" x="563.22" y="365.830232" transform="rotate(-0 563.22 365.830232)">Answer: 3D distance in meters</text>
+   </g>
+   <g id="text_30">
+    <text style="font-weight: 500; font-size: 11.1px; font-family: 'DejaVu Sans'; fill: #307f9f" transform="translate(357.318 405.761946)">Intermediate target</text>
+    <text style="font-weight: 500; font-size: 11.1px; font-family: 'DejaVu Sans'; fill: #307f9f" transform="translate(357.318 418.191517)">direction (A4)</text>
+   </g>
+   <g id="text_31">
+    <text style="font-size: 9.5px; font-family: 'DejaVu Sans'; fill: #243547" transform="translate(357.318 448.025403)">In which direction is the fixed</text>
+    <text style="font-size: 9.5px; font-family: 'DejaVu Sans'; fill: #243547" transform="translate(357.318 459.385177)">target at the query position?</text>
+   </g>
+   <g id="text_32">
+    <text style="font-size: 8.7px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #647383" x="357.318" y="481.672112" transform="rotate(-0 357.318 481.672112)">Answer: horizontal + vertical direction</text>
+   </g>
+   <g id="text_33">
+    <text style="font-weight: 500; font-size: 11.1px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #307f9f" x="563.22" y="405.761946" transform="rotate(-0 563.22 405.761946)">Final target direction (B2)</text>
+   </g>
+   <g id="text_34">
+    <text style="font-size: 9.5px; font-family: 'DejaVu Sans'; fill: #243547" transform="translate(563.22 448.025403)">In which direction is the fixed</text>
+    <text style="font-size: 9.5px; font-family: 'DejaVu Sans'; fill: #243547" transform="translate(563.22 459.385177)">target after all actions?</text>
+   </g>
+   <g id="text_35">
+    <text style="font-size: 8.7px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #647383" x="563.22" y="481.672112" transform="rotate(-0 563.22 481.672112)">Answer: horizontal + vertical direction</text>
+   </g>
+   <g id="text_36">
+    <text style="font-weight: 500; font-size: 11.1px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #8270af" x="798.2496" y="274.784946" transform="rotate(-0 798.2496 274.784946)">Future-view selection (C1)</text>
+   </g>
+   <g id="text_37">
+    <text style="font-size: 9.5px; font-family: 'DejaVu Sans'; fill: #243547" transform="translate(798.2496 338.586843)">Which candidate image matches the</text>
+    <text style="font-size: 9.5px; font-family: 'DejaVu Sans'; fill: #243547" transform="translate(798.2496 349.946617)">camera view after all actions?</text>
+   </g>
+   <g id="text_38">
+    <text style="font-size: 8.7px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #647383" x="798.2496" y="372.233552" transform="rotate(-0 798.2496 372.233552)">Answer: one of four candidate views</text>
+   </g>
+   <g id="text_39">
+    <text style="font-size: 10px; font-family: 'DejaVu Sans'; text-anchor: middle; fill: #8270af" x="817.3332" y="420.461255" transform="rotate(-0 817.3332 420.461255)">A</text>
+   </g>
+   <g id="text_40">
+    <text style="font-size: 10px; font-family: 'DejaVu Sans'; text-anchor: middle; fill: #8270af" x="861.5268" y="420.461255" transform="rotate(-0 861.5268 420.461255)">B</text>
+   </g>
+   <g id="text_41">
+    <text style="font-size: 10px; font-family: 'DejaVu Sans'; text-anchor: middle; fill: #8270af" x="905.7204" y="420.461255" transform="rotate(-0 905.7204 420.461255)">C</text>
+   </g>
+   <g id="text_42">
+    <text style="font-size: 10px; font-family: 'DejaVu Sans'; text-anchor: middle; fill: #8270af" x="949.914" y="420.461255" transform="rotate(-0 949.914 420.461255)">D</text>
+   </g>
+   <g id="text_43">
+    <text style="font-size: 10px; font-family: 'DejaVu Sans'; text-anchor: middle; fill: #647383" x="884.628" y="454.95756" transform="rotate(-0 884.628 454.95756)">Alternative final views</text>
+   </g>
+   <g id="text_44">
+    <text style="font-size: 9px; font-family: 'DejaVu Sans'; text-anchor: middle; fill: #647383" x="884.628" y="479.98872" transform="rotate(-0 884.628 479.98872)">Recognition from candidates</text>
+   </g>
+   <g id="text_45">
+    <text style="font-size: 10px; font-family: 'DejaVu Sans'; text-anchor: middle; fill: #647383" x="513" y="538.20072" transform="rotate(-0 513 538.20072)">Intermediate queries: after earlier actions and 25%, 50%, or 75% of one specified Forward action.</text>
+   </g>
+   <g id="text_46">
+    <text style="font-size: 10px; font-family: 'DejaVu Sans'; text-anchor: middle; fill: #647383" x="513" y="560.9034" transform="rotate(-0 513 560.9034)">Target relations use the camera frame at the queried pose. Relation and future-view sequences are collision-free.</text>
+   </g>
+  </g>
+ </g>
+ <defs>
+  <clipPath id="p08235d438b">
+   <rect x="10.8" y="10.8" width="1004.4" height="582.12"/>
+  </clipPath>
+ </defs>
+</svg>

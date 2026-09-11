@@ -426,6 +426,42 @@
       "interior_0505_839970": {
         "family": "interior_0505_839970",
         "partition": "excluded_damaged"
+      },
+      "interior_0516_840045": {
+        "family": "interior_0516_840045",
+        "partition": "test_unseen"
+      },
+      "interior_0518_839988": {
+        "family": "interior_0518_839988",
+        "partition": "test_unseen"
+      },
+      "interior_0633_840123": {
+        "family": "interior_0633_840123",
+        "partition": "test_unseen"
+      },
+      "interior_0635_839968": {
+        "family": "interior_0635_839968",
+        "partition": "test_unseen"
+      },
+      "interior_0637_841444": {
+        "family": "interior_0637_841444",
+        "partition": "test_unseen"
+      },
+      "interior_0651_841463": {
+        "family": "interior_0651_841463",
+        "partition": "test_unseen"
+      },
+      "interior_0695_841526": {
+        "family": "interior_0695_841526",
+        "partition": "test_unseen"
+      },
+      "interior_0733_841584": {
+        "family": "interior_0733_841584",
+        "partition": "test_unseen"
+      },
+      "interior_0759_839979": {
+        "family": "interior_0759_839979",
+        "partition": "test_unseen"
       }
     },
     "r2r": {
@@ -715,6 +751,78 @@
       },
       "zsNo4HB9uLZ": {
         "family": "zsNo4HB9uLZ",
+        "partition": "test_unseen"
+      },
+      "2t7WUuJeko7": {
+        "family": "2t7WUuJeko7",
+        "partition": "test_unseen"
+      },
+      "5ZKStnWn8Zo": {
+        "family": "5ZKStnWn8Zo",
+        "partition": "test_unseen"
+      },
+      "ARNzJeq3xxb": {
+        "family": "ARNzJeq3xxb",
+        "partition": "test_unseen"
+      },
+      "RPmz2sHmrrY": {
+        "family": "RPmz2sHmrrY",
+        "partition": "test_unseen"
+      },
+      "UwV83HsGsw3": {
+        "family": "UwV83HsGsw3",
+        "partition": "test_unseen"
+      },
+      "Vt2qJdWjCF2": {
+        "family": "Vt2qJdWjCF2",
+        "partition": "test_unseen"
+      },
+      "WYY7iVyf5p8": {
+        "family": "WYY7iVyf5p8",
+        "partition": "test_unseen"
+      },
+      "YFuZgdQ5vWj": {
+        "family": "YFuZgdQ5vWj",
+        "partition": "test_unseen"
+      },
+      "YVUC4YcDtcY": {
+        "family": "YVUC4YcDtcY",
+        "partition": "test_unseen"
+      },
+      "fzynW3qQPVF": {
+        "family": "fzynW3qQPVF",
+        "partition": "test_unseen"
+      },
+      "gYvKGZ5eRqb": {
+        "family": "gYvKGZ5eRqb",
+        "partition": "test_unseen"
+      },
+      "gxdoqLR6rwA": {
+        "family": "gxdoqLR6rwA",
+        "partition": "test_unseen"
+      },
+      "jtcxE69GiFV": {
+        "family": "jtcxE69GiFV",
+        "partition": "test_unseen"
+      },
+      "pa4otMbVnkk": {
+        "family": "pa4otMbVnkk",
+        "partition": "test_unseen"
+      },
+      "q9vSo1VnCiC": {
+        "family": "q9vSo1VnCiC",
+        "partition": "test_unseen"
+      },
+      "rqfALeAoiTq": {
+        "family": "rqfALeAoiTq",
+        "partition": "test_unseen"
+      },
+      "wc2JMjhGNzB": {
+        "family": "wc2JMjhGNzB",
+        "partition": "test_unseen"
+      },
+      "yqstnuAEVhm": {
+        "family": "yqstnuAEVhm",
         "partition": "test_unseen"
       }
     }

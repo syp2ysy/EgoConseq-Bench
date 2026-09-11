@@ -27,6 +27,7 @@ import itertools
 import json
 from collections import defaultdict
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import Iterable, Optional, Sequence, Tuple
 
 from pipeline import (
@@ -48,7 +49,8 @@ PROPOSAL_PROTOCOL_V1 = "depth-conditioned-pair-v1"
 PROPOSAL_PROTOCOL_V2 = "depth-conditioned-pair-v2"
 PROPOSAL_PROTOCOL_V3 = "depth-conditioned-action-bank-v3"
 PROPOSAL_PROTOCOL_V4 = "depth-conditioned-action-bank-v4"
-PROPOSAL_PROTOCOL_VERSION = PROPOSAL_PROTOCOL_V4
+PROPOSAL_PROTOCOL_V5 = "depth-conditioned-action-bank-v5"
+PROPOSAL_PROTOCOL_VERSION = PROPOSAL_PROTOCOL_V5
 
 # The two action-sampling policies a run may commit to. They are mutually
 # exclusive: a file-driven run performs no depth proposal at all and must not
@@ -59,6 +61,7 @@ PROPOSAL_PROTOCOL_VERSION = PROPOSAL_PROTOCOL_V4
 DEPTH_CONDITIONED_POLICY = "depth_conditioned_action_proposal_v1"
 DEPTH_CONDITIONED_POLICY_V3 = "depth_conditioned_action_bank_v3"
 DEPTH_CONDITIONED_POLICY_V4 = "depth_conditioned_action_bank_v4"
+DEPTH_CONDITIONED_POLICY_V5 = "depth_conditioned_action_bank_v5"
 EXPLICIT_ACTION_FILE_POLICY = "explicit_action_file_v1"
 _POLICY_BY_ACTION_MODE = {
     "balanced": DEPTH_CONDITIONED_POLICY,
@@ -83,7 +86,7 @@ def policy_for_new_collection(action_mode) -> Optional[str]:
     separate prevents a v3 rollout from silently rewriting old records.
     """
     if str(action_mode or "") == "balanced":
-        return DEPTH_CONDITIONED_POLICY_V4
+        return DEPTH_CONDITIONED_POLICY_V5
     return expected_policy_for_action_mode(action_mode)
 
 
@@ -93,6 +96,7 @@ def declared_policy_matches_action_mode(action_mode, declared) -> bool:
         return declared in {
             DEPTH_CONDITIONED_POLICY_V3,
             DEPTH_CONDITIONED_POLICY_V4,
+            DEPTH_CONDITIONED_POLICY_V5,
         }
     return declared == expected_policy_for_action_mode(action_mode)
 
@@ -133,6 +137,8 @@ PAIRS_PER_LENGTH_DEFAULT = 12
 NATURAL_PER_LENGTH_DEFAULT = 40
 NATURAL_DYNAMIC_VARIANT = "natural_dynamic"
 A1_CONTROL_VARIANT = "a1_control"
+ACTION_REFRESH_VARIANT = "action_refresh"
+A2_RANK_COLLISION_VARIANT = "a2_rank_collision"
 
 _PROVENANCE_FIELDS_V1 = (
     "protocol", "template_id", "target_forward_leg_number",
@@ -148,12 +154,14 @@ _PROVENANCE_FIELDS_V1 = (
 _PROVENANCE_FIELDS_V2 = _PROVENANCE_FIELDS_V1
 _PROVENANCE_FIELDS_V3 = _PROVENANCE_FIELDS_V2
 _PROVENANCE_FIELDS_V4 = _PROVENANCE_FIELDS_V3
+_PROVENANCE_FIELDS_V5 = _PROVENANCE_FIELDS_V4
 
 PROVENANCE_FIELDS_BY_PROTOCOL = {
     PROPOSAL_PROTOCOL_V1: _PROVENANCE_FIELDS_V1,
     PROPOSAL_PROTOCOL_V2: _PROVENANCE_FIELDS_V2,
     PROPOSAL_PROTOCOL_V3: _PROVENANCE_FIELDS_V3,
     PROPOSAL_PROTOCOL_V4: _PROVENANCE_FIELDS_V4,
+    PROPOSAL_PROTOCOL_V5: _PROVENANCE_FIELDS_V5,
 }
 PROVENANCE_FIELDS = PROVENANCE_FIELDS_BY_PROTOCOL[PROPOSAL_PROTOCOL_VERSION]
 
@@ -348,7 +356,8 @@ class Template:
 
 def build_template_bank(rng, *, lengths=tuple(config.GEN_LENGTHS),
                         per_length: int = config.MAIN_ACTION_PROPOSAL_PER_LENGTH,
-                        turns=tuple(config.GEN_TURNS_DEG)) -> list:
+                        turns=tuple(config.GEN_TURNS_DEG),
+                        initial_turns=tuple(config.INITIAL_TURNS_DEG)) -> list:
     """Draw the run-level structural vocabulary, once, with no distances.
 
     The target leg is cycled rather than drawn so every Forward position gets
@@ -370,9 +379,12 @@ def build_template_bank(rng, *, lengths=tuple(config.GEN_LENGTHS),
             start = starts[len(produced) % len(starts)]
             forwards = _forward_count(length, start)
             target = targets_drawn[start] % forwards + 1
+            turn_count = length - forwards
             angles = tuple(
-                float(rng.choice(turns))
-                for _ in range(length - forwards))
+                float(rng.choice(
+                    initial_turns if start == "turn" and index == 0
+                    else turns))
+                for index in range(turn_count))
             ranks = tuple(
                 int(rng.integers(0, len(GRID_M)))
                 for _ in range(forwards - 1))
@@ -426,7 +438,7 @@ def action_sampler_contract_sha256(templates: Iterable[Template],
                 int(ordinary_actions_per_pose)),
             "c1_queries_per_pose": config.C1_QUERIES_PER_POSE,
             "c1_neighbors_per_query": config.C1_NEIGHBORS_PER_QUERY,
-            "retention": "stable-ordinary-reserve.v1",
+            "retention": "progressive-stability-fill.v1",
             "c1_reservation": "certified-clear-query-families.v1",
         },
         "dynamic_natural": {
@@ -846,21 +858,60 @@ def _natural_stratum_grid(values, stratum: str) -> tuple[float, ...]:
     if not grid:
         return ()
     if len(grid) == 1:
-        return grid
+        return grid if stratum == "near" else ()
+    if len(grid) == 2:
+        if stratum == "short":
+            return grid[:1]
+        if stratum == "mid":
+            return ()
+        if stratum == "near":
+            return grid[1:]
+        raise ValueError(f"unknown natural distance stratum: {stratum}")
     first = max(1, (len(grid) + 2) // 3)
     second = max(first + 1, (2 * len(grid) + 2) // 3)
     second = min(second, len(grid))
     if stratum == "short":
         return grid[:first]
     if stratum == "mid":
-        return grid[first:second] or grid[first - 1:first]
+        return grid[first:second]
     if stratum == "near":
-        return grid[second:] or grid[-1:]
+        return grid[second:]
     raise ValueError(f"unknown natural distance stratum: {stratum}")
 
 
-def _natural_program_space(length: int, starts, reach_m: float, stratum: str):
-    programs = []
+def _natural_start_space(
+        length: int, start: str, feasible, stratum: str) -> tuple:
+    pattern = action_pattern(length, start)
+    forwards = _natural_stratum_grid(feasible, stratum)
+    if not forwards:
+        return ()
+    domains = [
+        forwards if kind == "forward" else (
+            config.INITIAL_TURNS_DEG
+            if index == 0 else config.GEN_TURNS_DEG)
+        for index, kind in enumerate(pattern)
+    ]
+    return tuple(tuple(
+        Forward(float(value)) if kind == "forward" else Turn(float(value))
+        for kind, value in zip(pattern, values)
+    ) for values in itertools.product(*domains))
+
+
+@lru_cache(maxsize=None)
+def _natural_fov_mask(
+        length: int, start: str, feasible_count: int, stratum: str,
+        half_fov_deg: float) -> tuple[bool, ...]:
+    """FOV decisions aligned with one start-pattern's program order."""
+    space = _natural_start_space(
+        length, start, GRID_M[:feasible_count], stratum)
+    return tuple(A.inside_initial_fov(
+        actions, half_fov_deg) for actions in space)
+
+
+def _natural_program_space_and_fov_mask(
+        length: int, starts, reach_m: float, stratum: str, *,
+        half_fov_deg: float, use_cache: bool) -> tuple[list, list[bool]]:
+    programs, mask = [], []
     for start in starts:
         pattern = action_pattern(length, start)
         forward_count = sum(kind == "forward" for kind in pattern)
@@ -868,27 +919,27 @@ def _natural_program_space(length: int, starts, reach_m: float, stratum: str):
         if cap is None:
             continue
         feasible = tuple(value for value in GRID_M if value <= cap + _EPS)
-        forwards = _natural_stratum_grid(feasible, stratum)
-        if not forwards:
-            continue
-        domains = [
-            forwards if kind == "forward" else config.GEN_TURNS_DEG
-            for kind in pattern
-        ]
-        for values in itertools.product(*domains):
-            programs.append(tuple(
-                Forward(float(value)) if kind == "forward"
-                else Turn(float(value))
-                for kind, value in zip(pattern, values)
-            ))
-    return programs
+        start_space = _natural_start_space(
+            length, start, feasible, stratum)
+        if use_cache:
+            start_mask = _natural_fov_mask(
+                length, start, len(feasible), stratum,
+                float(half_fov_deg))
+        else:
+            start_mask = tuple(A.inside_initial_fov(
+                actions, float(half_fov_deg))
+                for actions in start_space)
+        assert len(start_mask) == len(start_space)
+        programs.extend(start_space)
+        mask.extend(start_mask)
+    return programs, mask
 
 
 def build_dynamic_natural_bank(
         rng, proxy, *, half_fov_deg: float,
         lengths: Iterable[int] = config.GEN_LENGTHS,
         per_length: int = NATURAL_PER_LENGTH_DEFAULT,
-        rejections=None, stats=None) -> dict:
+        rejections=None, stats=None, _use_fov_cache: bool = True) -> dict:
     """Draw one pose's natural programs from one depth-supported budget.
 
     The initial frame, public body radius and FOV determine the programme-wide
@@ -909,48 +960,65 @@ def build_dynamic_natural_bank(
         accepted = []
         seen = set()
         for stratum, stratum_target in _natural_stratum_targets(target).items():
-            space = _natural_program_space(
-                length, starts, reach_m, stratum)
-            if not space:
-                _count(rejections, "natural_budget_no_leg")
-                continue
-            order = rng.permutation(len(space))
+            start_targets = {starts[0]: int(stratum_target)}
+            if len(starts) == 2:
+                turn_target = int(stratum_target) // 2
+                start_targets = {
+                    "forward": int(stratum_target) - turn_target,
+                    "turn": turn_target,
+                }
             stratum_accepted = 0
-            for raw_index in order:
-                actions = space[int(raw_index)]
-                key = A._action_key(actions)
-                if key in seen:
+            for start in starts:
+                start_target = start_targets[start]
+                if not start_target:
                     continue
-                # Rejected programs are deterministic for this pose. Marking
-                # them seen before geometry prevents the old 8,000-draw loop
-                # from paying the same failed corridor query repeatedly.
-                seen.add(key)
-                if not A.inside_initial_fov(
-                        actions, float(half_fov_deg),
-                        radius_m=float(getattr(proxy, "radius_m", 0.0))):
-                    _count(rejections, "natural_dynamic_out_of_view")
+                space, fov_mask = _natural_program_space_and_fov_mask(
+                    length, (start,), reach_m, stratum,
+                    half_fov_deg=float(half_fov_deg),
+                    use_cache=bool(_use_fov_cache))
+                if not space:
+                    _count(rejections, "natural_budget_no_leg")
                     continue
-                coverage = proxy_natural_coverage(
-                    actions, proxy, half_fov_deg=half_fov_deg,
-                    rejections=rejections)
-                if coverage is None:
-                    continue
-                tag = candidate_tag(actions)
-                accepted.append(Candidate(
-                    tag=tag, length=length, actions=tuple(actions),
-                    variant=NATURAL_DYNAMIC_VARIANT,
-                    provenance={
-                        "protocol": PROPOSAL_PROTOCOL_VERSION,
-                        "template_id": f"N{length}-{tag.split('-', 1)[1]}",
-                        "variant": NATURAL_DYNAMIC_VARIANT,
-                        "natural_distance_stratum": stratum,
-                        "proxy_coverage": float(coverage),
-                    }))
-                stratum_accepted += 1
-                _tally(stats, "proposal_natural_dynamic_materialized")
-                _tally(stats, f"proposal_natural_dynamic.{stratum}.L{length}")
-                if stratum_accepted == stratum_target:
-                    break
+                start_accepted = 0
+                for raw_index in rng.permutation(len(space)):
+                    actions = space[int(raw_index)]
+                    key = A._action_key(actions)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    if not fov_mask[int(raw_index)]:
+                        _count(rejections, "natural_dynamic_out_of_view")
+                        continue
+                    coverage = proxy_natural_coverage(
+                        actions, proxy, half_fov_deg=half_fov_deg,
+                        rejections=rejections)
+                    if coverage is None:
+                        continue
+                    tag = candidate_tag(actions)
+                    accepted.append(Candidate(
+                        tag=tag, length=length, actions=tuple(actions),
+                        variant=NATURAL_DYNAMIC_VARIANT,
+                        provenance={
+                            "protocol": PROPOSAL_PROTOCOL_VERSION,
+                            "template_id": f"N{length}-{tag.split('-', 1)[1]}",
+                            "variant": NATURAL_DYNAMIC_VARIANT,
+                            "starts_with": start,
+                            "natural_distance_stratum": stratum,
+                            "proxy_coverage": float(coverage),
+                        }))
+                    start_accepted += 1
+                    stratum_accepted += 1
+                    _tally(stats, "proposal_natural_dynamic_materialized")
+                    _tally(stats,
+                           f"proposal_natural_dynamic.{start}.{stratum}.L{length}")
+                    if start_accepted == start_target:
+                        break
+                if start_accepted < start_target:
+                    _tally(
+                        stats,
+                        f"proposal_natural_dynamic_shortfall."
+                        f"{start}.{stratum}.L{length}",
+                        start_target - start_accepted)
             if stratum_accepted < stratum_target:
                 _tally(
                     stats,
@@ -1103,8 +1171,7 @@ def _verify_safe(actions, proxy, *, half_fov_deg, rejections):
     if proxy.rollout(actions).get("collision") is not False:
         return _count(rejections, "proxy_safe_collides")
     if not A.inside_initial_fov(
-            actions, float(half_fov_deg), max_arc_m=None,
-            radius_m=float(getattr(proxy, "radius_m", 0.0))):
+            actions, float(half_fov_deg), max_arc_m=None):
         return _count(rejections, "proxy_safe_out_of_view")
     coverage = float(proxy.coverage(actions, None))
     if coverage < config.EVIDENCE_COVERAGE_MIN - _EPS:
@@ -1179,8 +1246,7 @@ def proxy_natural_coverage(actions, proxy, *, half_fov_deg, rejections=None):
     contact = (float(verdict["first_contact_arc_m"])
                if verdict.get("collision") is True else None)
     if not A.inside_initial_fov(
-            actions, float(half_fov_deg), max_arc_m=contact,
-            radius_m=float(getattr(proxy, "radius_m", 0.0))):
+            actions, float(half_fov_deg), max_arc_m=contact):
         return _count(rejections, "proxy_natural_out_of_view")
     max_arc = (None if contact is None
                else contact + config.ORACLE_CONTACT_TOL_M)
@@ -1209,8 +1275,7 @@ def _verify_collision(actions, proxy, *, half_fov_deg, target_action_index,
         return _count(rejections, "proxy_collision_wrong_leg")
     contact_arc = float(verdict["first_contact_arc_m"])
     if not A.inside_initial_fov(
-            actions, float(half_fov_deg), max_arc_m=contact_arc,
-            radius_m=float(getattr(proxy, "radius_m", 0.0))):
+            actions, float(half_fov_deg), max_arc_m=contact_arc):
         return _count(rejections, "proxy_collision_out_of_view")
     coverage = float(proxy.coverage(
         actions, contact_arc + config.ORACLE_CONTACT_TOL_M))

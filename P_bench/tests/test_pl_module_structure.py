@@ -27,8 +27,6 @@ MAX_MODULE_LINES = 1_600
 THIN_CLI_MAX_LINES = 100
 THIN_CLIS = (
     ROOT / "scripts" / "collect.py",
-    ROOT / "scripts" / "build_v16_candidate_preview.py",
-    ROOT / "scripts" / "eval_benchmark.py",
 )
 
 
@@ -246,7 +244,7 @@ def test_release_gates_have_one_authoritative_config_source():
     assert duplicated == set()
 
 
-def test_bearing_sector_has_one_authoritative_implementation():
+def test_horizontal_direction_has_one_authoritative_implementation():
     definitions = []
     for path in (ROOT / "pipeline").glob("*.py"):
         tree = ast.parse(path.read_text())
@@ -254,7 +252,7 @@ def test_bearing_sector_has_one_authoritative_implementation():
             f"{path.name}:{node.lineno}"
             for node in ast.walk(tree)
             if isinstance(node, ast.FunctionDef)
-            and node.name in {"bearing_sector", "_bearing_sector"}
+            and node.name in {"horizontal_direction", "_horizontal_direction"}
         )
     assert len(definitions) == 1
     assert definitions[0].startswith("actions.py:")

@@ -137,16 +137,14 @@ def test_the_probe_bound_is_a_sensing_property_not_a_publication_one():
 def test_production_bank_exposes_over_200_actions_and_uses_v4_pose_limits():
     """The bank is wide, the shortlist is narrow, and the gap is the saving.
 
-    The private stability reserve may try 48 ordinary actions, while a record
-    retains at most 36 ordinary actions plus 12 C1 neighbours. The published
-    ``candidate_budget`` therefore remains 48, which ``validate.py`` refuses
-    to let records exceed.
+    Progressive filling may inspect up to 48 ordinary actions, but stops once
+    36 stable actions are found. The record can add at most 12 C1 neighbours,
+    while its published ``candidate_budget`` remains capped at 48.
     """
     assert config.MAIN_ACTION_PROPOSAL_PER_LENGTH == 40
     assert AP.NATURAL_PER_LENGTH_DEFAULT == 40
     assert AP.PAIRS_PER_LENGTH_DEFAULT == 12
     assert config.ACTION_CANDIDATE_MAX_PER_POSE == 48
-    assert config.ACTION_CANDIDATE_ORDINARY_ATTEMPTS_PER_POSE == 48
     assert config.ACTION_CANDIDATE_ORDINARY_PER_POSE == 36
     assert config.C1_QUERIES_PER_POSE == 2
     assert config.C1_NEIGHBORS_PER_QUERY == 6
@@ -209,6 +207,9 @@ def test_dynamic_natural_bank_stratifies_10_10_20_by_depth_reach():
     }
     assert {name: len(values) for name, values in strata.items()} == {
         "short": 10, "mid": 10, "near": 20}
+    starts = [candidate.provenance["starts_with"]
+              for values in strata.values() for candidate in values]
+    assert starts.count("forward") == starts.count("turn") == 20
     maxima = {
         name: {
             max(action.m for action in candidate.actions
@@ -221,6 +222,43 @@ def test_dynamic_natural_bank_stratifies_10_10_20_by_depth_reach():
     assert max(maxima["mid"]) <= min(maxima["near"])
     assert all(candidate.variant == AP.NATURAL_DYNAMIC_VARIANT
                for values in strata.values() for candidate in values)
+
+
+def test_small_natural_grids_assign_each_distance_to_one_stratum():
+    assert AP._natural_stratum_grid((0.5,), "short") == ()
+    assert AP._natural_stratum_grid((0.5,), "mid") == ()
+    assert AP._natural_stratum_grid((0.5,), "near") == (0.5,)
+
+    strata = {
+        name: AP._natural_stratum_grid((0.5, 1.0), name)
+        for name in ("short", "mid", "near")
+    }
+    assert strata == {
+        "short": (0.5,),
+        "mid": (),
+        "near": (1.0,),
+    }
+    assert len(set().union(*map(set, strata.values()))) == sum(
+        len(values) for values in strata.values())
+
+
+def test_fov_mask_cache_preserves_draws_and_rejection_accounting():
+    for seed in range(5):
+        cached_rejections, direct_rejections = {}, {}
+        cached_stats, direct_stats = {}, {}
+        cached = AP.build_dynamic_natural_bank(
+            np.random.default_rng(seed), ScriptedProxy([], reach=4.0),
+            lengths=(3, 4, 5), per_length=12, half_fov_deg=39.5,
+            rejections=cached_rejections, stats=cached_stats)
+        direct = AP.build_dynamic_natural_bank(
+            np.random.default_rng(seed), ScriptedProxy([], reach=4.0),
+            lengths=(3, 4, 5), per_length=12, half_fov_deg=39.5,
+            rejections=direct_rejections, stats=direct_stats,
+            _use_fov_cache=False)
+
+        assert cached == direct
+        assert cached_rejections == direct_rejections
+        assert cached_stats == direct_stats
 
 
 def test_control_actions_are_screened_without_being_rewritten():
@@ -491,11 +529,9 @@ def test_collision_fov_is_checked_only_up_to_contact(monkeypatch):
     seen = []
     real = A.inside_initial_fov
 
-    def spy(actions, half_fov_deg, *, max_arc_m=None, radius_m=0.0):
+    def spy(actions, half_fov_deg, *, max_arc_m=None):
         seen.append(max_arc_m)
-        return real(
-            actions, half_fov_deg, max_arc_m=max_arc_m,
-            radius_m=radius_m)
+        return real(actions, half_fov_deg, max_arc_m=max_arc_m)
 
     monkeypatch.setattr(A, "inside_initial_fov", spy)
     spec = template(length=1, starts_with="forward", turn_angles=(),
@@ -819,8 +855,8 @@ def test_a_template_its_prefix_cannot_support_costs_the_template_not_the_pose():
     assert tags == {"T-001"}
 
 
-def test_old_provenance_stays_frozen_while_the_collector_moves_to_v4():
-    """Four frozen contracts, no adapter: old records keep their field sets.
+def test_old_provenance_stays_frozen_while_the_collector_moves_to_v5():
+    """Frozen contracts have no adapter: old records keep their field sets.
 
     The field tuple is pinned literally here because the danger is silent -- an
     edit that grew v2's fields by mutating the shared tuple would rewrite the
@@ -830,10 +866,12 @@ def test_old_provenance_stays_frozen_while_the_collector_moves_to_v4():
     assert AP.PROPOSAL_PROTOCOL_V2 == "depth-conditioned-pair-v2"
     assert AP.PROPOSAL_PROTOCOL_V3 == "depth-conditioned-action-bank-v3"
     assert AP.PROPOSAL_PROTOCOL_V4 == "depth-conditioned-action-bank-v4"
-    assert AP.PROPOSAL_PROTOCOL_VERSION == AP.PROPOSAL_PROTOCOL_V4
+    assert AP.PROPOSAL_PROTOCOL_V5 == "depth-conditioned-action-bank-v5"
+    assert AP.PROPOSAL_PROTOCOL_VERSION == AP.PROPOSAL_PROTOCOL_V5
     assert set(AP.PROVENANCE_FIELDS_BY_PROTOCOL) == {
         AP.PROPOSAL_PROTOCOL_V1, AP.PROPOSAL_PROTOCOL_V2,
-        AP.PROPOSAL_PROTOCOL_V3, AP.PROPOSAL_PROTOCOL_V4}
+        AP.PROPOSAL_PROTOCOL_V3, AP.PROPOSAL_PROTOCOL_V4,
+        AP.PROPOSAL_PROTOCOL_V5}
     assert AP.PROVENANCE_FIELDS_BY_PROTOCOL[AP.PROPOSAL_PROTOCOL_V1] == (
         "protocol", "template_id", "target_forward_leg_number",
         "target_action_index", "a2_capable", "variant", "b_j_m",
@@ -845,7 +883,7 @@ def test_old_provenance_stays_frozen_while_the_collector_moves_to_v4():
     assert AP.PROVENANCE_FIELDS_BY_PROTOCOL[AP.PROPOSAL_PROTOCOL_V3] == \
         AP.PROVENANCE_FIELDS_BY_PROTOCOL[AP.PROPOSAL_PROTOCOL_V1]
     assert AP.PROVENANCE_FIELDS == \
-        AP.PROVENANCE_FIELDS_BY_PROTOCOL[AP.PROPOSAL_PROTOCOL_V4]
+        AP.PROVENANCE_FIELDS_BY_PROTOCOL[AP.PROPOSAL_PROTOCOL_V5]
 
     # Reach and cap are sampling hints over a depth array no record stores, so
     # no validator could recompute them; v2 therefore publishes the same
@@ -853,7 +891,7 @@ def test_old_provenance_stays_frozen_while_the_collector_moves_to_v4():
     spec = template(length=1, starts_with="forward", turn_angles=(),
                     target_forward_leg_number=1, distance_ranks=())
     pair = AP.materialize_pair(spec, ScriptedProxy([1.5]), half_fov_deg=90.0)
-    assert pair.safe.provenance["protocol"] == AP.PROPOSAL_PROTOCOL_V4
+    assert pair.safe.provenance["protocol"] == AP.PROPOSAL_PROTOCOL_V5
     assert set(pair.safe.provenance) == set(
         AP.PROVENANCE_FIELDS_BY_PROTOCOL[AP.PROPOSAL_PROTOCOL_V1])
 
@@ -1094,7 +1132,10 @@ def test_every_length_fills_its_budget_except_structurally_capped_ones():
     # Length 1 has one legal program shape, [Forward], and no turn or rank slot
     # to vary, so its structural capacity is a single template.
     assert counts[1] == 1
-    assert all(counts[length] == 12 for length in (2, 3, 4, 5, 6))
+    # L2 stops at five Forward-first and four shared-FOV Turn-first templates;
+    # taking the sixth Forward-first template would break the start balance.
+    assert counts[2] == 9
+    assert all(counts[length] == 12 for length in (3, 4, 5, 6))
 
 
 def test_template_bank_is_deterministic_and_bounded():
@@ -1259,11 +1300,24 @@ def test_pair_checks_prefix_collision_state_before_materializing_suffix():
         spec, OrderingProxy([1.5, 1.0]), half_fov_deg=90.0) is not None
 
 
-def test_swept_disc_fov_rejects_a_visible_centerline_with_hidden_body_edge():
+def test_initial_fov_is_a_centerline_predicate_not_a_body_radius_gate():
     actions = [Turn(20.0), Forward(4.0)]
 
     assert A.inside_initial_fov(actions, 30.0)
-    assert not A.inside_initial_fov(actions, 30.0, radius_m=1.5)
+    with pytest.raises(TypeError, match="radius_m"):
+        A.inside_initial_fov(actions, 30.0, radius_m=1.5)
+
+
+def test_turn_first_templates_never_start_with_45_degrees():
+    turn_first = [
+        spec for spec in _templates(seed=11, per_length=40)
+        if spec.starts_with == "turn"
+    ]
+
+    assert turn_first
+    assert {spec.turn_angles[0] for spec in turn_first} <= {
+        -30.0, -15.0, 15.0, 30.0,
+    }
 
 
 def test_boundary_beyond_the_grid_reach_cannot_form_a_collision_variant():

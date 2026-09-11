@@ -27,7 +27,7 @@ from pipeline.frame import Frame, TerminalRGBObservation
 
 TERMINAL_RGB_ASSET_SCHEMA = "terminal-rgb-asset.v1"
 RENDERER_PROTOCOL = "habitat-sim-rgb.v1"
-B1K_RENDERER_PROTOCOL = "b1k-observation.v5"
+B1K_RENDERER_PROTOCOL = record.B1K_RENDERER_INSTANCE_PROTOCOL
 GS_RENDERER_PROTOCOL = "gsplat-rgb-ed.v1"
 BLOCK_L1_PROTOCOL = "block-l1.v1"
 TERMINAL_ASSET_RECORD_AUTHORITY = "record_recomputable"
@@ -225,8 +225,9 @@ def _source_binding(source: dict, *, scene_id: str) -> dict:
     dataset = source.get("source_dataset")
     if dataset not in {"r2r", "b1k", "gs"}:
         raise ValueError("terminal RGB source dataset is unsupported")
+    source_split = source.get("official_split")
     if (source.get("scene_id") != scene_id or
-            source.get("official_split") != "train"):
+            source_split not in dataset_contracts.OFFICIAL_SOURCE_SPLITS):
         label = str(dataset).upper()
         raise ValueError(
             f"terminal RGB source does not match the {label} frame")
@@ -238,7 +239,7 @@ def _source_binding(source: dict, *, scene_id: str) -> dict:
     value = {
         "scene_id": str(scene_id),
         "source_dataset": str(dataset),
-        "official_split": "train",
+        "official_split": source_split,
         "source_manifest_sha256": source["source_manifest_sha256"],
         "source_assets_sha256": source["source_assets_sha256"],
         "scene_asset_sha256": scene_asset["sha256"],
@@ -255,6 +256,8 @@ def _source_binding(source: dict, *, scene_id: str) -> dict:
         }
     if dataset != "b1k":
         raise ValueError("terminal RGB source dataset is unsupported")
+    if source_split != "train":
+        raise ValueError("terminal RGB B1K source split is invalid")
     if source.get("split_authority") != "project_defined":
         raise ValueError("terminal RGB B1K split authority is invalid")
     authority_asset = next(
@@ -269,11 +272,14 @@ def _source_binding(source: dict, *, scene_id: str) -> dict:
 
 
 def _renderer_binding(
-        source_binding: dict, *, render_transaction: Optional[str] = None
+        source_binding: dict, *, b1k_contract: Optional[dict] = None
         ) -> dict:
     dataset = source_binding.get("source_dataset")
     if dataset == "b1k":
-        if render_transaction != record.B1K_C1_RENDER_MODE:
+        contract = b1k_contract or {}
+        render_transaction = contract.get("c1_render_mode")
+        if render_transaction not in \
+                record.B1K_C1_RENDER_MODE_BY_CONTRACT.values():
             raise ValueError(
                 "B1K terminal RGB requires its simultaneous batch "
                 "transaction")
@@ -284,8 +290,8 @@ def _renderer_binding(
             "source_scene_sha256":
                 source_binding["scene_authority_sha256"],
             "observation_profile_sha256":
-                record.B1K_OBSERVATION_PROFILE_SHA256,
-            "c1_render_mode": record.B1K_C1_RENDER_MODE,
+                contract["observation_profile_sha256"],
+            "c1_render_mode": render_transaction,
         }
     if dataset == "gs":
         return {
@@ -345,7 +351,11 @@ def materialize_terminal_rgb_asset(
                     "GS terminal RGB must not use a legacy collection "
                     "contract")
         else:
-            expected_contract = record.collection_contract(source, "main")
+            contract_version = None
+            if dataset == "b1k" and isinstance(collection_contract, dict):
+                contract_version = collection_contract.get("version")
+            expected_contract = record.collection_contract(
+                source, "main", contract_version=contract_version)
             if collection_contract != expected_contract:
                 label = "B1K" if dataset == "b1k" else "R2R"
                 raise ValueError(
@@ -437,7 +447,8 @@ def materialize_terminal_rgb_asset(
         },
         "sensor": sensor,
         "renderer": _renderer_binding(
-            source_binding, render_transaction=render_transaction),
+            source_binding,
+            b1k_contract=(collection_contract if dataset == "b1k" else None)),
         "source": source_binding,
     }
     return {**value, "sha256": record.canonical_atom_sha256(value)}
@@ -579,8 +590,8 @@ def validate_terminal_rgb_asset_metadata(rec: dict, outcome: dict) -> dict:
     collection_contract = rec.get("collection_contract") or {}
     expected_renderer = _renderer_binding(
         expected_source,
-        render_transaction=(
-            collection_contract.get("c1_render_mode")
+        b1k_contract=(
+            collection_contract
             if expected_source.get("source_dataset") == "b1k" else None),
     )
     if atom.get("renderer") != expected_renderer:

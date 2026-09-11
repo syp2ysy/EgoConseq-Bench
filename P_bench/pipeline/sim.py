@@ -282,7 +282,8 @@ class SimSession:
                  official_split: Optional[str] = None,
                  heights=None, hfov: float = config.HFOV_DEG,
                  vfov: float = config.VFOV_DEG, fovs=None,
-                 semantic_query_workers: int = 1):
+                 semantic_query_workers: int = 1,
+                 gpu_device_id: int = 0):
         self.scene_glb = scene_glb
         self.scene_id = os.path.basename(os.path.dirname(scene_glb))  # e.g. 00800-TEEsavR23oF
         self.source_dataset = str(source_dataset)
@@ -299,6 +300,7 @@ class SimSession:
         self._render_profiles = render_profile_set(self._heights, self._fovs)
         backend = habitat_sim.SimulatorConfiguration()
         backend.scene_id = scene_glb
+        backend.gpu_device_id = int(gpu_device_id)
         if scene_dataset_cfg:
             backend.scene_dataset_config_file = scene_dataset_cfg
         specs = []

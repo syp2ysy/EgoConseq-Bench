@@ -14,7 +14,8 @@ import numpy as np
 import pytest
 
 from pipeline import (
-    c1_counterfactual, collection_proposals, collection_runtime, config,
+    action_sampling, c1_counterfactual, collection_proposals,
+    collection_runtime, config,
     consequence,
     consensus as consensus_module, record as record_fields, rollout,
     semantic as semantic_module, sim as sim_module, source_manifest, validate,
@@ -206,7 +207,6 @@ def test_r2r_final_consensus_does_not_trust_cached_pre_attribution_acceptance():
         Disc(0.2),
         actions,
         nav=nav,
-        target_ids=[],
         cached_physical=physical,
         cached_depth_physical=depth,
         cached_corridor_coverage=1.0,
@@ -294,10 +294,8 @@ def test_r2r_main_evaluator_wires_strict_gate_into_judge(
     evaluator = collection_runtime._make_structured_spec_evaluator(
         args=SimpleNamespace(collection_mode="main"),
         variants=[(Sim(), frame)],
-        target_ids_by_frame={frame.frame_id: []},
         group_labels={"action": "safe"},
         precheck_cache={},
-        render_caches=collections.defaultdict(dict),
         stats=stats,
         skipped=collections.Counter(),
         pending_a_certificates=pending,
@@ -312,7 +310,7 @@ def test_r2r_main_evaluator_wires_strict_gate_into_judge(
     })
 
     assert seen == {"judge": True}
-    assert stats["a_stability_rerollouts"] == 7
+    assert stats["a_stability_rerollouts"] == 6
     assert len(pending) == 1
 
 
@@ -365,10 +363,8 @@ def test_rejected_spec_runs_no_stability_for_an_earlier_passing_sibling(
     evaluator = collection_runtime._make_structured_spec_evaluator(
         args=SimpleNamespace(collection_mode="main"),
         variants=[(Sim(), first), (Sim(), second)],
-        target_ids_by_frame={first.frame_id: [], second.frame_id: []},
         group_labels={"action": "safe"},
         precheck_cache={},
-        render_caches=collections.defaultdict(dict),
         stats=stats,
         skipped=collections.Counter(),
         pending_a_certificates=pending,
@@ -429,10 +425,8 @@ def test_natural_evaluator_does_not_request_retired_semantic_rendering(
     evaluator = collection_runtime._make_structured_spec_evaluator(
         args=SimpleNamespace(collection_mode="main"),
         variants=[(Sim(), frame)],
-        target_ids_by_frame={frame.frame_id: []},
         group_labels={"action": "safe"},
         precheck_cache={},
-        render_caches=collections.defaultdict(dict),
         stats=collections.Counter(),
         skipped=collections.Counter(),
         pending_a_certificates=[],
@@ -455,7 +449,6 @@ def _minimal_pose_evaluation_state(frame):
     ]
     return {
         "variants": [(object(), frame)],
-        "target_ids_by_frame": {frame.frame_id: []},
         "group_labels": {"first": "safe", "second": "safe"},
         "precheck_cache": {},
         "selected": selected,
@@ -474,71 +467,88 @@ def _minimal_pose_evaluation_state(frame):
     }
 
 
-def test_pose_rejection_drops_pending_certificates_without_finalizing(
-        monkeypatch):
-    captured = {}
-
-    def fake_factory(**kwargs):
-        captured["pending"] = kwargs["pending_a_certificates"]
-
-        def evaluate(spec, future_cache_scope=None):
-            del future_cache_scope
-            captured["pending"].append(spec["action_tag"])
-            if spec["action_tag"] == "second":
-                return None
-            return {"frame": [{"outcome_id": "first"}]}
-
-        return evaluate
-
-    monkeypatch.setattr(
-        collection_runtime, "_make_structured_spec_evaluator", fake_factory)
-    monkeypatch.setattr(
-        collection_runtime, "finalize_a_stability_certificates",
-        lambda _pending: pytest.fail("rejected pose must not finalize A3"))
-
-    result = collection_runtime._evaluate_pose_candidates(
-        _minimal_pose_evaluation_state(make_frame()),
-        args=SimpleNamespace(), stats=collections.Counter(),
-        skipped=collections.Counter())
-
-    assert result is None
-    assert captured["pending"] == ["first", "second"]
-
-
-def test_successful_pose_finalizes_pending_certificates_once(monkeypatch):
-    captured = {"finalized": [], "outcomes": []}
+def _install_progressive_stability_fake(
+        monkeypatch, *, unstable_tags=()):
+    captured = {"evaluated": [], "batches": []}
+    unstable = set(unstable_tags)
 
     def fake_factory(**kwargs):
         pending = kwargs["pending_a_certificates"]
 
-        def evaluate(spec, future_cache_scope=None):
-            del future_cache_scope
-            pending.append(spec["action_tag"])
-            outcome = {"outcome_id": spec["action_tag"]}
-            captured["outcomes"].append(outcome)
+        def evaluate(spec):
+            tag = spec["action_tag"]
+            captured["evaluated"].append(tag)
+            outcome = {"outcome_id": tag}
+            pending.append(outcome)
             return {"frame": [outcome]}
 
         return evaluate
 
+    def finalize(pending):
+        captured["batches"].append([
+            outcome["outcome_id"] for outcome in pending])
+        for outcome in pending:
+            outcome["shared_oracle_stability"] = {
+                "summary": {"collision_label_stable":
+                            outcome["outcome_id"] not in unstable}}
+
     monkeypatch.setattr(
         collection_runtime, "_make_structured_spec_evaluator", fake_factory)
-
-    def finalize(pending):
-        captured["finalized"].append(list(pending))
-        for outcome in captured["outcomes"]:
-            outcome["shared_oracle_stability"] = {
-                "summary": {"collision_label_stable": True}}
-
     monkeypatch.setattr(
         collection_runtime, "finalize_a_stability_certificates", finalize)
+    return captured
+
+
+def _progressive_state(tags, *, provenance=None, c1_families=()):
+    frame = make_frame()
+    selected = [(tag, [Forward(1.0)]) for tag in tags]
+    state = _minimal_pose_evaluation_state(frame)
+    state.update({
+        "selected": selected,
+        "selected_ids": list(tags),
+        "pools": {1: selected},
+        "group_labels": {tag: "safe" for tag in tags},
+        "proposal_provenance": provenance or {
+            tag: {"variant": "natural_dynamic"} for tag in tags},
+        "c1_families": tuple(c1_families),
+    })
+    return state
+
+
+def test_progressive_stability_stops_when_ordinary_slots_are_full(
+        monkeypatch):
+    tags = [f"ordinary-{index:02d}" for index in range(10)]
+    state = _progressive_state(tags)
+    order = action_sampling.stratified_action_order(
+        state["pools"], state["proposal_provenance"], pose_seed=0)
+    captured = _install_progressive_stability_fake(monkeypatch)
+    skipped = collections.Counter()
 
     result = collection_runtime._evaluate_pose_candidates(
-        _minimal_pose_evaluation_state(make_frame()),
-        args=SimpleNamespace(), stats=collections.Counter(),
-        skipped=collections.Counter())
+        state, args=SimpleNamespace(ordinary_actions_per_pose=4),
+        stats=collections.Counter(), skipped=skipped)
 
-    assert result is not None
-    assert captured["finalized"] == [["first", "second"]]
+    assert result["selected_ids"] == order[:4]
+    assert captured == {"evaluated": order[:4], "batches": [order[:4]]}
+    assert "stable_ordinary_publication_cropped" not in skipped
+
+
+def test_progressive_stability_refills_only_missing_ordinary_slots(
+        monkeypatch):
+    tags = [f"ordinary-{index:02d}" for index in range(7)]
+    state = _progressive_state(tags)
+    order = action_sampling.stratified_action_order(
+        state["pools"], state["proposal_provenance"], pose_seed=0)
+    captured = _install_progressive_stability_fake(
+        monkeypatch, unstable_tags=order[:2])
+
+    result = collection_runtime._evaluate_pose_candidates(
+        state, args=SimpleNamespace(ordinary_actions_per_pose=3),
+        stats=collections.Counter(), skipped=collections.Counter())
+
+    assert captured["evaluated"] == order[:5]
+    assert captured["batches"] == [order[:3], order[3:5]]
+    assert result["selected_ids"] == order[2:5]
 
 
 def test_unstable_sibling_drops_its_action_group_before_persistence(
@@ -590,69 +600,54 @@ def test_unstable_sibling_drops_its_action_group_before_persistence(
     assert skipped["stability_sibling_collateral_outcomes"] == 1
 
 
-def test_stability_reserve_refills_36_ordinary_and_12_c1_slots(monkeypatch):
-    """Certification may try 48 ordinary actions without publishing >48."""
-    frame = make_frame()
-    ordinary = [f"ordinary-{index:02d}" for index in range(42)]
-    neighbors = [f"neighbor-{index:02d}" for index in range(12)]
-    query_tags = (ordinary[-2], ordinary[-1])
-    selected = [
-        (tag, [Forward(1.0)]) for tag in ordinary + neighbors]
-    state = _minimal_pose_evaluation_state(frame)
-    state.update({
-        "selected": selected,
-        "selected_ids": [tag for tag, _actions in selected],
-        "pools": {1: selected},
-        "group_labels": {tag: "safe" for tag, _actions in selected},
-        "proposal_provenance": {
-            **{tag: {"variant": "natural_dynamic"} for tag in ordinary},
-            **{tag: {"variant": c1_counterfactual.VARIANT}
-               for tag in neighbors},
-        },
-        "c1_families": (
-            c1_counterfactual.C1Family(
-                query_tag=query_tags[0],
-                neighbor_tags=tuple(neighbors[:6])),
-            c1_counterfactual.C1Family(
-                query_tag=query_tags[1],
-                neighbor_tags=tuple(neighbors[6:])),
-        ),
-    })
-    pending_outcomes = []
-
-    def fake_factory(**kwargs):
-        del kwargs
-
-        def evaluate(spec, future_cache_scope=None):
-            del future_cache_scope
-            outcome = {"outcome_id": spec["action_tag"]}
-            pending_outcomes.append(outcome)
-            return {frame.frame_id: [outcome]}
-
-        return evaluate
-
-    def finalize(_pending):
-        for outcome in pending_outcomes:
-            outcome["shared_oracle_stability"] = {
-                "summary": {"collision_label_stable": True}}
-
-    monkeypatch.setattr(
-        collection_runtime, "_make_structured_spec_evaluator", fake_factory)
-    monkeypatch.setattr(
-        collection_runtime, "finalize_a_stability_certificates", finalize)
+def test_unstable_c1_query_skips_its_auxiliary_neighbors(monkeypatch):
+    tags = ["query", "ordinary-a", "ordinary-b", "neighbor-a", "neighbor-b"]
+    provenance = {
+        **{tag: {"variant": "natural_dynamic"} for tag in tags[:3]},
+        **{tag: {"variant": c1_counterfactual.VARIANT}
+           for tag in tags[3:]},
+    }
+    family = c1_counterfactual.C1Family(
+        query_tag="query", neighbor_tags=("neighbor-a", "neighbor-b"))
+    state = _progressive_state(
+        tags, provenance=provenance, c1_families=(family,))
+    captured = _install_progressive_stability_fake(
+        monkeypatch, unstable_tags=("query",))
 
     result = collection_runtime._evaluate_pose_candidates(
-        state, args=SimpleNamespace(), stats=collections.Counter(),
-        skipped=collections.Counter())
+        state, args=SimpleNamespace(ordinary_actions_per_pose=2),
+        stats=collections.Counter(), skipped=collections.Counter())
 
-    assert result is not None
-    assert len(result["selected_ids"]) == 48
-    assert set(query_tags).issubset(result["selected_ids"])
-    assert set(neighbors).issubset(result["selected_ids"])
-    retained_ordinary = [
-        tag for tag in result["selected_ids"] if tag in ordinary]
-    assert len(retained_ordinary) == 36
-    assert len(set(ordinary) - set(retained_ordinary)) == 6
+    assert captured["batches"][0] == ["query"]
+    assert "neighbor-a" not in captured["evaluated"]
+    assert "neighbor-b" not in captured["evaluated"]
+    assert len(result["selected_ids"]) == 2
+    assert result["c1_families"] == ()
+
+
+def test_stable_c1_query_evaluates_neighbors_after_ordinary_fill(monkeypatch):
+    tags = ["query", "ordinary-a", "ordinary-b", "ordinary-c",
+            "neighbor-a", "neighbor-b"]
+    provenance = {
+        **{tag: {"variant": "natural_dynamic"} for tag in tags[:4]},
+        **{tag: {"variant": c1_counterfactual.VARIANT}
+           for tag in tags[4:]},
+    }
+    family = c1_counterfactual.C1Family(
+        query_tag="query", neighbor_tags=("neighbor-a", "neighbor-b"))
+    state = _progressive_state(
+        tags, provenance=provenance, c1_families=(family,))
+    captured = _install_progressive_stability_fake(monkeypatch)
+
+    result = collection_runtime._evaluate_pose_candidates(
+        state, args=SimpleNamespace(ordinary_actions_per_pose=3),
+        stats=collections.Counter(), skipped=collections.Counter())
+
+    assert [len(batch) for batch in captured["batches"]] == [1, 2, 2]
+    assert captured["batches"][0] == ["query"]
+    assert captured["batches"][-1] == ["neighbor-a", "neighbor-b"]
+    assert len(result["selected_ids"]) == 5
+    assert result["c1_families"] == (family,)
 
 
 def test_validator_rebuilds_explicit_r2r_instance_witness_consensus():
@@ -1223,33 +1218,12 @@ def test_collection_materializes_real_se2_stability_rerollouts():
     certificate = consequence.collect_a_stability_certificate(
         sim, frame, Disc(0.2), [Forward(0.1)], nominal)
 
-    assert len(sim.calls) == 7
-    assert sim.calls[0] == ((0.0, 0.0, 0.0), 0.0)
+    assert len(sim.calls) == 6
     assert [row["perturbation_id"] for row in certificate["rows"]] == [
         "nominal", "x_negative", "x_positive", "z_negative",
         "z_positive", "yaw_negative", "yaw_positive",
     ]
     assert certificate["summary"]["collision_label_stable"] is True
-
-
-def test_collection_rejects_fresh_nominal_disagreement():
-    """Catches copied nominal inputs bypassing the real rerollout path."""
-    frame = make_frame()
-    nominal = {
-        "physical": {
-            "authority": "navmesh", "collision": True,
-            "first_contact_arc_m": 0.5,
-        },
-        "depth_physical": {
-            "authority": "depth", "collision": True,
-            "first_contact_arc_m": 0.5,
-        },
-        "evidence": {"physical": {"coverage": 1.0}},
-    }
-
-    with pytest.raises(ValueError, match="fresh nominal rerollout"):
-        consequence.collect_a_stability_certificate(
-            _RecordingSafeSim(), frame, Disc(0.2), [Forward(0.1)], nominal)
 
 
 def test_collection_batches_seven_collision_identity_queries(monkeypatch):

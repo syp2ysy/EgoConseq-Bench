@@ -22,7 +22,9 @@ from pipeline.scene_pool import (
     SceneSpec,
     deterministic_scene_order,
     discover_b1k_train_scenes,
+    discover_gs_scenes,
     discover_gs_train_scenes,
+    discover_r2r_scenes,
     discover_r2r_train_scenes,
     resolve_scene_subset,
 )
@@ -30,16 +32,15 @@ from pipeline.scene_pool import (
 
 def prepared_pose_state(
         *, variants, pools, group_labels, precheck_cache,
-        target_ids_by_frame, proposal_provenance, required_siblings,
+        proposal_provenance, required_siblings,
         calibration, position, yaw, base_frame,
         active_radii, setting, bank_manifest, intervention_group_id,
         scene, scene_id, c1_families=None,
-        control_tags=None, shortlist_size=None) -> dict:
+        shortlist_size=None) -> dict:
     """Build the explicit state handed across collection pose phases."""
     state = {
         "variants": variants, "pools": pools,
         "group_labels": group_labels, "precheck_cache": precheck_cache,
-        "target_ids_by_frame": target_ids_by_frame,
         "proposal_provenance": proposal_provenance,
         "required_siblings": required_siblings,
         "calibration": calibration, "position": position, "yaw": yaw,
@@ -51,8 +52,6 @@ def prepared_pose_state(
     }
     if c1_families is not None:
         state["c1_families"] = tuple(c1_families)
-    if control_tags is not None:
-        state["control_tags"] = tuple(str(tag) for tag in control_tags)
     if shortlist_size is not None:
         # Publication budget after the wider, private stability reserve has
         # been consumed. Validators deliberately bound records, not internal
@@ -313,9 +312,9 @@ def pose_validation_context(
             "collection_mode": args.collection_mode,
             "record_schema_version": record_schema,
             "oracle_contract_version": REC.ORACLE_CONTRACT_VERSION,
-            "r2r_train_episodes": str(args.r2r_train_episodes),
+            "r2r_episodes": str(args.r2r_episodes),
             "mp3d_root": str(args.mp3d_root),
-        }), r2r_train_episodes=args.r2r_train_episodes,
+        }), r2r_train_episodes=args.r2r_episodes,
         mp3d_root=args.mp3d_root,
         setting_sampling_policy=args.setting_sampling_policy)
 
@@ -349,6 +348,10 @@ def prune_backend_scoped_params(params: dict, backend: str) -> dict:
     if backend != "gs":
         pruned.pop("gs_data_root", None)
         pruned.pop("gs_source_manifest", None)
+    if backend != "r2r":
+        pruned.pop("r2r_episodes", None)
+        pruned.pop("r2r_train_episodes", None)
+        pruned.pop("mp3d_root", None)
     return pruned
 
 
@@ -356,7 +359,7 @@ def collection_run_contract(
         args, scenes, heights, fovs, *, action_sampler_contract_sha256=None,
         sampling_provenance=None) -> dict:
     excluded = {
-        "debug_images", "debug_outcomes_per_frame", "no_validate",
+        "debug_images", "debug_outcomes_per_frame",
         "out", "overwrite", "resume", "code_revision", "allow_dirty_code",
         "semantic_query_workers",
     }
@@ -415,7 +418,7 @@ def collection_run_contract(
         payload["main_action_proposal"] = {
             "cap_per_length": int(config.MAIN_ACTION_PROPOSAL_PER_LENGTH),
             "ranking": "label-blind-stratified-shortlist.v4",
-            "retention": "stable-ordinary-reserve.v1",
+            "retention": "progressive-stability-fill.v1",
             "ordinary_attempts_per_pose": int(
                 ordinary_limit + config.C1_NEIGHBOR_SLOTS_PER_POSE),
             "ordinary_actions_per_pose": ordinary_limit,
@@ -437,32 +440,48 @@ def ordinary_actions_per_pose(args) -> int:
 
 
 def discover_collection_scenes(args) -> list[SceneSpec]:
-    """Resolve one verified source-train catalog for formal collection."""
+    """Resolve one verified source-split catalog for formal collection."""
     contract = dataset_contracts.dataset_source_contract(args.backend)
+    source_split = str(getattr(args, "source_split", "train"))
     if not contract.main_collection_enabled:
         raise SceneCatalogError(
             f"collection backend is unsupported: {args.backend!r}")
     if args.backend == "r2r":
-        catalog = discover_r2r_train_scenes(
-            args.r2r_train_episodes, args.mp3d_root)
-        empty_error = "no verified r2r train scenes selected"
+        episodes = getattr(
+            args, "r2r_episodes", getattr(args, "r2r_train_episodes", None))
+        catalog = (
+            discover_r2r_train_scenes(episodes, args.mp3d_root)
+            if source_split == "train" else
+            discover_r2r_scenes(
+                episodes, args.mp3d_root, source_split=source_split))
+        empty_error = f"no verified r2r {source_split} scenes selected"
     elif args.backend == "b1k":
+        if source_split != "train":
+            raise SceneCatalogError(
+                "B1K source manifest requires --source-split train")
         if not args.b1k_data_root or not args.b1k_source_manifest:
             raise SceneCatalogError(
                 "B1K collection requires --b1k-data-root and "
                 "--b1k-source-manifest")
         catalog = discover_b1k_train_scenes(
-            args.b1k_data_root, args.b1k_source_manifest)
+            args.b1k_data_root, args.b1k_source_manifest,
+            requested=None if args.auto_scenes else args.scenes)
         empty_error = "no verified b1k train scenes selected"
     elif args.backend == "gs":
         if not args.gs_data_root or not args.gs_source_manifest:
             raise SceneCatalogError(
                 "GS collection requires --gs-data-root and "
                 "--gs-source-manifest")
-        catalog = discover_gs_train_scenes(
-            args.gs_data_root, args.gs_source_manifest,
-            requested=None if args.auto_scenes else (args.scenes or []))
-        empty_error = "no verified gs train scenes selected"
+        requested = None if args.auto_scenes else (args.scenes or [])
+        catalog = (
+            discover_gs_train_scenes(
+                args.gs_data_root, args.gs_source_manifest,
+                requested=requested)
+            if source_split == "train" else
+            discover_gs_scenes(
+                args.gs_data_root, args.gs_source_manifest,
+                requested=requested, source_split=source_split))
+        empty_error = f"no verified gs {source_split} scenes selected"
     else:
         raise SceneCatalogError(
             f"collection backend is unsupported: {args.backend!r}")
@@ -497,7 +516,8 @@ def terminal_rgb_renderer(sim, frame, cache):
     return render
 
 
-def terminal_rgb_batch_renderer(sim, frame, cache):
+def terminal_rgb_batch_renderer(
+        sim, frame, cache, *, render_transaction: str | None = None):
     """Return the fail-closed B1K simultaneous terminal renderer."""
     def render(poses):
         missing = []
@@ -512,7 +532,8 @@ def terminal_rgb_batch_renderer(sim, frame, cache):
         if not callable(batch_method):
             raise RuntimeError(
                 "B1K C1 requires a simultaneous batch renderer")
-        rendered = list(batch_method(frame, missing))
+        rendered = list(batch_method(
+            frame, missing, render_transaction=render_transaction))
         if len(rendered) != len(missing):
             raise RuntimeError("terminal RGB batch returned the wrong size")
         for pose, observation in zip(missing, rendered):

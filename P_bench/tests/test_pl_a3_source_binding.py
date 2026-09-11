@@ -116,7 +116,7 @@ def _source_bound_case(tmp_path, monkeypatch):
     house_sha = next(
         asset["sha256"] for asset in source["source_assets"]
         if asset["role"] == "semantic_metadata")
-    authority = semantic.load_mp3d_target_authority(
+    authority = semantic.load_mp3d_semantic_index(
         spec.scene_path, expected_semantic_ply_sha256=semantic_sha,
         expected_house_sha256=house_sha)
     identity = authority.confirm_contact_instance(1, [0.2, 0.2, 0.0])
@@ -146,6 +146,9 @@ def _source_bound_case(tmp_path, monkeypatch):
     monkeypatch.setattr(
         scene_pool, "_trusted_r2r_scene_for_context",
         lambda _rec, _context: spec)
+    monkeypatch.setattr(
+        scene_pool, "_trusted_r2r_semantic_authority",
+        lambda _rec, _context, _spec: authority)
     context = SimpleNamespace(route="r2r_v16_registered")
     return rec, context, semantic_ply, semantic_sha
 
@@ -188,6 +191,7 @@ def test_source_bound_a3_rejects_substituted_semantic_ply(
     payload = bytearray(semantic_ply.read_bytes())
     payload[-1] ^= 1
     semantic_ply.write_bytes(payload)
+    semantic._MP3D_TARGET_FACE_INDEX_CACHE.clear()
 
     errors = scene_pool.trusted_r2r_a3_source_errors(rec, context)
 
@@ -249,9 +253,6 @@ def test_source_bound_record_validation_runs_a3_source_replay(monkeypatch):
     monkeypatch.setattr(
         scene_pool, "trusted_r2r_a3_source_errors",
         lambda _rec, _context: ["A3 source replay marker"])
-    monkeypatch.setattr(
-        scene_pool, "trusted_r2r_b_source_errors",
-        lambda _rec, _context: [])
     errors = validate.validate_record_source_bound(
         {"frame_id": "frame"},
         context=source_manifest.LEGACY_RECORD_VALIDATION_CONTEXT)
@@ -292,3 +293,35 @@ def test_source_bound_a3_rejects_wrong_contact_identity(
 
     assert any("trusted A3 contact identity disagrees" in error
                for error in errors)
+
+
+def test_source_bound_batches_all_a3_outcomes_in_one_authority_query(
+        tmp_path, monkeypatch):
+    rec, context, _semantic_ply, _semantic_sha = _source_bound_case(
+        tmp_path, monkeypatch)
+    second = copy.deepcopy(rec["outcomes"][0])
+    second["outcome_id"] = "outcome-second"
+    rec["outcomes"].append(second)
+    batch_sizes = []
+    source = rec["source"]
+    house_sha = next(
+        asset["sha256"] for asset in source["source_assets"]
+        if asset["role"] == "semantic_metadata")
+    authority = semantic.load_mp3d_semantic_index(
+        tmp_path / "TARGET.glb",
+        expected_semantic_ply_sha256=_semantic_sha,
+        expected_house_sha256=house_sha)
+    original_confirm = authority.confirm_contact_instances
+
+    def counted_confirm(requests):
+        values = list(requests)
+        batch_sizes.append(len(values))
+        return original_confirm(values)
+
+    authority.confirm_contact_instances = counted_confirm
+    monkeypatch.setattr(
+        scene_pool, "_trusted_r2r_semantic_authority",
+        lambda _rec, _context, _spec: authority)
+
+    assert scene_pool.trusted_r2r_a3_source_errors(rec, context) == []
+    assert batch_sizes == [14]

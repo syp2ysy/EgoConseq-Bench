@@ -11,25 +11,18 @@ import re
 from typing import Mapping
 
 from pipeline import (
-    a1_common_support, background_authorities, background_canary, benchmark,
-    candidate_preview, config, dataset_contracts, gate_authority, io_utils,
-    record,
+    background_canary, config, dataset_contracts, gate_authority, io_utils,
 )
+from post_QA.seen_build import spec as seen_spec
 
 
 PROFILE_SCHEMA = "egoconseq.collection-capacity-profile.v3"
 EVIDENCE_SCHEMA = "egoconseq.collection-capacity-evidence.v1"
 CONTROLLER_SCHEMA = "egoconseq.capacity-canary-controller.v1"
-CANARY_PUBLICATION_SCHEMA = "egoconseq.capacity-canary-publication.v1"
+CANARY_PUBLICATION_SCHEMA = "egoconseq.capacity-canary-publication.v2"
 CANARY_PUBLICATION_NAME = "publication.json"
 DATASETS = dataset_contracts.main_collection_datasets()
-TASKS = tuple(benchmark.ABC_CANDIDATE_TASK_IDS)
-_QA_FILES = (
-    "public/items.jsonl",
-    "private/answers.jsonl",
-    "private/atoms.jsonl",
-    "private/record_contexts.jsonl",
-)
+TASKS = seen_spec.TASKS
 _HEX40 = re.compile(r"[0-9a-f]{40}\Z")
 _HEX64 = re.compile(r"[0-9a-f]{64}\Z")
 
@@ -39,6 +32,102 @@ def _canonical_sha256(value) -> str:
         value, sort_keys=True, separators=(",", ":"), ensure_ascii=True,
         allow_nan=False).encode("ascii")
     return hashlib.sha256(payload).hexdigest()
+
+
+def frame_progress(manifest: Mapping, state: Mapping) -> dict:
+    """Count baseline representatives plus authenticated new records."""
+    seeds = manifest.get("seed_pose_exclusions") or {}
+    counts = {
+        dataset: int((seeds.get(dataset) or {}).get(
+            "representative_count") or 0)
+        for dataset in DATASETS
+    }
+    continuous = int((manifest.get("collection") or {}).get(
+        "catalog_passes") or 0) == 0
+    if continuous:
+        rows = [
+            (runtime.get("dataset"), runtime)
+            for runtime in (state.get("jobs") or {}).values()]
+    else:
+        rows = [
+            (job["dataset"],
+             (state.get("jobs") or {}).get(job["job_id"]) or {})
+            for round_value in manifest.get("rounds") or []
+            for job in round_value.get("jobs") or []]
+    for dataset, runtime in rows:
+        if (dataset not in counts or runtime.get("catalog_status") not in
+                {"completed", "partial_valid"}):
+            continue
+        counts[dataset] += int(
+            (runtime.get("source_validation") or {}).get(
+                "source_validated_records") or 0)
+    return {
+        "datasets": {
+            dataset: {
+                "pose_diverse_frames": counts[dataset],
+                "minimum": config.
+                BACKGROUND_MIN_UNIQUE_FRAMES_BY_DATASET[dataset],
+            }
+            for dataset in DATASETS
+        },
+        "global_pose_diverse_frames": sum(counts.values()),
+        "target_pose_diverse_frames": int(
+            manifest.get("target_pose_diverse_frames") or 0),
+    }
+
+
+def dataset_can_stop(manifest: Mapping, state: Mapping, dataset: str) -> bool:
+    """Stop one dataset from in-memory pass-zero and frame progress."""
+    dataset = str(dataset)
+    pass_zero = [
+        job for round_value in manifest.get("rounds") or []
+        for job in round_value.get("jobs") or []
+        if job.get("dataset") == dataset and
+        int(job.get("catalog_pass") or 0) == 0]
+    terminal = {"completed", "partial_valid", "zero_yield", "failed"}
+    jobs = state.get("jobs") or {}
+    if (dataset not in DATASETS or not pass_zero or any(
+            (jobs.get(job["job_id"]) or {}).get("catalog_status") not in
+            terminal for job in pass_zero)):
+        return False
+    progress = frame_progress(manifest, state)
+    counts = {
+        name: progress["datasets"][name]["pose_diverse_frames"]
+        for name in DATASETS}
+    floors_met = all(
+        counts[name] >= config.BACKGROUND_MIN_UNIQUE_FRAMES_BY_DATASET[name]
+        for name in DATASETS)
+    if dataset == "b1k":
+        return counts[dataset] >= \
+            config.BACKGROUND_MIN_UNIQUE_FRAMES_BY_DATASET[dataset]
+    return floors_met and progress["global_pose_diverse_frames"] >= \
+        progress["target_pose_diverse_frames"]
+
+
+def baseline_sources(manifest: Mapping) -> list[dict]:
+    """Load the SHA-bound source rows from an optional baseline checkpoint."""
+    identity = manifest.get("baseline_checkpoint")
+    if identity is None:
+        return []
+    path = Path(str((identity or {}).get("path") or ""))
+    if (not path.is_file() or io_utils.sha256_file(path) !=
+            (identity or {}).get("sha256")):
+        raise ValueError("background baseline checkpoint identity differs")
+    checkpoint = json.loads(path.read_text(encoding="utf-8"))
+    sources = checkpoint.get("sources") if isinstance(checkpoint, Mapping) \
+        else None
+    if not isinstance(sources, list) or not sources:
+        raise ValueError("background baseline checkpoint sources are absent")
+    result = []
+    for source in sources:
+        records = Path(str((source or {}).get("path") or ""))
+        if (not records.is_file() or io_utils.sha256_file(records) !=
+                (source or {}).get("records_sha256") or
+                _HEX64.fullmatch(str(
+                    (source or {}).get("run_meta_sha256") or "")) is None):
+            raise ValueError("background baseline source identity differs")
+        result.append(dict(source))
+    return result
 
 
 def _controller_paths(job: Mapping) -> tuple[Path, Path]:
@@ -221,9 +310,8 @@ def validate_canary_publication(
     """
     artifact = Path(artifact).resolve()
     root = artifact.parent
-    if artifact != root / "candidate_qa":
+    if artifact != root / "supply.json":
         raise ValueError("capacity canary artifact path is invalid")
-    report = root / "candidate_qa_report"
     manifest_path = root / CANARY_PUBLICATION_NAME
     value = gate_authority.load_authority_manifest(manifest_path)
     body = {key: item for key, item in value.items() if key != "sha256"}
@@ -232,8 +320,7 @@ def validate_canary_publication(
         "parent_manifest_sha256": str(parent_manifest_sha256),
         "job_id": str(job_id),
         "source": dict(source),
-        "artifact": "candidate_qa",
-        "report": "candidate_qa_report",
+        "artifact": "supply.json",
         "files": candidate_publication_files(root),
     }
     if body != expected or value.get("sha256") != _canonical_sha256(body):
@@ -245,64 +332,7 @@ def validate_canary_publication(
     }
     if identity is not None and dict(identity) != actual_identity:
         raise ValueError("capacity canary publication identity differs")
-    if not (report / "index.html").is_file():
-        raise ValueError("capacity canary report is incomplete")
-    return artifact, report, actual_identity
-
-
-def _resolve_item_contexts(
-        artifact: Path) -> tuple[dict[str, int], set[str], set[str]]:
-    items = {str(row.get("id") or ""): row for row in _read_jsonl(
-        artifact / _QA_FILES[0], label="compiled public items")}
-    answers = {str(row.get("id") or ""): row for row in _read_jsonl(
-        artifact / _QA_FILES[1], label="compiled private answers")}
-    atoms = {str(row.get("id") or ""): row for row in _read_jsonl(
-        artifact / _QA_FILES[2], label="compiled private atoms")}
-    contexts = {str(row.get("record_sha256") or ""): row.get("context")
-                for row in _read_jsonl(
-                    artifact / _QA_FILES[3],
-                    label="compiled private record contexts")}
-    if (not items or "" in items or len(items) != len(_read_jsonl(
-            artifact / _QA_FILES[0], label="compiled public items")) or
-            set(items) != set(answers)):
-        raise ValueError("capacity evidence compiled QA IDs are invalid")
-    counts = {task_id: 0 for task_id in TASKS}
-    record_digests = set()
-    frame_digests = set()
-    for item_id, item in items.items():
-        try:
-            atom = atoms[str(answers[item_id]["atom_ref"])]
-            digest = str(atom["record_sha256"])
-            context = contexts[digest]
-            task_id = str(item["task_id"])
-            input_asset = answers[item_id]["input_asset"]
-            frame_digest = str(
-                input_asset.get("raw_sha256") or
-                input_asset.get("sha256") or "")
-        except (KeyError, TypeError) as error:
-            raise ValueError(
-                "capacity evidence compiled QA source binding is missing") \
-                from error
-        if (task_id not in counts or not isinstance(context, Mapping) or
-                not frame_digest):
-            raise ValueError("capacity evidence compiled QA route is invalid")
-        counts[task_id] += 1
-        record_digests.add(digest)
-        frame_digests.add(frame_digest)
-    return counts, record_digests, frame_digests
-
-
-def _validate_candidate_artifact(
-        artifact: Path, records_path: Path, run_meta_path: Path) -> None:
-    source = {
-        "path": str(records_path),
-        "records_sha256": io_utils.sha256_file(records_path),
-        "run_meta_sha256": io_utils.sha256_file(run_meta_path),
-    }
-    authority = background_authorities.resolve_artifact_source_authority(
-        artifact, [source])
-    candidate_preview.validate_preview_artifact(
-        artifact, expected_source_authority=authority)
+    return artifact, root, actual_identity
 
 
 def _authenticate_canary(
@@ -341,7 +371,7 @@ def _authenticate_canary(
         "controller_manifest_path":
             job_root / "capacity_controller_manifest.json",
         "compiled_qa_path":
-            job_root / "capacity_candidate" / "candidate_qa",
+            job_root / "capacity_candidate" / "supply.json",
     }
     if any(Path(str(value[name])).resolve() != expected_path
            for name, expected_path in expected_paths.items()):
@@ -422,14 +452,10 @@ def _measure_canary(dataset: str, value: Mapping, source_authority) -> dict:
         raise ValueError("capacity evidence controller manifest differs")
     authority_identities = _authenticate_canary(
         dataset, scene_id, value, controller, source_authority)
-    records = _read_jsonl(records_path, label="records")
-    if not records:
-        raise ValueError("capacity profile accepted records must be positive")
-    if any(not a1_common_support.has_uniform_v3_ordinary_provenance(row)
-           for row in records):
-        raise ValueError("capacity evidence records require proposal-v3")
-    record_digests = {record.canonical_atom_sha256(row) for row in records}
     run_meta = _read_json(run_meta_path, label="run metadata")
+    record_count = int(run_meta.get("record_count") or 0)
+    if record_count < 1:
+        raise ValueError("capacity profile accepted records must be positive")
     source_catalog = run_meta.get("source_catalog") or {}
     if (source_catalog.get("datasets") != [dataset] or
             source_catalog.get("scene_ids") != [scene_id] or
@@ -456,7 +482,7 @@ def _measure_canary(dataset: str, value: Mapping, source_authority) -> dict:
     attempts = _positive_int(
         (run_meta.get("stats") or {}).get("pose_attempts"),
         label="pose attempts")
-    if len(records) > attempts:
+    if record_count > attempts:
         raise ValueError(
             "capacity profile accepted records exceed pose attempts")
     funnel = _read_json(funnel_path, label="collection funnel")
@@ -503,34 +529,28 @@ def _measure_canary(dataset: str, value: Mapping, source_authority) -> dict:
     if not all(math.isfinite(value) for value in (started, ready, finished)) or \
             not started < ready < finished:
         raise ValueError("capacity evidence controller times are invalid")
-    task_counts, qa_record_digests, frame_digests = \
-        _resolve_item_contexts(artifact)
-    contexts = _read_jsonl(
-        artifact / _QA_FILES[3], label="compiled private record contexts")
-    for context_row in contexts:
-        route = _source_route(context_row.get("context") or {})
-        if route != (dataset, scene_id):
-            raise ValueError("capacity evidence compiled QA route differs")
-    if not qa_record_digests.issubset(record_digests):
-        raise ValueError("capacity evidence compiled QA records differ")
+    supply = _read_json(artifact, label="compiled supply")
+    measurements = supply.get("measurements") or {}
+    task_counts = {
+        task: int((measurements.get("task_counts") or {}).get(task, 0))
+        for task in TASKS
+    }
+    candidate_records = int(measurements.get("candidate_records") or 0)
     sources = {
         "records": _identity(records_path),
         "run_meta": _identity(run_meta_path),
         "funnel": _identity(funnel_path),
         "controller_events": _identity(events_path),
         "controller_manifest": _identity(controller_path),
-        "compiled_qa": {
-            relative: _identity(artifact / relative)
-            for relative in _QA_FILES
-        },
+        "compiled_supply": _identity(artifact),
         **authority_identities,
     }
     return {
         "scene_id": scene_id,
         "initialization_s": ready - started,
         "pose_attempts": attempts,
-        "accepted_records": len(records),
-        "accepted_unique_frames": len(frame_digests),
+        "accepted_records": record_count,
+        "accepted_unique_frames": candidate_records,
         "ordinary_actions_per_pose": ordinary_actions_per_pose,
         "pose_attempt_s": (finished - ready) / attempts,
         "task_qa_counts": task_counts,
@@ -555,15 +575,11 @@ def _derive_dataset(
     task_totals = {task: sum(row["task_qa_counts"][task]
                              for row in canaries) for task in TASKS}
     task_yields = {task: task_totals[task] / accepted_total for task in TASKS}
-    if any(value <= 0.0 for value in task_yields.values()):
-        raise ValueError("capacity profile has zero task yield")
     total_yield = sum(task_totals.values()) / accepted_total
     frame_yield = unique_frame_total / accepted_total
     acceptance = accepted_total / attempts_total
-    qa_records_needed = max(
-        math.ceil(config.BACKGROUND_MIN_TOTAL_ITEMS / total_yield),
-        max(math.ceil(config.BACKGROUND_MIN_ITEMS_PER_TASK / task_yields[task])
-            for task in TASKS))
+    qa_records_needed = math.ceil(
+        config.BACKGROUND_MIN_TOTAL_ITEMS / max(total_yield, 1.0))
     unique_frames_needed = \
         config.BACKGROUND_MIN_UNIQUE_FRAMES_BY_DATASET[dataset]
     records_needed = max(
@@ -571,7 +587,8 @@ def _derive_dataset(
     # Canary yields remain diagnostics and determine how many catalog passes
     # are likely required. They must not turn one low-yield scene into tens of
     # thousands of brute-force pose draws on every scene in the dataset.
-    records_per_scene = config.BACKGROUND_CANARY_ACCEPTED_RECORDS
+    records_per_scene = \
+        config.BACKGROUND_RECORDS_PER_SCENE_BY_DATASET[dataset]
     pose_attempt_cap = \
         config.BACKGROUND_CANARY_POSE_ATTEMPT_CAP_BY_DATASET[dataset]
     initialization_s = max(row["initialization_s"] for row in canaries)
@@ -682,9 +699,8 @@ def _evidence_from_profile(profile: Mapping) -> dict:
         canaries = []
         for canary in row.get("canary_scenes") or []:
             source = canary.get("measurement_source") or {}
-            compiled = source.get("compiled_qa") or {}
-            first = compiled.get(_QA_FILES[0]) or {}
-            artifact = Path(str(first.get("path") or "")).parent.parent
+            compiled = source.get("compiled_supply") or {}
+            artifact = Path(str(compiled.get("path") or ""))
             canaries.append({
                 "scene_id": canary.get("scene_id"),
                 "records_path": (source.get("records") or {}).get("path"),

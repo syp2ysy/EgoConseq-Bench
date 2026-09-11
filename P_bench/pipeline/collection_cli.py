@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import collections
+import fcntl
 import hashlib
 import json
 import os
@@ -17,8 +18,8 @@ import shutil
 import time
 
 from pipeline import (
-    action_proposal, config, dataset_contracts, objects as OBJ,
-    scene_partitions, validate,
+    abc1_record, action_proposal, config, dataset_contracts, scene_partitions,
+    validate,
 )
 from pipeline.actions import (
     actions_to_dicts,
@@ -31,6 +32,7 @@ from pipeline.actions import (
 from pipeline.record import ORACLE_CONTRACT_VERSION
 from pipeline.io_utils import (
     atomic_write_binary,
+    atomic_write_json,
     atomic_write_text,
     fsync_directory,
     read_jsonl,
@@ -79,33 +81,6 @@ def frame_id(
         sensor_tag: str) -> str:
     shard = f"-{collection_shard_id}" if collection_shard_id else ""
     return f"F-{scene_id}{shard}-p{int(pose_index):03d}-{sensor_tag}"
-
-
-def frame_quality_rejections(frame) -> list[str]:
-    """Return geometry-only composition failures for a rendered observation."""
-    quality = frame.quality or {}
-    camera_height = frame.camera_height_above_visible_floor_m
-    minimum_floor_ratio = config.collect_min_visible_floor_ratio(camera_height)
-    rejected = []
-    if float(quality.get("valid_depth_ratio", 0.0)) < \
-            config.COLLECT_MIN_VALID_DEPTH_RATIO:
-        rejected.append("low_valid_depth_ratio")
-    if float(quality.get("visible_floor_ratio", 0.0)) < minimum_floor_ratio:
-        rejected.append("low_visible_floor_ratio")
-    return rejected
-
-
-def eligible_target_ids_by_frame(variants) -> dict[str, list[int]]:
-    """Return targets that are eligible in every rendered sibling."""
-    eligible_by_frame = {}
-    for _sim, frame in variants:
-        if frame.frame_id not in eligible_by_frame:
-            eligible_by_frame[frame.frame_id] = OBJ.eligible_target_ids(frame)
-    shared = set.intersection(*(
-        set(values) for values in eligible_by_frame.values()
-    )) if eligible_by_frame else set()
-    shared_ids = sorted(int(value) for value in shared)
-    return {frame_id: list(shared_ids) for frame_id in eligible_by_frame}
 
 
 def candidate_action_pools(args, rng, stats, half_fov_deg):
@@ -190,10 +165,7 @@ def _load_spool_records(spool: Path, expected_siblings: int) -> tuple[str, list]
     # The spool's run contract pins the schema. Full schema/oracle validation
     # still runs before publication.
     records = read_jsonl(spool, require_dict=True)
-    group_ids = {
-        str((record.get("intervention") or {}).get("group_id") or "")
-        for record in records
-    }
+    group_ids = {_record_group_id(record) for record in records}
     frame_ids = {str(record.get("frame_id")) for record in records}
     if (len(records) != int(expected_siblings) or len(frame_ids) != len(records) or
             len(group_ids) != 1 or not next(iter(group_ids), "")):
@@ -306,14 +278,51 @@ def validate_records_before_spool(
             "record validation failed before spool:\n" + "\n".join(failures))
 
 
+def append_compact_records(path, records, *, progress_path=None) -> bool:
+    """Append committed rows under one lock; preserve all previous full rows."""
+    records = list(records)
+    payload = b"".join(json.dumps(record, separators=(",", ":"),
+                                allow_nan=False).encode() + b"\n"
+                       for record in records)
+    with open(path, "r+b") as output:
+        fcntl.flock(output, fcntl.LOCK_EX)
+        end = output.seek(0, os.SEEK_END)
+        # Only a process interrupted during its final write leaves a tail.
+        while end:
+            start = max(0, end - 65536)
+            output.seek(start)
+            chunk = output.read(end - start)
+            newline = chunk.rfind(b"\n")
+            if newline >= 0:
+                end = start + newline + 1
+                break
+            end = start
+        output.truncate(end)
+        progress = None
+        if progress_path is not None:
+            progress = json.loads(Path(progress_path).read_text())
+            output.seek(progress["byte_offset"])
+            progress["record_count"] += output.read().count(b"\n")
+            progress["byte_offset"] = end
+            if progress["record_count"] + len(records) > progress["target_records"]:
+                atomic_write_json(progress_path, progress, durable=True)
+                return False
+        output.seek(end)
+        output.write(payload)
+        output.flush()
+        os.fsync(output.fileno())
+        if progress is not None:
+            progress["record_count"] += len(records)
+            progress["byte_offset"] = output.tell()
+            atomic_write_json(progress_path, progress, durable=True)
+    return True
+
+
 def append_record_group(path, records, *, order_key, expected_siblings) -> None:
     """Durably spool one complete sibling group before exposing it in JSONL."""
     path = Path(path)
     records = list(records)
-    group_ids = {
-        str((record.get("intervention") or {}).get("group_id") or "")
-        for record in records
-    }
+    group_ids = {_record_group_id(record) for record in records}
     frame_ids = {str(record.get("frame_id")) for record in records}
     if (len(records) != int(expected_siblings) or len(frame_ids) != len(records) or
             len(group_ids) != 1 or not next(iter(group_ids), "")):
@@ -321,7 +330,8 @@ def append_record_group(path, records, *, order_key, expected_siblings) -> None:
         raise ValueError(
             f"partial intervention group: {group_id}="
             f"{len(frame_ids)}/{int(expected_siblings)}")
-    if any(record.get("oracle_contract_version") != ORACLE_CONTRACT_VERSION
+    if any(not abc1_record.is_compact(record) and
+           record.get("oracle_contract_version") != ORACLE_CONTRACT_VERSION
            for record in records):
         raise ValueError("record oracle contract does not match collection contract")
     contract_path = _spool_dir(path) / "contract.json"
@@ -355,6 +365,11 @@ def append_record_group(path, records, *, order_key, expected_siblings) -> None:
         output.write(payload)
         output.flush()
         os.fsync(output.fileno())
+
+
+def _record_group_id(record: dict) -> str:
+    return str(record.get("collection_group_id") or
+               (record.get("intervention") or {}).get("group_id") or "")
 
 
 def _safe_publication_ready(full_by_radius) -> bool:
@@ -438,10 +453,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--pose-exclusions",
         help="JSON map of accepted source poses to avoid repeating")
-    parser.add_argument("--min-pose-position-m", type=float,
-                        default=config.POSE_DIVERSITY_POSITION_M)
-    parser.add_argument("--min-pose-yaw-deg", type=float,
-                        default=config.POSE_DIVERSITY_YAW_DEG)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--radii", type=float, nargs="+", default=list(config.RADII_M))
     parser.add_argument("--camera-heights", type=float, nargs="+",
@@ -465,6 +476,9 @@ def build_parser() -> argparse.ArgumentParser:
         default=config.ACTION_CANDIDATE_ORDINARY_PER_POSE,
         help="stable ordinary publication budget selected by the canary")
     parser.add_argument(
+        "--oracle-evaluation", choices=("perturbed", "nominal"), default="perturbed",
+        help="nominal evaluates only the saved pose with the same dual oracles")
+    parser.add_argument(
         "--action-mode", choices=["balanced", "file"], default="balanced",
         help="candidate source only; every output still uses the formal 1-6/3-3 selector")
     parser.add_argument("--action-file", help="candidate programs for --action-mode file")
@@ -473,7 +487,6 @@ def build_parser() -> argparse.ArgumentParser:
         "--keep-per-length", type=int, default=config.KEEP_PER_LENGTH,
         help="formal groups per length; current contract requires 1")
     parser.add_argument("--pool-factor", type=int, default=config.POOL_FACTOR)
-    parser.add_argument("--min-objects", type=int, default=1)
     parser.add_argument("--save-arrays", action="store_true")
     parser.add_argument(
         "--semantic-query-workers", type=_positive_int, default=1,
@@ -487,19 +500,20 @@ def build_parser() -> argparse.ArgumentParser:
                                help="resume from complete transactional groups")
     output_policy.add_argument("--overwrite", action="store_true",
                                help="explicitly replace an existing records file")
+    output_policy.add_argument(
+        "--append-records", metavar="JSONL",
+        help="append into existing compact records; --out holds progress only")
     parser.add_argument(
         "--code-revision",
         help="Git commit the controller pinned this run to; recorded for "
              "provenance and enforced across --resume")
     parser.add_argument(
         "--allow-dirty-code", action="store_true",
-        help="smoke-only: mark this run's code as dirty; the release gate "
-             "rejects any artifact built from a dirty-code source")
-    parser.add_argument("--no-validate", action="store_true")
+        help="record that collection uses uncommitted local code changes")
     parser.add_argument(
         "--backend", choices=dataset_contracts.main_collection_datasets(),
         default="r2r",
-        help=("R2R uses the MP3D train whitelist; B1K and GS use explicit "
+        help=("R2R uses an MP3D episode whitelist; B1K and GS use explicit "
               "authenticated source manifests"))
     parser.add_argument(
         "--collection-mode", choices=config.CLI_COLLECTION_MODES, default="main",
@@ -510,7 +524,13 @@ def build_parser() -> argparse.ArgumentParser:
         default="train_seen",
         help="frozen benchmark scene partition selected for this shard")
     parser.add_argument(
-        "--r2r-train-episodes", default=config.R2R_TRAIN_EPISODES)
+        "--source-split", choices=dataset_contracts.OFFICIAL_SOURCE_SPLITS,
+        default="train",
+        help="official source catalog split consumed by this shard")
+    parser.add_argument(
+        "--r2r-episodes", "--r2r-train-episodes", dest="r2r_episodes",
+        default=config.R2R_TRAIN_EPISODES,
+        help="R2R episode manifest (legacy train-specific name is accepted)")
     parser.add_argument("--mp3d-root", default=config.MP3D_ROOT)
     parser.add_argument("--b1k-data-root")
     parser.add_argument("--b1k-source-manifest")

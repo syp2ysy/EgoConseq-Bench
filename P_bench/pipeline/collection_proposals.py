@@ -13,22 +13,31 @@ def precompute_full_geometry_candidates(
         sim, frame, pools, radii, stats):
     """Evaluate all actions while rebuilding each radius geometry only once."""
     result = {}
-    for raw_length in sorted(pools):
-        for action_tag, _actions in pools[raw_length]:
-            if action_tag in result:
-                raise ValueError(
-                    f"duplicate action tag in candidate bank: {action_tag}")
-            result[action_tag] = {}
+    candidates = [
+        (action_tag, actions)
+        for raw_length in sorted(pools)
+        for action_tag, actions in pools[raw_length]
+    ]
+    for action_tag, _actions in candidates:
+        if action_tag in result:
+            raise ValueError(
+                f"duplicate action tag in candidate bank: {action_tag}")
+        result[action_tag] = {}
     for raw_radius in radii:
         radius = float(raw_radius)
         sim.recompute_navmesh(
             radius, height=config.GROUND_ORACLE_HEIGHT_M)
         nav = sim.nav(frame.position, frame.yaw_rad)
-        for raw_length in sorted(pools):
-            for action_tag, actions in pools[raw_length]:
-                result[action_tag][radius] = (
-                    rollout.physical_collision_precheck(nav, actions))
-                stats["physical_prechecks"] += 1
+        traces = (
+            rollout.physical_path_traces(
+                nav, [actions for _action_tag, actions in candidates])
+            if getattr(sim, "source_dataset", "") == "b1k" else
+            [rollout.physical_path_trace(nav, actions)
+             for _action_tag, actions in candidates]
+        )
+        for (action_tag, _actions), trace in zip(candidates, traces):
+            result[action_tag][radius] = trace
+            stats["physical_prechecks"] += 1
     return result
 
 def record_candidate_stage(
@@ -91,37 +100,3 @@ def pose_candidate_draws_per_attempt(
     if candidate_count <= 0:
         raise ValueError("pose candidate count must be positive")
     return 1
-
-def evaluate_selected_action_groups(selected, evaluate_spec, *, radii,
-                                    skipped,
-                                    minimum=config.ACTION_CANDIDATE_MIN_PER_POSE):
-    """Evaluate selected groups, dropping only what actually disagreed.
-
-    A depth/mesh disagreement is a statement about one action, and for the
-    natural route the compiler treats every outcome independently -- so
-    rejecting the whole pose threw away a dozen sound programs to punish one,
-    and did it most often at exactly the lengths that are hardest to fill.
-    The pose is still rejected if too few survive to be a candidate set.
-
-    The active pipeline has no atomic family route: each action is an
-    independently certified candidate.
-    """
-    surviving = []
-    accepted = {}
-    for action_tag, actions in selected:
-        spec = {
-            "action_tag": action_tag,
-            "actions": actions,
-            "radii": list(radii),
-            "type": "main",
-        }
-        result = evaluate_spec(spec)
-        if result is None:
-            skipped["structured_main_group_dropped"] += 1
-            continue
-        surviving.append((action_tag, actions))
-        accepted[action_tag] = result
-    if len(surviving) < int(minimum):
-        skipped["structured_main_survivor_shortfall"] += 1
-        return None
-    return surviving, accepted

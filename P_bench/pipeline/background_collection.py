@@ -17,13 +17,15 @@ import time
 from typing import Callable, Mapping, Sequence
 
 from pipeline import (
-    a1_common_support, action_proposal, background_authorities,
-    background_canary, background_capacity, background_checkpoint,
-    background_job_contract, background_scheduler,
-    benchmark, candidate_preview, candidate_quota, collection_closeout,
-    collection_cli, config, dataset_contracts, gate_authority, io_utils,
-    scene_partitions,
+    background_authorities, background_canary, background_capacity,
+    background_checkpoint,
+    background_job_contract, background_jobs, background_scheduler,
+    collection_closeout, collection_cli, config, dataset_contracts, io_utils,
 )
+from post_QA.seen_build import catalog as record_catalog
+from post_QA.seen_build import selection as seen_selection
+from post_QA.seen_build import spec as seen_spec
+from post_QA.seen_build import supply as seen_supply
 from pipeline.background_lifecycle import (
     b1k_supervisor_timeout_s, capacity_watchdog_action,
     controller_watchdog_action, health_requires_termination,
@@ -31,20 +33,14 @@ from pipeline.background_lifecycle import (
 )
 
 
-CONTROLLER_SCHEMA = "egoconseq.three-dataset-background-controller.v3"
+CONTROLLER_SCHEMA = "egoconseq.three-dataset-background-controller.v5"
 STATE_SCHEMA = "egoconseq.three-dataset-background-state.v2"
 CAPACITY_PROFILE_SCHEMA = background_capacity.PROFILE_SCHEMA
-SUPPORTED_TASKS = tuple(benchmark.ABC_CANDIDATE_TASK_IDS)
+SUPPORTED_TASKS = seen_spec.TASKS
 DATASETS = dataset_contracts.main_collection_datasets()
 RECOVERED_UNKNOWN_RETURNCODE = 255
 _HEX40 = re.compile(r"[0-9a-f]{40}\Z")
 _HEX64 = re.compile(r"[0-9a-f]{64}\Z")
-_THREAD_ENVIRONMENT = {
-    "OMP_NUM_THREADS": "1",
-    "MKL_NUM_THREADS": "1",
-    "OPENBLAS_NUM_THREADS": "1",
-    "PYTHONUNBUFFERED": "1",
-}
 
 
 def _canonical_sha256(value) -> str:
@@ -64,12 +60,16 @@ def validate_capacity_profile(value: Mapping) -> None:
     background_capacity.validate_profile(value)
 
 
-six_task_macro_report = candidate_quota.six_task_macro_report
-dataset_macro_reports = candidate_quota.dataset_macro_reports
-
-
 def _dataset_quota_rows() -> dict:
-    return candidate_quota.collection_quota_rows()
+    return {
+        dataset: {
+            "supported_tasks": list(seen_spec.supported_tasks(dataset)),
+            "task_totals": dict(seen_spec.DATASET_TASK_TOTALS[dataset]),
+            "minimum_turn_first_fraction":
+                seen_spec.MINIMUM_TURN_FIRST_FRACTION,
+        }
+        for dataset in DATASETS
+    }
 
 
 def _unique(values: Sequence[str], *, label: str) -> list[str]:
@@ -95,221 +95,51 @@ def _required_paths(paths: Mapping[str, str]) -> dict[str, str]:
     return result
 
 
-def _common_collect_args(
-        *, scenes: Sequence[str], output_dir: Path, revision: str,
-        shard_id: str, poses_per_scene: int,
-        pose_candidates_per_scene: int, seed: int,
-        scene_wallclock_s: int,
-        ordinary_actions_per_pose: int,
-        pose_exclusions: Path = None) -> list[str]:
-    values = [
-        "--scenes", *scenes,
-        "--poses-per-scene", str(int(poses_per_scene)),
-        "--pose-candidates-per-scene", str(int(pose_candidates_per_scene)),
-        "--record-idle-stop-s", str(config.BACKGROUND_RECORD_IDLE_STOP_S),
-        "--scene-wallclock-stop-s", str(int(scene_wallclock_s)),
-        "--collection-shard-id", shard_id,
-        "--benchmark-partition", "train_seen",
-        "--seed", str(int(seed)),
-        "--radii", *[str(value) for value in config.RADII_M],
-        "--camera-heights", *[
-            str(value) for value in config.BENCH_CAMERA_HEIGHTS_M],
-        "--lengths", *[str(value) for value in config.GEN_LENGTHS],
-        "--proposal-pairs-per-length",
-        str(action_proposal.PAIRS_PER_LENGTH_DEFAULT),
-        "--proposal-natural-per-length",
-        str(action_proposal.NATURAL_PER_LENGTH_DEFAULT),
-        "--ordinary-actions-per-pose",
-        str(int(ordinary_actions_per_pose)),
-        "--keep-per-length", str(config.KEEP_PER_LENGTH),
-        "--action-mode", "balanced",
-    ]
-    if pose_exclusions is not None:
-        values.extend(["--pose-exclusions", str(pose_exclusions)])
-    return [
-        *values, "--out", str(output_dir),
-        "--code-revision", revision,
-        "--resume",
-    ]
+_direct_job = background_jobs.direct_job
+_b1k_job = background_jobs.b1k_job
+_bind_job_transaction = background_jobs.bind_job_transaction
+_collection_job = background_jobs.collection_job
 
 
-def _direct_job(
-        *, dataset: str, gpu_id: int, round_index: int,
-        scenes: Sequence[str], output_root: Path, revision: str, paths: dict,
-        poses_per_scene: int, pose_candidates_per_scene: int,
-        scene_wallclock_s: int,
-        ordinary_actions_per_pose: int,
-        pose_exclusions: Path = None) -> dict:
-    job_id = f"{dataset}-r{round_index:02d}-g{gpu_id}"
-    output_dir = output_root / "records" / dataset / job_id
-    command = [
-        paths["python"], str(Path(paths["repository"]) / "scripts" / "collect.py"),
-        "--backend", dataset,
-        *_common_collect_args(
-            scenes=scenes, output_dir=output_dir, revision=revision,
-            shard_id=job_id, poses_per_scene=poses_per_scene,
-            pose_candidates_per_scene=pose_candidates_per_scene,
-            scene_wallclock_s=scene_wallclock_s,
-            ordinary_actions_per_pose=ordinary_actions_per_pose,
-            seed=20260811 + int(round_index) * 101 + int(gpu_id),
-            pose_exclusions=pose_exclusions),
-    ]
-    if dataset == "r2r":
-        command.extend([
-            "--r2r-train-episodes", paths["r2r_train_episodes"],
-            "--mp3d-root", paths["mp3d_root"],
-            "--semantic-query-workers", "8",
-        ])
-    elif dataset == "gs":
-        command.extend([
-            "--gs-data-root", paths["gs_data_root"],
-            "--gs-source-manifest", paths["gs_source_manifest"],
-            "--min-objects", "0",
-        ])
-    else:
-        raise ValueError(f"unsupported direct dataset {dataset!r}")
-    return _job_value(
-        job_id=job_id, dataset=dataset, gpu_id=gpu_id,
-        round_index=round_index, scenes=scenes, output_dir=output_dir,
-        output_root=output_root, command=command,
-        pose_exclusions=pose_exclusions)
+def is_continuous(manifest: Mapping) -> bool:
+    """Whether a production manifest advances until operator interruption."""
+    return int((manifest.get("collection") or {}).get(
+        "catalog_passes") or 0) == 0
 
 
-def _b1k_job(
-        *, gpu_id: int, round_index: int, scenes: Sequence[str],
-        output_root: Path, revision: str, paths: dict,
-        poses_per_scene: int, pose_candidates_per_scene: int,
-        scene_wallclock_s: int, ordinary_actions_per_pose: int,
-        pose_exclusions: Path = None) -> dict:
-    dataset = "b1k"
-    job_id = f"b1k-r{round_index:02d}-g{gpu_id}"
-    output_dir = output_root / "records" / dataset / job_id
-    child_args = _common_collect_args(
-        scenes=scenes, output_dir=output_dir, revision=revision,
-        shard_id=job_id, poses_per_scene=poses_per_scene,
-        pose_candidates_per_scene=pose_candidates_per_scene,
-        scene_wallclock_s=scene_wallclock_s,
-        ordinary_actions_per_pose=ordinary_actions_per_pose,
-        seed=20260811 + int(round_index) * 101 + int(gpu_id),
-        pose_exclusions=pose_exclusions)
-    # The supervisor owns these values and rejects attempts to forward them.
-    protected = {
-        "--scenes", "--collection-shard-id", "--out", "--code-revision",
-        "--resume",
-    }
-    forwarded = []
-    index = 0
-    while index < len(child_args):
-        option = child_args[index]
-        if option in protected:
-            if option in {"--resume"}:
-                index += 1
-            elif option == "--scenes":
-                index += 1 + len(scenes)
-            else:
-                index += 2
-            continue
-        forwarded.append(option)
-        index += 1
-    command = [
-        paths["b1k_python"],
-        str(Path(paths["repository"]) / "scripts" /
-            "run_b1k_collection_shard.py"),
-        "run",
-        "--data-root", paths["b1k_data_root"],
-        "--source-manifest", paths["b1k_source_manifest"],
-        "--output-dir", str(output_dir),
-        "--gpu-id", str(gpu_id),
-        "--shard-id", job_id,
-        "--code-revision", revision,
-        "--resume",
-        "--scene-timeout-s", str(
-            b1k_supervisor_timeout_s(scene_wallclock_s)),
-        "--scenes", *scenes,
-        "--collect-args", *forwarded,
-    ]
-    return _job_value(
-        job_id=job_id, dataset=dataset, gpu_id=gpu_id,
-        round_index=round_index, scenes=scenes, output_dir=output_dir,
-        output_root=output_root, command=command,
-        isolate_cuda=False,
-        pose_exclusions=pose_exclusions,
-        extra_environment={
-            "OMNIGIBSON_DATA_PATH": paths["b1k_data_root"],
-            "OMNIGIBSON_APPDATA_PATH": str(
-                Path(paths["b1k_data_root"]) / "appdata"),
-            "OMNIGIBSON_HEADLESS": "True",
-            "OMNI_KIT_ACCEPT_EULA": "YES",
-            "OMNIGIBSON_GPU_ID": str(gpu_id),
-        })
-
-
-def _job_value(
-        *, job_id: str, dataset: str, gpu_id: int, round_index: int,
-        scenes: Sequence[str], output_dir: Path, output_root: Path,
-        command: Sequence[str], extra_environment: Mapping[str, str] = None,
-        isolate_cuda: bool = True, pose_exclusions: Path = None,
-        ) -> dict:
-    environment = {
-        **_THREAD_ENVIRONMENT,
-        **dict(extra_environment or {}),
-    }
-    if isolate_cuda:
-        environment["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
-    return {
-        "job_id": job_id,
-        "dataset": dataset,
-        "gpu_id": int(gpu_id),
-        "round_index": int(round_index),
-        "scenes": list(scenes),
-        "output_dir": str(output_dir),
-        "log_path": str(output_root / "controller" / "logs" /
-                        f"{job_id}.log"),
-        "command": [str(value) for value in command],
-        "environment": environment,
-        "pose_exclusions_path": (
-            str(Path(pose_exclusions).resolve())
-            if pose_exclusions is not None else None),
-    }
-
-
-def _bind_job_transaction(
-        job: dict, *, revision: str, paths: Mapping[str, str],
-        source_manifest_sha256: Mapping[str, str],
-        poses_per_scene: int, pose_candidates_per_scene: int,
-        ordinary_actions_per_pose: int) -> None:
-    dataset = job["dataset"]
-    scene_id = job["scenes"][0]
-    source_path_key = dataset_contracts.source_path_key(dataset)
-    child_shard = (
-        f"{job['job_id']}-{scene_id}"
-        if dataset == "b1k" else job["job_id"])
-    job["transaction_binding"] = {
-        "dataset": dataset,
-        "backend": dataset,
-        "scene_id": scene_id,
-        "collection_shard_id": child_shard,
-        "controller_job_id": job["job_id"],
-        "output_dir": job["output_dir"],
-        "revision": revision,
-        "poses_per_scene": int(poses_per_scene),
-        "pose_candidates_per_scene": int(pose_candidates_per_scene),
-        "record_idle_stop_s": config.BACKGROUND_RECORD_IDLE_STOP_S,
-        "benchmark_partition": "train_seen",
-        "ordinary_actions_per_pose":
-            int(ordinary_actions_per_pose),
-        "scene_wallclock_stop_s": int(job["scene_wallclock_s"]),
-        "supervisor_timeout_s": (
-            b1k_supervisor_timeout_s(job["scene_wallclock_s"])
-            if dataset == "b1k" else None),
-        "seed": 20260811 + int(job["round_index"]) * 101 +
-            int(job["gpu_id"]),
-        "pose_exclusions_path": job.get("pose_exclusions_path"),
-        "source_authority": {
-            "path": str(paths[source_path_key]),
-            "sha256": source_manifest_sha256[dataset],
-        },
-    }
+def continuous_job(
+        manifest: Mapping, dataset: str, *, catalog_pass: int,
+        scene_index: int) -> dict:
+    """Derive one continuous transaction from immutable pass-zero inputs."""
+    if not is_continuous(manifest):
+        raise ValueError("background manifest is not continuous")
+    scenes = (manifest.get("scene_catalog") or {}).get(dataset)
+    if not isinstance(scenes, list) or not 0 <= int(scene_index) < len(scenes):
+        raise ValueError("background continuous scene index is invalid")
+    if int(catalog_pass) < 0:
+        raise ValueError("background continuous catalog pass is invalid")
+    source_digests = {}
+    for round_value in manifest.get("rounds") or []:
+        for template in round_value.get("jobs") or []:
+            name = template.get("dataset")
+            if name in DATASETS and name not in source_digests:
+                source_digests[name] = str(
+                    ((template.get("transaction_binding") or {}).get(
+                        "source_authority") or {}).get("sha256") or "")
+    if set(source_digests) != set(DATASETS):
+        raise ValueError("background continuous source bindings are absent")
+    index = int(scene_index)
+    pass_index = int(catalog_pass)
+    return _collection_job(
+        dataset=dataset, scene_id=scenes[index], scene_index=index,
+        catalog_pass=pass_index,
+        round_index=pass_index * len(scenes) + index,
+        output_root=Path(str(manifest["output_root"])),
+        revision=str(manifest["revision"]), paths=manifest["paths"],
+        profile=manifest["capacity_profile"],
+        source_manifest_sha256=source_digests,
+        seed_pose_exclusions=manifest.get("seed_pose_exclusions"),
+        seed_base=manifest["collection"]["seed_base"])
 
 
 def build_canary_manifest(
@@ -340,8 +170,13 @@ def build_manifest(
         b1k_source_manifest_sha256: str,
         b1k_source_scene_ids: Sequence[str], capacity_profile: Mapping,
         capacity_profile_sha256: str, rounds: int = 1,
-        source_scene_catalog: Mapping[str, Sequence[str]] = None) -> dict:
-    """Build full-catalog, one-scene transaction jobs for four GPUs."""
+        source_scene_catalog: Mapping[str, Sequence[str]] = None,
+        seed_pose_exclusions: Mapping[str, Mapping] = None,
+        baseline_checkpoint: Mapping = None,
+        target_pose_diverse_frames: int = None,
+        collection_seed: int = config.BACKGROUND_COLLECTION_SEED_BASE,
+        saturated_datasets: Sequence[str] = ()) -> dict:
+    """Build one fixed-dataset queue per collection GPU."""
     revision = str(revision).strip()
     if _HEX40.fullmatch(revision) is None:
         raise ValueError("background collection revision must be a clean SHA-1")
@@ -352,9 +187,72 @@ def build_manifest(
     source_catalog = background_scheduler.bind_source_catalog(
         scheduled_catalog, source_scene_catalog, DATASETS)
     catalog_passes = int(rounds)
-    if catalog_passes < 1:
-        raise ValueError("background collection catalog passes must be positive")
+    if catalog_passes < 0:
+        raise ValueError(
+            "background collection catalog passes must be nonnegative")
+    if type(collection_seed) is not int or collection_seed < 0:
+        raise ValueError("background collection seed must be nonnegative")
+    saturated = [str(dataset) for dataset in saturated_datasets]
+    if (len(saturated) != len(set(saturated)) or
+            any(dataset not in DATASETS for dataset in saturated)):
+        raise ValueError("background saturated datasets are invalid")
+    if saturated and catalog_passes != 0:
+        raise ValueError(
+            "background saturated datasets require continuous collection")
     resolved_paths = _required_paths(paths)
+    seed_identities = None
+    if seed_pose_exclusions is not None:
+        if set(seed_pose_exclusions) != set(DATASETS):
+            raise ValueError(
+                "background seed exclusions must cover every dataset")
+        seed_identities = {}
+        for dataset in DATASETS:
+            identity = seed_pose_exclusions[dataset]
+            path = Path(str((identity or {}).get("path") or "")).resolve()
+            digest = str((identity or {}).get("sha256") or "")
+            if not path.is_file() or io_utils.sha256_file(path) != digest:
+                raise ValueError(
+                    f"background {dataset} seed exclusion identity differs")
+            representative_count = (identity or {}).get(
+                "representative_count")
+            record_count = (identity or {}).get("record_count")
+            if type(representative_count) is not int or \
+                    representative_count < 0:
+                raise ValueError(
+                    f"background {dataset} seed representative count is "
+                    "invalid")
+            if type(record_count) is not int or \
+                    record_count < representative_count:
+                raise ValueError(
+                    f"background {dataset} seed record count is invalid")
+            seed_identities[dataset] = {
+                "path": str(path), "sha256": digest,
+                "representative_count": representative_count,
+                "record_count": record_count,
+            }
+    baseline_identity = None
+    if baseline_checkpoint is not None:
+        path = Path(str((baseline_checkpoint or {}).get("path") or "")) \
+            .resolve()
+        digest = str((baseline_checkpoint or {}).get("sha256") or "")
+        if not path.is_file() or io_utils.sha256_file(path) != digest:
+            raise ValueError("background baseline checkpoint identity differs")
+        baseline_identity = {"path": str(path), "sha256": digest}
+    if (seed_identities is None) != (baseline_identity is None):
+        raise ValueError(
+            "background baseline checkpoint and seed exclusions must be "
+            "bound together")
+    if saturated and (seed_identities is None or any(
+            seed_identities[dataset]["representative_count"] <
+            config.BACKGROUND_MIN_UNIQUE_FRAMES_BY_DATASET[dataset]
+            for dataset in saturated)):
+        raise ValueError(
+            "background saturated dataset lacks its frame minimum")
+    target_frames = (
+        None if target_pose_diverse_frames is None
+        else int(target_pose_diverse_frames))
+    if target_frames is not None and target_frames < 1:
+        raise ValueError("background target pose-diverse frames is invalid")
     audit_digest = str(b1k_catalog_audit_sha256 or "")
     if _HEX64.fullmatch(audit_digest) is None:
         raise ValueError("B1K catalog audit digest is invalid")
@@ -431,68 +329,34 @@ def build_manifest(
     root = Path(output_root).resolve()
     round_values = []
     round_index = 0
-    dataset_rank = {dataset: index for index, dataset in enumerate(DATASETS)}
-    for catalog_pass in range(catalog_passes):
-        pending = []
+    for catalog_pass in range(max(1, catalog_passes)):
+        gpu_queues = {}
         for dataset, scenes in (("r2r", r2r), ("gs", gs), ("b1k", b1k)):
             weight = int(profile["datasets"][dataset]["scene_wallclock_s"])
-            pending.extend({
+            gpu_id = dataset_contracts.collection_gpu_id(dataset)
+            gpu_queues[gpu_id] = [{
                 "dataset": dataset,
                 "scene_id": scene_id,
                 "scene_index": scene_index,
                 "weight": weight,
-            } for scene_index, scene_id in enumerate(scenes))
-        pending.sort(key=lambda row: (
-            -row["weight"], dataset_rank[row["dataset"]],
-            row["scene_index"], row["scene_id"]))
-        gpu_loads = [0, 0, 0, 0]
-        gpu_queues = [[], [], [], []]
-        for row in pending:
-            gpu_id = min(range(4), key=lambda value: (gpu_loads[value], value))
-            gpu_queues[gpu_id].append(row)
-            gpu_loads[gpu_id] += row["weight"]
-        for queue_index in range(max(map(len, gpu_queues))):
+            } for scene_index, scene_id in enumerate(scenes)]
+        for queue_index in range(max(map(len, gpu_queues.values()))):
             jobs = []
-            for gpu_id, queue in enumerate(gpu_queues):
+            for gpu_id, queue in sorted(gpu_queues.items()):
                 if queue_index >= len(queue):
                     continue
                 scheduled = queue[queue_index]
                 dataset = scheduled["dataset"]
                 scene_id = scheduled["scene_id"]
-                capacity = profile["datasets"][dataset]
-                common = {
-                    "gpu_id": gpu_id,
-                    "round_index": round_index,
-                    "scenes": [scene_id],
-                    "output_root": root,
-                    "revision": revision,
-                    "paths": resolved_paths,
-                    "poses_per_scene": capacity["records_per_scene"],
-                    "pose_candidates_per_scene":
-                        capacity["pose_attempt_cap"],
-                    "ordinary_actions_per_pose": ordinary_actions_per_pose,
-                    "pose_exclusions": (
-                        root / "controller" / "pose_exclusions" / dataset /
-                        f"{scene_id}-pass{catalog_pass:02d}.json"
-                        if catalog_pass > 0 else None),
-                }
-                job = (
-                    _b1k_job(
-                        **common,
-                        scene_wallclock_s=capacity["scene_wallclock_s"])
-                    if dataset == "b1k" else
-                    _direct_job(
-                        dataset=dataset, **common,
-                        scene_wallclock_s=capacity["scene_wallclock_s"]))
-                job["catalog_pass"] = catalog_pass
-                job["weight"] = scheduled["weight"]
-                job["scene_wallclock_s"] = capacity["scene_wallclock_s"]
-                _bind_job_transaction(
-                    job, revision=revision, paths=resolved_paths,
+                job = _collection_job(
+                    dataset=dataset, scene_id=scene_id,
+                    scene_index=scheduled["scene_index"],
+                    catalog_pass=catalog_pass, round_index=round_index,
+                    output_root=root, revision=revision,
+                    paths=resolved_paths, profile=profile,
                     source_manifest_sha256=source_manifest_digests,
-                    poses_per_scene=capacity["records_per_scene"],
-                    pose_candidates_per_scene=capacity["pose_attempt_cap"],
-                    ordinary_actions_per_pose=ordinary_actions_per_pose)
+                    seed_pose_exclusions=seed_identities,
+                    seed_base=collection_seed)
                 jobs.append(job)
             round_values.append({
                 "round_index": round_index,
@@ -507,6 +371,8 @@ def build_manifest(
         "paths": resolved_paths,
         "collection": {
             "catalog_passes": catalog_passes,
+            "seed_base": collection_seed,
+            "saturated_datasets": sorted(saturated),
             "ordinary_actions_per_pose": ordinary_actions_per_pose,
             "heartbeat_interval_s": config.BACKGROUND_HEARTBEAT_INTERVAL_S,
             "initialization_deadline_s":
@@ -538,6 +404,9 @@ def build_manifest(
                     config.BACKGROUND_GS_CATALOG_EXCLUSIONS.items())
             ],
         },
+        "seed_pose_exclusions": seed_identities,
+        "baseline_checkpoint": baseline_identity,
+        "target_pose_diverse_frames": target_frames,
         "source_scene_catalog": source_catalog,
         "scene_catalog": scheduled_catalog,
         "rounds": round_values,
@@ -553,9 +422,23 @@ def validate_manifest(value: dict) -> None:
         raise ValueError("background collection manifest digest is invalid")
     if _HEX40.fullmatch(str(value.get("revision") or "")) is None:
         raise ValueError("background collection manifest revision is invalid")
-    passes = int((value.get("collection") or {}).get("catalog_passes") or 0)
-    if passes < 1:
+    collection = value.get("collection") or {}
+    raw_passes = collection.get("catalog_passes")
+    if isinstance(raw_passes, bool) or not isinstance(raw_passes, int):
         raise ValueError("background collection catalog passes are invalid")
+    passes = int(raw_passes)
+    if passes < 0:
+        raise ValueError("background collection catalog passes are invalid")
+    seed_base = collection.get("seed_base")
+    if type(seed_base) is not int or seed_base < 0:
+        raise ValueError("background collection seed is invalid")
+    saturated = collection.get("saturated_datasets")
+    if (not isinstance(saturated, list) or
+            saturated != sorted(saturated) or
+            len(saturated) != len(set(saturated)) or
+            any(dataset not in DATASETS for dataset in saturated) or
+            (saturated and passes != 0)):
+        raise ValueError("background saturated datasets are invalid")
     profile = value.get("capacity_profile")
     validate_capacity_profile(profile)
     ordinary_actions_per_pose = int(profile["ordinary_actions_per_pose"])
@@ -575,6 +458,45 @@ def validate_manifest(value: dict) -> None:
     }
     if value.get("catalog_exclusions") != expected_exclusions:
         raise ValueError("background collection catalog exclusions differ")
+    seed_identities = value.get("seed_pose_exclusions")
+    if seed_identities is not None and (
+            not isinstance(seed_identities, Mapping) or
+            set(seed_identities) != set(DATASETS) or any(
+                _HEX64.fullmatch(str(
+                    (seed_identities[dataset] or {}).get("sha256") or ""))
+                is None or not str(
+                    (seed_identities[dataset] or {}).get("path") or "") or
+                type((seed_identities[dataset] or {}).get(
+                    "representative_count")) is not int or
+                (seed_identities[dataset] or {}).get(
+                    "representative_count") < 0 or
+                type((seed_identities[dataset] or {}).get(
+                    "record_count")) is not int or
+                (seed_identities[dataset] or {}).get("record_count") <
+                (seed_identities[dataset] or {}).get("representative_count")
+                for dataset in DATASETS)):
+        raise ValueError("background collection seed exclusions are invalid")
+    baseline = value.get("baseline_checkpoint")
+    if baseline is not None and (
+            not isinstance(baseline, Mapping) or
+            _HEX64.fullmatch(str(baseline.get("sha256") or "")) is None or
+            not str(baseline.get("path") or "")):
+        raise ValueError("background collection baseline checkpoint is invalid")
+    if (seed_identities is None) != (baseline is None):
+        raise ValueError(
+            "background baseline checkpoint and seed exclusions must be "
+            "bound together")
+    if saturated and (seed_identities is None or any(
+            seed_identities[dataset]["representative_count"] <
+            config.BACKGROUND_MIN_UNIQUE_FRAMES_BY_DATASET[dataset]
+            for dataset in saturated)):
+        raise ValueError(
+            "background saturated dataset lacks its frame minimum")
+    target_frames = value.get("target_pose_diverse_frames")
+    if target_frames is not None and (
+            type(target_frames) is not int or target_frames < 1):
+        raise ValueError(
+            "background collection target pose-diverse frames is invalid")
     catalog = value.get("scene_catalog") or {}
     source_catalog = value.get("source_scene_catalog") or {}
     background_scheduler.validate_catalog_binding(
@@ -600,7 +522,7 @@ def validate_manifest(value: dict) -> None:
         raise ValueError("background collection dataset quotas are invalid")
     scheduled = {
         catalog_pass: {name: [] for name in DATASETS}
-        for catalog_pass in range(passes)
+        for catalog_pass in range(max(1, passes))
     }
     rounds = value.get("rounds") or []
     if not rounds:
@@ -619,6 +541,10 @@ def validate_manifest(value: dict) -> None:
                     len(scenes) != 1:
                 raise ValueError(
                     "background collection jobs must bind one catalog scene")
+            if job.get("gpu_id") != \
+                    dataset_contracts.collection_gpu_id(dataset):
+                raise ValueError(
+                    "background collection job violates GPU affinity")
             if job.get("catalog_pass") != catalog_pass:
                 raise ValueError(
                     "background collection job catalog pass differs")
@@ -629,7 +555,8 @@ def validate_manifest(value: dict) -> None:
                      "pose_exclusions" / dataset /
                      f"{scenes[0]}-pass{int(catalog_pass):02d}.json").
                     resolve())
-                if int(catalog_pass) > 0 else None)
+                if int(catalog_pass) > 0 or seed_identities is not None
+                else None)
             expected_shard = (
                 f"{job.get('job_id')}-{scenes[0]}"
                 if dataset == "b1k" else job.get("job_id"))
@@ -655,9 +582,9 @@ def validate_manifest(value: dict) -> None:
                         b1k_supervisor_timeout_s(
                             capacity["scene_wallclock_s"])
                         if dataset == "b1k" else None),
-                    binding.get("seed") != 20260811 +
-                    int(job.get("round_index")) * 101 +
-                    int(job.get("gpu_id")),
+                    binding.get("seed") != background_jobs.collection_seed(
+                        seed_base, job.get("round_index"),
+                        job.get("gpu_id")),
                     job.get("pose_exclusions_path") !=
                     expected_pose_exclusions,
                     binding.get("pose_exclusions_path") !=
@@ -728,7 +655,7 @@ def validate_launch_resources(
 
 def initial_state(manifest: dict) -> dict:
     validate_manifest(manifest)
-    return {
+    value = {
         "schema": STATE_SCHEMA,
         "manifest_sha256": manifest["sha256"],
         "status": "ready",
@@ -738,6 +665,13 @@ def initial_state(manifest: dict) -> dict:
         "compile_checkpoints": [],
         "updated_time_unix": None,
     }
+    if is_continuous(manifest):
+        value["dataset_cursors"] = {
+            dataset: {"catalog_pass": 0, "scene_index": 0}
+            for dataset in DATASETS}
+        value["exhausted_datasets"] = list(
+            manifest["collection"]["saturated_datasets"])
+    return value
 
 
 def validate_state(manifest: dict, state: Mapping) -> None:
@@ -747,8 +681,11 @@ def validate_state(manifest: dict, state: Mapping) -> None:
             state.get("manifest_sha256") != manifest["sha256"]):
         raise ValueError("background collection state does not match manifest")
     current_round = state.get("current_round")
+    maximum_round = None if is_continuous(manifest) else len(
+        manifest["rounds"])
     if (isinstance(current_round, bool) or not isinstance(current_round, int) or
-            not 0 <= current_round <= len(manifest["rounds"])):
+            current_round < 0 or
+            (maximum_round is not None and current_round > maximum_round)):
         raise ValueError("background collection state round is invalid")
     allowed_statuses = {
         "ready", "running", "compile_failed", "complete",
@@ -775,6 +712,24 @@ def validate_state(manifest: dict, state: Mapping) -> None:
     if not isinstance(jobs, Mapping):
         raise ValueError("background collection state jobs are invalid")
     status = state.get("status")
+    cursors = state.get("dataset_cursors")
+    exhausted_datasets = state.get("exhausted_datasets")
+    if is_continuous(manifest):
+        if (not isinstance(cursors, Mapping) or set(cursors) != set(DATASETS) or
+                any(not isinstance(row, Mapping) or
+                    type(row.get("catalog_pass")) is not int or
+                    int(row["catalog_pass"]) < 0 or
+                    type(row.get("scene_index")) is not int or
+                    not 0 <= int(row["scene_index"]) < len(
+                        manifest["scene_catalog"][dataset])
+                    for dataset, row in cursors.items()) or
+                not isinstance(exhausted_datasets, list) or
+                len(exhausted_datasets) != len(set(exhausted_datasets)) or
+                not set(exhausted_datasets).issubset(set(DATASETS))):
+            raise ValueError(
+                "background continuous dataset cursors are invalid")
+    elif cursors is not None or exhausted_datasets is not None:
+        raise ValueError("finite background state carries continuous cursors")
     if status == "ready" and any((current_round, jobs, datasets, checkpoints)):
         raise ValueError("background collection ready state is not empty")
     if status == "compile_failed" and (
@@ -783,11 +738,16 @@ def validate_state(manifest: dict, state: Mapping) -> None:
                 for name in DATASETS)):
         raise ValueError(
             "background collection compile failure transition is invalid")
-    if status in {"complete", "capacity_shortfall"} and (
-            current_round != len(manifest["rounds"]) or not checkpoints or
-            set(datasets) != set(DATASETS)):
-        raise ValueError(
-            "background collection terminal transition is invalid")
+    if status in {"complete", "capacity_shortfall"}:
+        valid_terminal = (
+            status == "capacity_shortfall" and
+            set(exhausted_datasets or []) == set(DATASETS)
+            if is_continuous(manifest) else
+            current_round == len(manifest["rounds"]) and bool(checkpoints) and
+            set(datasets) == set(DATASETS))
+        if not valid_terminal:
+            raise ValueError(
+                "background collection terminal transition is invalid")
     for dataset, row in datasets.items():
         if not isinstance(row, Mapping):
             raise ValueError("background collection state dataset row is invalid")
@@ -842,6 +802,15 @@ def validate_state(manifest: dict, state: Mapping) -> None:
     }
     for job_id, runtime in jobs.items():
         definition = definitions.get(job_id)
+        if definition is None and is_continuous(manifest) and \
+                isinstance(runtime, Mapping):
+            try:
+                definition = continuous_job(
+                    manifest, str(runtime.get("dataset") or ""),
+                    catalog_pass=int(runtime.get("catalog_pass")),
+                    scene_index=int(runtime.get("scene_index")))
+            except (TypeError, ValueError):
+                definition = None
         if definition is None or not isinstance(runtime, Mapping):
             raise ValueError("background collection state job is unknown")
         if any((
@@ -849,6 +818,10 @@ def validate_state(manifest: dict, state: Mapping) -> None:
                 runtime.get("dataset") != definition["dataset"],
                 runtime.get("scene_id") != definition["scenes"][0],
                 runtime.get("round_index") != definition["round_index"],
+                is_continuous(manifest) and runtime.get("catalog_pass") !=
+                definition["catalog_pass"],
+                is_continuous(manifest) and runtime.get("scene_index") !=
+                definition["scene_index"],
         )):
             raise ValueError("background collection state job binding differs")
         catalog_status = runtime.get("catalog_status")
@@ -909,6 +882,8 @@ def validate_state(manifest: dict, state: Mapping) -> None:
 
 initialize_capacity_events = background_capacity.initialize_controller_events
 record_capacity_event = background_capacity.record_controller_event
+frame_progress = background_capacity.frame_progress
+dataset_can_stop = background_capacity.dataset_can_stop
 # Kept as a narrow compatibility hook for the canary supervisor and tests.
 _default_launcher = background_scheduler.default_launcher
 
@@ -938,13 +913,20 @@ def start_round(
         manifest, state, jobs, launcher=launcher, now=timestamp)
 
 
-def _manifest_job(manifest: dict, job_id: str) -> dict:
+def _manifest_job(
+        manifest: dict, job_id: str, *, state: Mapping = None) -> dict:
     matches = [
         job for round_value in manifest["rounds"]
         for job in round_value["jobs"] if job["job_id"] == str(job_id)]
-    if len(matches) != 1:
-        raise ValueError(f"background collection job is unknown: {job_id!r}")
-    return matches[0]
+    if len(matches) == 1:
+        return matches[0]
+    runtime = ((state or {}).get("jobs") or {}).get(str(job_id))
+    if is_continuous(manifest) and isinstance(runtime, Mapping):
+        return continuous_job(
+            manifest, str(runtime.get("dataset") or ""),
+            catalog_pass=int(runtime.get("catalog_pass")),
+            scene_index=int(runtime.get("scene_index")))
+    raise ValueError(f"background collection job is unknown: {job_id!r}")
 
 
 def retry_job(
@@ -961,7 +943,7 @@ def retry_job(
     attempt = int(runtime.get("attempt") or 0)
     if attempt > allowed_retries:
         raise ValueError("background collection retry budget is exhausted")
-    job = _manifest_job(manifest, str(job_id))
+    job = _manifest_job(manifest, str(job_id), state=state)
     timestamp = float(time.time() if now is None else now)
     initialize_capacity_events(manifest, job, time_unix=timestamp)
     process = launcher(job, job["environment"], job["log_path"])
@@ -1110,10 +1092,6 @@ def dataset_catalog_coverage(
     unresolved_rows = []
     touched = 0
     produced = 0
-    shortfall_scenes = {
-        f"L{length}": []
-        for length in manifest["quota"][dataset]["required_lengths"]
-    }
     for job in planned:
         runtime = (state.get("jobs") or {}).get(job["job_id"])
         scene_id = job["scenes"][0]
@@ -1127,10 +1105,6 @@ def dataset_catalog_coverage(
         scenes_by_state[status].append(scene_id)
         if status in {"completed", "partial_valid"}:
             produced += 1
-            source_validation = runtime.get("source_validation") or {}
-            for length in source_validation.get("length_shortfall") or []:
-                if length in shortfall_scenes:
-                    shortfall_scenes[length].append(scene_id)
         if status == "unresolved":
             unresolved_rows.append({
                 "job_id": job["job_id"],
@@ -1143,14 +1117,6 @@ def dataset_catalog_coverage(
         name: len(scenes_by_state[name]) for name in state_names}
     catalog_count = len(planned) + len(excluded_ids)
     terminal_count = catalog_count - states["unresolved"]
-    per_length = {
-        length: {
-            "scene_count": len(scene_ids),
-            "rate": len(scene_ids) / produced if produced else 0.0,
-            "scene_ids": scene_ids,
-        }
-        for length, scene_ids in shortfall_scenes.items()
-    }
     return {
         "dataset": dataset,
         "catalog_pass": int(catalog_pass),
@@ -1163,104 +1129,72 @@ def dataset_catalog_coverage(
         },
         "states": states,
         "scene_ids_by_state": scenes_by_state,
-        "per_length_scene_shortfall": per_length,
         "planned_scene_transactions": len(planned),
         "completed_scene_transactions": states["completed"],
         "reusable_scene_transactions": (
             states["completed"] + states["partial_valid"]),
         "complete": bool(catalog_count and not unresolved_rows),
+        "capacity_exhausted": (
+            None if unresolved_rows else produced == 0),
         "incomplete": unresolved_rows,
     }
-
-
-def dataset_can_stop(manifest: dict, state: dict, dataset: str) -> bool:
-    """Require both compiled-QA quota and a terminal first catalog pass."""
-    row = (state.get("datasets") or {}).get(str(dataset)) or {}
-    quota = row.get("quota") or {}
-    checkpoint = row.get("checkpoint")
-    identity = row.get("checkpoint_summary")
-    if (checkpoint not in (state.get("compile_checkpoints") or []) or
-            not isinstance(identity, Mapping)):
-        return False
-    own_complete = bool(
-        quota.get("complete") is True and
-        dataset_catalog_coverage(manifest, state, dataset)["complete"])
-    return candidate_quota.allows_dataset_stop(
-        dataset, own_complete=own_complete, state=state)
-
-
-def compilation_checkpoints_due(
-        manifest: dict, state: dict, *, round_index: int,
-        completed_datasets: Sequence[str] = ()) -> list[str]:
-    """Return the only global QA checkpoints permitted after one wave."""
-    completed = set(state.get("compile_checkpoints") or [])
-    produced = {dataset: set() for dataset in DATASETS}
-    for round_value in manifest.get("rounds") or []:
-        for job in round_value.get("jobs") or []:
-            runtime = (state.get("jobs") or {}).get(job["job_id"]) or {}
-            if runtime.get("catalog_status") in {"completed", "partial_valid"}:
-                produced[job["dataset"]].add(job["scenes"][0])
-    due = []
-    early = "early-two-scenes"
-    if early not in completed and all(
-            len(produced[dataset]) >= 2 for dataset in DATASETS):
-        due.append(early)
-    current = manifest["rounds"][int(round_index)]
-    catalog_pass = int(current["catalog_pass"])
-    final_catalog_pass = max(
-        int(row["catalog_pass"]) for row in manifest["rounds"])
-    if catalog_pass not in {0, final_catalog_pass}:
-        return due
-    last_round = max(
-        row["round_index"] for row in manifest["rounds"]
-        if int(row["catalog_pass"]) == catalog_pass)
-    boundary = f"catalog-pass-{catalog_pass:02d}"
-    if (int(round_index) == last_round and boundary not in completed and
-            background_scheduler.catalog_pass_complete(
-                manifest, state, catalog_pass=catalog_pass,
-                completed_datasets=completed_datasets)):
-        due.append(boundary)
-    return due
 
 
 def _reusable_dataset_sources(
         manifest: dict, dataset: str, state: Mapping) -> list[dict]:
     sources = []
     seen = set()
-    for round_value in manifest.get("rounds") or []:
-        for job in round_value.get("jobs") or []:
-            if job.get("dataset") != str(dataset):
+    runtimes = state.get("jobs") or {}
+    if is_continuous(manifest):
+        candidates = []
+        for job_id, runtime in runtimes.items():
+            if runtime.get("dataset") != str(dataset):
                 continue
-            runtime = (state.get("jobs") or {}).get(job["job_id"]) or {}
-            if runtime.get("catalog_status") not in {
-                    "completed", "partial_valid"}:
-                continue
-            validation = runtime.get("source_validation") or {}
-            rows = validation.get("sources")
-            if not isinstance(rows, list) or not rows:
+            job = continuous_job(
+                manifest, str(dataset),
+                catalog_pass=int(runtime.get("catalog_pass")),
+                scene_index=int(runtime.get("scene_index")))
+            if job["job_id"] != job_id:
+                raise ValueError("continuous reusable job identity differs")
+            candidates.append((
+                int(job["catalog_pass"]), int(job["scene_index"]),
+                job["job_id"], job, runtime))
+        ordered = [(job, runtime) for *_key, job, runtime in sorted(
+            candidates)]
+    else:
+        ordered = [
+            (job, runtimes.get(job["job_id"]) or {})
+            for round_value in manifest.get("rounds") or []
+            for job in round_value.get("jobs") or []
+            if job.get("dataset") == str(dataset)]
+    for job, runtime in ordered:
+        if runtime.get("catalog_status") not in {
+                "completed", "partial_valid"}:
+            continue
+        validation = runtime.get("source_validation") or {}
+        rows = validation.get("sources")
+        if not isinstance(rows, list) or not rows:
+            raise ValueError(
+                "reusable scene transaction has no source identities")
+        output = Path(job["output_dir"]).resolve()
+        for row in rows:
+            if not isinstance(row, Mapping):
                 raise ValueError(
-                    "reusable scene transaction has no source identities")
-            output = Path(job["output_dir"]).resolve()
-            for row in rows:
-                if not isinstance(row, Mapping):
-                    raise ValueError(
-                        "reusable scene source identity is invalid")
-                path = Path(str(row.get("path") or "")).resolve()
-                try:
-                    path.relative_to(output)
-                except ValueError as error:
-                    raise ValueError(
-                        "reusable scene source escapes its transaction") \
-                        from error
-                if path in seen:
-                    raise ValueError("reusable scene source is duplicated")
-                if _HEX64.fullmatch(str(row.get("records_sha256") or "")) \
-                        is None or _HEX64.fullmatch(str(
-                            row.get("run_meta_sha256") or "")) is None:
-                    raise ValueError(
-                        "reusable scene source digest is invalid")
-                seen.add(path)
-                sources.append(dict(row))
+                    "reusable scene source identity is invalid")
+            path = Path(str(row.get("path") or "")).resolve()
+            try:
+                path.relative_to(output)
+            except ValueError as error:
+                raise ValueError(
+                    "reusable scene source escapes its transaction") from error
+            if path in seen:
+                raise ValueError("reusable scene source is duplicated")
+            if _HEX64.fullmatch(str(row.get("records_sha256") or "")) \
+                    is None or _HEX64.fullmatch(str(
+                        row.get("run_meta_sha256") or "")) is None:
+                raise ValueError("reusable scene source digest is invalid")
+            seen.add(path)
+            sources.append(dict(row))
     return sources
 
 
@@ -1372,8 +1306,7 @@ def validate_scene_transaction(job: Mapping, *, returncode: int,
             "record_paths": [],
         }
     total = 0
-    complete = True
-    length_shortfall = set()
+    partial = False
     source_identities = []
     for path in paths:
         metadata_path = path.with_name("run_meta.json")
@@ -1404,21 +1337,10 @@ def validate_scene_transaction(job: Mapping, *, returncode: int,
             "records_sha256": finalization["records_sha256"],
             "run_meta_sha256": finalization["run_meta_sha256"],
         })
-        coverage = metadata.get("formal_action_length_coverage")
-        if not isinstance(coverage, Mapping) or \
-                not isinstance(coverage.get("complete"), bool) or \
-                not isinstance(coverage.get("shortfall"), Mapping):
-            raise ValueError(
-                "scene transaction formal action coverage is invalid")
-        complete = complete and coverage["complete"]
-        length_shortfall.update(str(value) for value in coverage["shortfall"])
-        expected_terminal = "completed" if coverage["complete"] else "partial"
-        if finalization["status"] != expected_terminal:
-            raise ValueError(
-                "scene transaction finalization disagrees with coverage")
-    if complete and int(returncode) in {0, RECOVERED_UNKNOWN_RETURNCODE}:
+        partial = partial or finalization["status"] == "partial"
+    if not partial and int(returncode) in {0, RECOVERED_UNKNOWN_RETURNCODE}:
         status = "completed"
-    elif not complete:
+    elif partial:
         status = "partial_valid"
     else:
         status = "failed"
@@ -1429,7 +1351,7 @@ def validate_scene_transaction(job: Mapping, *, returncode: int,
             if status == "completed" and
             int(returncode) == RECOVERED_UNKNOWN_RETURNCODE else None),
         "source_validated_records": total,
-        "length_shortfall": sorted(length_shortfall),
+        "length_shortfall": [],
         "record_paths": [str(path) for path in paths],
         "sources": source_identities,
     }
@@ -1437,144 +1359,76 @@ def validate_scene_transaction(job: Mapping, *, returncode: int,
 
 def compile_global(
         manifest: dict, checkpoint, *, state: Mapping) -> dict:
-    """Compile one corpus-global artifact, then compute dataset quota views."""
+    """Measure all durable shards against the same ABC1 benchmark slots."""
     checkpoint_id = (
         f"round-{int(checkpoint):02d}"
         if isinstance(checkpoint, int) else str(checkpoint))
-    if not checkpoint_id or any(
-            character not in "abcdefghijklmnopqrstuvwxyz0123456789-_"
-            for character in checkpoint_id):
-        raise ValueError("background compile checkpoint is invalid")
-    sources = [
-        row for dataset in DATASETS
-        for row in _reusable_dataset_sources(manifest, dataset, state)
-    ]
-    records = [Path(row["path"]) for row in sources]
-    if not records:
+    sources = background_capacity.baseline_sources(manifest)
+    for dataset in DATASETS:
+        sources.extend({**row, "dataset": dataset} for row in
+                       _reusable_dataset_sources(manifest, dataset, state))
+    if not sources:
         raise ValueError("global background corpus has no durable records")
-    for path in records:
-        rows = io_utils.read_jsonl(path, require_dict=True)
-        if not rows or any(
-                not a1_common_support.has_uniform_v3_ordinary_provenance(
-                    record)
-                for record in rows):
-            raise ValueError(
-                "global background corpus requires one uniform proposal-v3 "
-                "policy")
-    metadata_digests = []
-    for path, source in zip(records, sources):
-        metadata = path.with_name("run_meta.json")
-        if not metadata.is_file():
-            raise ValueError(f"run metadata is missing beside {path}")
-        metadata_digests.append(source["run_meta_sha256"])
-    authority = gate_authority.resolve_preview_source_authority(
-        records_paths=records,
-        expected_records_sha256=[
-            source["records_sha256"] for source in sources],
-        expected_run_meta_sha256=metadata_digests,
-        authority_kind=gate_authority.CLI_EXTERNAL_AUTHORITY_KIND,
-        authority_id=(
-            f"background:{manifest['sha256']}:global:{checkpoint_id}"))
-    artifact_parent = (
-        Path(manifest["output_root"]) / "artifacts" / "global" /
-        checkpoint_id)
-    if artifact_parent.exists():
+    final_parent = (Path(manifest["output_root"]) / "artifacts" /
+                    "global" / checkpoint_id)
+    if final_parent.exists():
         summary = background_checkpoint.load(
             manifest, checkpoint_id)
         return {
             **dict(summary["result"]),
             "checkpoint_summary": {
-                "path": str(artifact_parent /
+                "path": str(final_parent /
                             background_checkpoint.SUMMARY_NAME),
                 "sha256": io_utils.sha256_file(
-                    artifact_parent / background_checkpoint.SUMMARY_NAME),
+                    final_parent / background_checkpoint.SUMMARY_NAME),
                 "content_sha256": summary["sha256"],
             },
         }
     final_parent, staging = background_checkpoint.prepare(
         manifest, checkpoint_id)
-    artifact = staging / "candidate_qa"
-    report_root = staging / "candidate_qa_report"
-    result = candidate_preview.build_main_preview(
-        records, artifact, report_root,
-        expected_source_authority=authority,
-        run_meta_sha256=metadata_digests)
-    expected_policy = {"A1_collision": a1_common_support.V3_POLICY}
-    report = gate_authority.load_authority_manifest(artifact / "report.json")
-    source_map = gate_authority.load_authority_manifest(
-        artifact / "private" / "source_map.json")
-    if (report.get("publication_selection") != expected_policy or
-            source_map.get("publication_selection") != expected_policy):
-        raise ValueError(
-            "global background artifact lacks proposal-v3 publication policy")
-    replay = candidate_preview.evaluate_preview_artifact(
-        artifact, gt_as_pred=True, expected_source_authority=authority,
-        _validated_benchmark=result)
-    if replay["item_scores"] and \
-            any(value != 1.0 for value in replay["item_scores"].values()):
-        raise ValueError("GT replay is not exact")
+    catalog_root = staging / "records"
+    catalog_root.mkdir(parents=True)
+    record_catalog.write(sources, catalog_root / "manifest.json")
+    candidates = seen_selection.enumerate_candidates(
+        catalog_root, seed=int(manifest.get("seed") or 0))
+    report = {
+        "schema": "egoconseq.abc1-background-supply.v1",
+        **seen_supply.analyze_candidates(
+            candidates, seed=int(manifest.get("seed") or 0)),
+    }
+    io_utils.atomic_write_json(
+        staging / "supply.json", report, allow_nan=False, durable=True)
     quota_reports = {}
-    partitions = scene_partitions.load()
-    artifact_index = candidate_quota.load_artifact_index(artifact)
     for dataset in DATASETS:
-        quota = manifest["quota"][dataset]
-        families = {
-            scene_id: row["family"]
-            for scene_id, row in partitions.rows[dataset].items()}
-        quota_reports[dataset] = candidate_quota.summarize_artifact(
-            artifact, dataset=dataset,
-            supported_tasks=quota["supported_tasks"],
-            min_total_items=quota["min_total_items"],
-            min_per_task=quota["min_per_task"],
-            required_lengths=quota["required_lengths"],
-            min_per_length=quota["min_per_length"],
-            min_unique_frames=quota["min_unique_frames"],
-            min_scene_families=quota["min_scene_families"],
-            max_scene_family_fraction=quota[
-                "max_scene_family_fraction"],
-            scene_families=families, artifact_index=artifact_index)
-    macro = six_task_macro_report({
-        task_id: replay["by_task"].get(task_id)
-        for task_id in SUPPORTED_TASKS
-    })
-    if macro["macro"] != replay.get("six_task_macro"):
-        raise ValueError("six-task macro implementations disagree")
-    dataset_macros = dataset_macro_reports(
-        artifact, replay["item_scores"], artifact_index=artifact_index)
-    for dataset, quota_report in quota_reports.items():
-        io_utils.atomic_write_json(
-            staging / f"quota-{dataset}.json", quota_report,
-            allow_nan=False, durable=True)
-        io_utils.atomic_write_json(
-            staging / f"six_task_macro-{dataset}.json",
-            dataset_macros[dataset], allow_nan=False, durable=True)
-    io_utils.atomic_write_json(
-        staging / "gt_replay.json", replay,
-        allow_nan=False, durable=True)
-    io_utils.atomic_write_json(
-        staging / "six_task_macro.json", macro,
-        allow_nan=False, durable=True)
+        slots = [row for row in report["slots"]
+                 if row["slot"][0] == dataset]
+        quota_reports[dataset] = {
+            "complete": all(row["shortfall"] == 0 for row in slots),
+            "shortfall_total": sum(row["shortfall"] for row in slots),
+            "slots": slots,
+        }
+    coverage = {
+        dataset: {
+            task: sum(candidate.dataset == dataset and
+                      candidate.task_id == task for candidate in candidates)
+            for task in seen_spec.supported_tasks(dataset)
+        }
+        for dataset in DATASETS
+    }
     compiled = {
-        "artifact": str(final_parent / "candidate_qa"),
-        "coverage": result["coverage"],
-        "gt_as_pred": replay["overall"],
-        "six_task_macro": macro,
+        "artifact": str(final_parent / "supply.json"),
+        "coverage": coverage,
+        "gt_as_pred": None,
+        "six_task_macro": None,
         "datasets": {
-            dataset: {
-                "quota": quota_report,
-                "six_task_macro": dataset_macros[dataset],
-            }
+            dataset: {"quota": quota_report}
             for dataset, quota_report in quota_reports.items()
         },
     }
     identity = background_checkpoint.publish(
         manifest, checkpoint_id, staging, result=compiled,
         sources=sources,
-        result_files=[
-            *[f"quota-{dataset}.json" for dataset in DATASETS],
-            *[f"six_task_macro-{dataset}.json" for dataset in DATASETS],
-            "gt_replay.json", "six_task_macro.json",
-        ])
+        result_files=["supply.json", "records/manifest.json"])
     return {**compiled, "checkpoint_summary": identity}
 
 

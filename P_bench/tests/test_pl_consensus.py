@@ -49,15 +49,12 @@ def test_consensus_rejects_unavailable_full_geometry():
     assert got["reason"] == "full_geometry_unavailable"
 
 
-def test_action_group_label_requires_every_sibling_and_consistent_radii():
+def test_action_group_label_requires_every_sibling():
     assert classify_action_group(
-        [True] * 6, {0.15: False, 0.20: False, 0.25: False}, 6) == "safe"
+        [True], {0.15: False}, 1) == "safe"
     assert classify_action_group(
-        [True] * 6, {0.15: True, 0.20: True, 0.25: True}, 6) == "collision"
+        [True], {0.15: True}, 1) == "collision"
     assert classify_action_group(
-        [True] * 6, {0.15: False, 0.20: False, 0.25: True}, 6) == "radius_mixed"
+        [], {0.15: False}, 1) is None
     assert classify_action_group(
-        [True] * 5, {0.15: False, 0.20: False, 0.25: False}, 6) is None
-    assert classify_action_group(
-        [True, True, False, True, True, True],
-        {0.15: False, 0.20: False, 0.25: False}, 6) is None
+        [False], {0.15: False}, 1) is None

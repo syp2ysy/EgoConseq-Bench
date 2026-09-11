@@ -13,8 +13,7 @@ import numpy as np
 import pytest
 
 from pipeline import (
-    b1k_geometry, b1k_semantic, collection_closeout,
-    formal_output_coverage, record,
+    b1k_geometry, b1k_semantic, collection_closeout, record,
 )
 from tests.test_pl_b1k_runtime import _FakeRuntime, _authority_inputs
 
@@ -457,7 +456,8 @@ def test_expected_child_policy_names_only_params_a_real_child_records(
 
 
 def _write_completed_collection_output(
-        output: Path, scene_id: str, *, contract: dict | None = None) -> None:
+        output: Path, scene_id: str, *, contract: dict | None = None,
+        record_count: int = 6) -> None:
     if contract is None:
         from scripts import run_b1k_collection_shard as runner
 
@@ -468,7 +468,10 @@ def _write_completed_collection_output(
             shard_id="pilot-02", revision="a" * 40, code_dirty=True,
             collect_args=["--poses-per-scene", "1"])
     output.mkdir(parents=True, exist_ok=True)
-    records = [_formal_record(scene_id, length) for length in range(1, 7)]
+    records = [
+        _formal_record(scene_id, length)
+        for length in range(1, int(record_count) + 1)
+    ]
     records_path = output / "records.jsonl"
     records_path.write_text(
         "".join(json.dumps(row) + "\n" for row in records))
@@ -510,8 +513,6 @@ def _write_completed_collection_output(
             "datasets": ["b1k"], "scene_ids": [scene_id],
             "manifest_sha256": [contract["source_manifest_sha256"]],
         },
-        "formal_action_length_coverage": formal_output_coverage.summarize(
-            records_path, SimpleNamespace(**params)),
     }))
     _seal_collection_output(
         output, status="completed", record_count=len(records))
@@ -530,64 +531,6 @@ def _formal_record(scene_id: str, length: int) -> dict:
             ],
         }],
     }
-
-
-def _write_partial_collection_output(
-        output: Path, scene_id: str, lengths: list[int]) -> None:
-    from scripts import run_b1k_collection_shard as runner
-
-    root = output.parents[1]
-    contract = runner._expected_child_contract(
-        scene_id=scene_id, output=output, data_root=root,
-        source_manifest=root / "source-manifest.json",
-        shard_id="pilot-02", revision="a" * 40, code_dirty=True,
-        collect_args=["--poses-per-scene", "1"])
-    output.mkdir(parents=True, exist_ok=True)
-    records = [_formal_record(scene_id, length) for length in lengths]
-    records_path = output / "records.jsonl"
-    records_path.write_text(
-        "".join(json.dumps(row) + "\n" for row in records))
-    params = dict(contract.get("collect_policy") or {})
-    params.update({
-        "backend": "b1k", "scenes": [scene_id],
-        "keep_per_length": 1,
-        "out": contract["out"],
-        "b1k_data_root": contract["data_root"],
-        "b1k_source_manifest": contract["source_manifest_path"],
-        "collection_shard_id": contract["collection_shard_id"],
-        "code_revision": contract["code_revision"],
-        "allow_dirty_code": contract["code_dirty"],
-        "b1k_supervisor_contract_sha256":
-            contract["collect_policy_sha256"],
-    })
-    coverage = formal_output_coverage.summarize(
-        records_path, SimpleNamespace(**params))
-    (output / "collection_funnel.json").write_text(json.dumps({
-        "schema_version": "egoconseq.collection-funnel.v3",
-        "backend": "b1k",
-        "status": "failed",
-        "failure_reason": "formal_action_length_coverage_shortfall",
-        "run_contract_sha256": "b" * 64,
-        "code_revision": contract["code_revision"],
-        "code_dirty": contract["code_dirty"],
-        "scene_counts": {
-            "total": 1, "completed": 1, "interrupted": 0, "failed": 0,
-        },
-        "per_scene": [{"scene_id": scene_id, "status": "completed"}],
-    }))
-    (output / "run_meta.json").write_text(json.dumps({
-        "run_contract_sha256": "b" * 64,
-        "code_revision": contract["code_revision"],
-        "code_dirty": contract["code_dirty"],
-        "params": params,
-        "source_catalog": {
-            "datasets": ["b1k"], "scene_ids": [scene_id],
-            "manifest_sha256": [contract["source_manifest_sha256"]],
-        },
-        "formal_action_length_coverage": coverage,
-    }))
-    _seal_collection_output(
-        output, status="partial", record_count=len(records))
 
 
 def _collection_runner_args(
@@ -655,6 +598,34 @@ def test_collection_shard_runs_every_scene_in_an_independent_child(
     assert [row["returncode"] for row in progress["attempts"]] == [0, 0, 0]
 
 
+def test_collection_shard_accepts_a_sealed_zero_yield_scene(
+        tmp_path, monkeypatch):
+    """A clean empty scene is terminal and must not be retried forever."""
+    from scripts import run_b1k_collection_shard as collection_shard
+
+    scene_ids = _fake_install(tmp_path, count=1)
+    args = _collection_runner_args(tmp_path, scene_ids, resume=False)
+
+    def fake_child(command, *, env, log_path, timeout_s):
+        del env, log_path, timeout_s
+        scene_id = command[command.index("--scenes") + 1]
+        output = Path(command[command.index("--out") + 1])
+        _write_completed_collection_output(
+            output, scene_id, record_count=0)
+        return 0
+
+    monkeypatch.setattr(
+        collection_shard, "_run_isolated_collection", fake_child)
+
+    assert collection_shard._run_shard(args) == 0
+    progress = json.loads(
+        (tmp_path / "collection" / "shard-progress.json").read_text())
+    assert progress["completed_scene_ids"] == scene_ids
+    assert progress["completed_scenes"][0]["source_validated_records"] == 0
+    assert progress["failed_scenes"] == []
+    assert progress["complete"] is True
+
+
 def test_collection_shard_records_exact_failure_and_continues(
         tmp_path, monkeypatch):
     """Catches a native child status being masked or stopping the shard."""
@@ -715,67 +686,6 @@ def test_collection_shard_resume_skips_only_digest_verified_outputs(
     records = tmp_path / "collection" / scene_ids[0] / "records.jsonl"
     records.write_text('{"substituted":true}\n')
     with pytest.raises(ValueError, match="completed artifact changed"):
-        collection_shard._run_shard(
-            _collection_runner_args(tmp_path, scene_ids, resume=True))
-
-
-def test_collection_shard_reuses_source_valid_partial_and_aggregates_coverage(
-        tmp_path, monkeypatch):
-    """Catches treating every per-scene length shortfall as data loss."""
-    from scripts import run_b1k_collection_shard as collection_shard
-
-    scene_ids = _fake_install(tmp_path, count=2)
-    calls = []
-
-    def fake_child(command, *, env, log_path, timeout_s):
-        scene_id = command[command.index("--scenes") + 1]
-        calls.append(scene_id)
-        output = Path(command[command.index("--out") + 1])
-        lengths = [1, 2, 3] if scene_id == scene_ids[0] else [4, 5, 6]
-        _write_partial_collection_output(output, scene_id, lengths)
-        return 1
-
-    monkeypatch.setattr(
-        collection_shard, "_run_isolated_collection", fake_child)
-    assert collection_shard._run_shard(
-        _collection_runner_args(tmp_path, scene_ids, resume=False)) == 0
-    progress = json.loads(
-        (tmp_path / "collection" / "shard-progress.json").read_text())
-    assert progress["partial_valid_scene_ids"] == scene_ids
-    assert progress["completed_scene_ids"] == []
-    assert progress["failed_scenes"] == []
-    assert progress["aggregate_formal_action_length_coverage"][
-        "counts_by_length"] == {
-            f"L{length}": 1 for length in range(1, 7)}
-    assert progress["aggregate_formal_action_length_coverage"][
-        "complete"] is True
-    assert progress["complete"] is True
-
-    assert collection_shard._run_shard(
-        _collection_runner_args(tmp_path, scene_ids, resume=True)) == 0
-    assert calls == scene_ids
-
-
-def test_collection_shard_partial_resume_fails_closed_on_tamper(
-        tmp_path, monkeypatch):
-    """Catches resume trusting a changed partial-valid records shard."""
-    from scripts import run_b1k_collection_shard as collection_shard
-
-    scene_ids = _fake_install(tmp_path, count=1)
-
-    def fake_child(command, *, env, log_path, timeout_s):
-        scene_id = command[command.index("--scenes") + 1]
-        output = Path(command[command.index("--out") + 1])
-        _write_partial_collection_output(output, scene_id, [1])
-        return 1
-
-    monkeypatch.setattr(
-        collection_shard, "_run_isolated_collection", fake_child)
-    assert collection_shard._run_shard(
-        _collection_runner_args(tmp_path, scene_ids, resume=False)) == 1
-    records = tmp_path / "collection" / scene_ids[0] / "records.jsonl"
-    records.write_text(records.read_text() + '{"substituted":true}\n')
-    with pytest.raises(ValueError, match="partial-valid artifact changed"):
         collection_shard._run_shard(
             _collection_runner_args(tmp_path, scene_ids, resume=True))
 
@@ -932,28 +842,6 @@ def _rectangle(x0, x1, z0, z1, *, y=0.2):
     ], dtype=np.float64)
 
 
-def test_slice_probe_uses_component_triangles_not_whole_mesh_convex_hull():
-    """Catches filling the missing quadrant of a concave slice."""
-    from pipeline import b1k_probe
-
-    # Area is 3 m^2.  A whole-mesh convex hull would report 3.5 m^2.
-    l_shape = np.concatenate([
-        _rectangle(0.0, 1.0, 0.0, 2.0),
-        _rectangle(1.0, 2.0, 0.0, 1.0),
-    ])
-    collision = [b1k_geometry.TriangleComponent("collision", l_shape)]
-    visual = [b1k_geometry.TriangleComponent("visual", l_shape)]
-
-    result = b1k_probe.collision_visual_slice_probe(
-        collision, visual, floor_height_m=0.0)
-
-    assert result["collision_slice_area_m2"] == pytest.approx(3.0)
-    assert result["collision_minus_visual_area_m2"] == pytest.approx(0.0)
-    assert result[
-        "collision_to_visual_vertex_sampled_directed_hausdorff_approx_m"
-    ] == pytest.approx(0.0)
-
-
 def test_semantic_disc_query_aabb_prefilter_skips_far_instances():
     """Catches timing every scene triangle for a local 2.5-cm query."""
     near = b1k_semantic.RuntimeInstanceSpec(
@@ -1002,104 +890,6 @@ def test_reset_errors_are_measured_at_the_same_hard_gate():
     assert measured["max_object_position_error_m"] == pytest.approx(1e-7)
     assert measured["max_object_orientation_error_rad"] == 0.0
     assert measured["max_joint_position_error_rad"] == pytest.approx(2e-7)
-
-
-def test_b1k_oracle_precheck_report_keeps_arc_deltas_by_radius():
-    """Catches a pilot reporting A2 disagreement without measured deltas."""
-    from pipeline import collection_runtime
-
-    collection_runtime._reset_b1k_oracle_precheck_diagnostics()
-    collection_runtime._record_b1k_oracle_precheck_diagnostic(
-        scene_id="scene", pose_index=2, frame_id="frame", radius=0.2,
-        length=3, action_tag="action-a", label="collision",
-        precheck={
-            "accepted": False,
-            "reason": "contact_arc_mismatch",
-            "full_collision": True,
-            "depth_collision": True,
-            "full_contact_arc_m": 0.42,
-            "depth_contact_arc_m": 0.09,
-            "contact_arc_difference_m": 0.33,
-            "corridor_coverage": 0.97,
-        })
-    collection_runtime._record_b1k_oracle_precheck_diagnostic(
-        scene_id="scene", pose_index=2, frame_id="frame", radius=0.2,
-        length=1, action_tag="action-b", label="safe",
-        precheck={
-            "accepted": True,
-            "reason": "accepted",
-            "full_collision": False,
-            "depth_collision": False,
-            "full_contact_arc_m": None,
-            "depth_contact_arc_m": None,
-            "contact_arc_difference_m": None,
-            "corridor_coverage": 1.0,
-        })
-
-    report = collection_runtime._b1k_oracle_precheck_report()
-
-    assert report["contact_tolerance_m"] == 0.30
-    assert report["consensus_by_radius_m"]["0.2"] == {
-        "total": 2,
-        "accepted": 1,
-        "reasons": {"accepted": 1, "contact_arc_mismatch": 1},
-        "contact_arc_difference_m": {
-            "count": 1, "minimum": 0.33, "maximum": 0.33,
-            "values": [0.33],
-        },
-    }
-
-
-def test_b1k_depth_alignment_diagnostic_compares_raw_axial_depth_to_hit():
-    """Catches diagnosing a contact mismatch without the actual depth ray."""
-    from pipeline import actions, collection_runtime
-
-    frame = SimpleNamespace(
-        frame_id="frame", position=np.array([0.0, 0.0, 0.0]),
-        yaw_rad=0.0, depth=np.full((5, 5), 3.0, dtype=np.float32),
-        K=np.array([[2.0, 0.0, 2.0],
-                    [0.0, 2.0, 2.0],
-                    [0.0, 0.0, 1.0]]),
-        sensor=SimpleNamespace(nominal_camera_offset_m=0.15))
-
-    class Nav:
-        def closest_obstacle(self, pose):
-            assert pose == pytest.approx((0.0, 1.0, 0.0))
-            return {
-                "world_point": [0.0, 0.15, -1.0],
-                "obstacle_identity": "/World/wall",
-            }
-
-    class Sim:
-        def proposal_nav(self, position, yaw, *, radius_m):
-            assert position == pytest.approx(frame.position)
-            assert yaw == 0.0
-            assert radius_m == 0.2
-            return Nav()
-
-    result = collection_runtime._b1k_depth_alignment_diagnostic(
-        sim=Sim(), frame=frame,
-        actions=[actions.Forward(2.0)], radius=0.2,
-        full_physical={"first_contact_arc_m": 1.0},
-        depth_physical={"first_contact_arc_m": 1.5,
-                        "center_local": [0.0, 1.5]})
-
-    assert result["depth_input"] == {
-        "modality": "depth_linear",
-        "renderer_semantics": "distance_to_image_plane",
-        "unprojection_semantics": "axial_camera_z",
-        "units": "m",
-        "no_hit_value_after_adapter": 0.0,
-    }
-    assert result["camera"]["forward_pbench_world_xyz"] == pytest.approx(
-        [0.0, 0.0, -1.0])
-    assert result["full_contact"]["obstacle_identity"] == "/World/wall"
-    assert result["full_contact"]["local_xyz_m"] == pytest.approx(
-        [0.0, 0.15, 1.0])
-    assert result["full_contact"]["projected_pixel_uv"] == [2, 2]
-    assert result["full_contact"]["expected_axial_depth_m"] == 1.0
-    assert result["full_contact"]["raw_depth_patch_m"] == [
-        [3.0, 3.0, 3.0], [3.0, 3.0, 3.0], [3.0, 3.0, 3.0]]
 
 
 def test_runtime_bootstrap_derives_authority_and_queries_every_cspace(tmp_path):
@@ -1885,60 +1675,3 @@ def test_catalog_audit_assembly_rejects_completed_history_without_fragment(
         manifest_cli._assemble_catalog_audit(_catalog_audit_args(
             tmp_path, install_path, shards, tmp_path / "source.json",
             tmp_path / "audit.json"))
-
-
-def test_adapter_probe_records_rgbd_and_source_semantic_diagnostics(tmp_path):
-    """Catches a smoke path that bypasses the committed B1K session."""
-    from pipeline import b1k_probe, config, scene_pool
-    from pipeline.b1k_sim import B1KSimSession
-
-    class ProbeRuntime(_FakeRuntime):
-        def render(self, sensor):
-            value, info = super().render(sensor)
-            width = value["rgb"].shape[1]
-            value["rgb"][..., 0] = \
-                np.arange(width, dtype=np.uint16) % 256
-            return value, info
-
-        def visual_components(self, scene):
-            _floor, collisions, _instances = _authority_inputs()
-            return collisions
-
-    manifest = Path(__file__).resolve().parent / "unused"
-    del manifest
-    from tests.test_pl_b1k_runtime import _write_manifest
-    scene = scene_pool.discover_b1k_train_scenes(
-        tmp_path, _write_manifest(tmp_path))[0]
-    with B1KSimSession(
-            scene, fovs=config.BENCH_FOVS_DEG,
-            runtime=ProbeRuntime()) as session:
-        session.id_to_cat[2] = "wall.n.01"
-        session.assign_instances = lambda points: np.resize(
-            np.array([1, 2], dtype=np.int64), len(points))
-        result = b1k_probe.run_adapter_probe(
-            session, fovs=config.BENCH_FOVS_DEG, seed=7,
-            semantic_sample_count=32)
-
-    assert result["scene_id"] == scene.scene_id
-    assert len(result["observations"]) == 2
-    assert all(value["rgb_unique_count"] > 1
-               for value in result["observations"])
-    assert all(value["valid_depth_ratio"] > 0
-               for value in result["observations"])
-    assert result["smoke_pass"] is True
-    assert result["pose_search"]["attempt_count"] == 1
-    assert result["pose_search"]["selected_attempt_index"] == 0
-    assert result["sample_pose"]["yaw_rad"] == 0.0
-    assert all(value["source_instance_id_count"] == 2
-               for value in result["observations"])
-    assert all(value["source_nonstructural_instance_id_count"] == 1
-               for value in result["observations"])
-    assert all(value["source_nonstructural_instance_ids"] == [1]
-               for value in result["observations"])
-    assert all(value["source_semantic_resolution_rate"] == 1.0
-               for value in result["observations"])
-    assert result["reset"]["hard_gate_pass"] is True
-    assert result["reset"]["rgb_psnr_db"] is not None
-    assert result["semantic_resolution"]["query_radius_m"] == 0.025
-    assert result["semantic_resolution"]["sample_count"] == 32
-    assert result["semantic_resolution"]["elapsed_seconds"] >= 0.0

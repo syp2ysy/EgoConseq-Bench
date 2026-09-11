@@ -12,22 +12,16 @@ from types import SimpleNamespace
 import pytest
 
 from pipeline import (
-    background_capacity, background_collection, collection_closeout,
-    collection_cli,
+    action_proposal, background_capacity, background_collection,
+    background_recovery, collection_closeout, collection_cli,
     validate as record_validation,
 )
 from scripts import run_background_collection
+from post_QA.seen_build import spec as seen_spec
 from tests._synthetic import capacity_evidence
 
 
-TASKS = (
-    "A1_collision",
-    "A2_collision_step_grounding",
-    "A3_contact_object",
-    "B1_endpoint_distance",
-    "B2_endpoint_direction",
-    "C1_future_view_selection",
-)
+TASKS = seen_spec.TASKS
 
 
 def _write_finalization(
@@ -79,11 +73,6 @@ def _synthetic_capacity_record_validation(monkeypatch):
                           for canary in row["canary_scenes"]]
                 for dataset, row in value["datasets"].items()},
         }, object()))
-    monkeypatch.setattr(
-        background_capacity, "_validate_candidate_artifact",
-        lambda *_args, **_kwargs: None)
-
-
 def _capacity_binding_fields() -> dict:
     return {
         "poses_per_scene": 10,
@@ -110,10 +99,9 @@ def _capacity_run_params() -> dict:
         "camera_heights": list(
             background_collection.config.BENCH_CAMERA_HEIGHTS_M),
         "lengths": list(background_collection.config.GEN_LENGTHS),
-        "proposal_pairs_per_length": background_collection.action_proposal.
-            PAIRS_PER_LENGTH_DEFAULT,
-        "proposal_natural_per_length": background_collection.action_proposal.
-            NATURAL_PER_LENGTH_DEFAULT,
+        "proposal_pairs_per_length": action_proposal.PAIRS_PER_LENGTH_DEFAULT,
+        "proposal_natural_per_length":
+            action_proposal.NATURAL_PER_LENGTH_DEFAULT,
         "ordinary_actions_per_pose": 36,
         "benchmark_partition": "train_seen",
         "keep_per_length": background_collection.config.KEEP_PER_LENGTH,
@@ -277,16 +265,17 @@ def test_capacity_profile_derives_the_approved_two_scene_formulas(tmp_path):
     profile = background_collection.derive_capacity_profile(raw)
     row = profile["datasets"]["r2r"]
 
-    assert row["pooled_total_yield_per_record"] == 6.0
+    assert row["pooled_total_yield_per_record"] == 7.0
     assert row["pooled_unique_frame_yield_per_record"] == 1.0
     assert row["ordinary_actions_per_pose"] == 36
     assert row["pooled_task_yield_per_record"] == {
-        task_id: 1.0 for task_id in TASKS}
+        # The historical canary fixture predates B3; its B3 yield is zero.
+        task_id: 0.0 if task_id == "B3" else 1.0 for task_id in TASKS}
     assert row["pooled_pose_acceptance_rate"] == 0.5
     assert row["max_initialization_s"] == 20.0
     assert row["max_pose_attempt_s"] == 2.0
-    assert row["unique_frames_needed"] == 15000
-    assert row["records_needed"] == 15000
+    assert row["unique_frames_needed"] == 3000
+    assert row["records_needed"] == 3000
     assert row["records_per_scene"] == 20
     assert row["pose_attempt_cap"] == 800
     assert row["scene_wallclock_s"] == 600
@@ -297,7 +286,7 @@ def test_capacity_profile_derives_the_approved_two_scene_formulas(tmp_path):
 
 def test_capacity_wallclock_preserves_per_scene_cost_correlation():
     tasks = {task_id: 10 for task_id in TASKS}
-    tasks["C1_future_view_selection"] = 1
+    tasks["C1"] = 1
     canaries = [
         {
             "scene_id": "low-yield-fast",
@@ -323,15 +312,14 @@ def test_capacity_wallclock_preserves_per_scene_cost_correlation():
 
     row = background_capacity._derive_dataset("b1k", 50, canaries)
 
-    assert row["records_per_scene"] == 20
+    assert row["records_per_scene"] == 40
     assert row["pose_attempt_cap"] == 6000
-    assert row["scene_wallclock_s"] == 900
+    assert row["scene_wallclock_s"] == 1800
 
 
 @pytest.mark.parametrize("mutation,match", [
     ("one_canary", "exactly two"),
     ("zero_records", "accepted records"),
-    ("zero_task", "task yield"),
     ("zero_attempts", "pose attempts"),
 ])
 def test_capacity_profile_fails_closed_on_unlaunchable_canaries(
@@ -341,20 +329,10 @@ def test_capacity_profile_fails_closed_on_unlaunchable_canaries(
     if mutation == "one_canary":
         row["canary_scenes"] = row["canary_scenes"][:1]
     elif mutation == "zero_records":
-        Path(row["canary_scenes"][0]["records_path"]).write_text("")
-    elif mutation == "zero_task":
-        for canary in row["canary_scenes"]:
-            path = Path(canary["compiled_qa_path"]) / "public/items.jsonl"
-            rows = [json.loads(line) for line in path.read_text().splitlines()]
-            path.write_text("".join(json.dumps(value) + "\n" for value in rows
-                                    if value["task_id"] != "A1_collision"))
-            answers = Path(canary["compiled_qa_path"]) / \
-                "private/answers.jsonl"
-            kept = [json.loads(line) for line in
-                    answers.read_text().splitlines()
-                    if "A1_collision" not in line]
-            answers.write_text("".join(json.dumps(value) + "\n"
-                                       for value in kept))
+        meta = Path(row["canary_scenes"][0]["run_meta_path"])
+        value = json.loads(meta.read_text())
+        value["record_count"] = 0
+        meta.write_text(json.dumps(value))
     elif mutation == "zero_attempts":
         canary = row["canary_scenes"][0]
         run_meta = Path(canary["run_meta_path"])
@@ -365,42 +343,19 @@ def test_capacity_profile_fails_closed_on_unlaunchable_canaries(
         background_collection.derive_capacity_profile(raw)
 
 
-def test_manifest_binds_dataset_quota_audit_capacity_and_lpt(tmp_path):
+def test_manifest_binds_dataset_quota_audit_capacity_and_gpu_affinity(
+        tmp_path):
     manifest = _manifest(tmp_path)
 
-    assert manifest["schema"] == \
-        "egoconseq.three-dataset-background-controller.v3"
+    assert manifest["schema"] == background_collection.CONTROLLER_SCHEMA
     assert manifest["quota"] == {
-        "r2r": {
-            "supported_tasks": list(TASKS),
-            "min_total_items": 6000,
-            "min_per_task": 1000,
-            "required_lengths": [1, 2, 3, 4, 5, 6],
-            "min_per_length": 1,
-            "min_unique_frames": 15000,
-            "min_scene_families": 12,
-            "max_scene_family_fraction": 0.10,
-        },
-        "gs": {
-            "supported_tasks": list(TASKS),
-            "min_total_items": 6000,
-            "min_per_task": 1000,
-            "required_lengths": [1, 2, 3, 4, 5, 6],
-            "min_per_length": 1,
-            "min_unique_frames": 15000,
-            "min_scene_families": 12,
-            "max_scene_family_fraction": 0.10,
-        },
-        "b1k": {
-            "supported_tasks": list(TASKS),
-            "min_total_items": 6000,
-            "min_per_task": 1000,
-            "required_lengths": [1, 2, 3, 4, 5, 6],
-            "min_per_length": 1,
-            "min_unique_frames": 6000,
-            "min_scene_families": 12,
-            "max_scene_family_fraction": 0.10,
-        },
+        dataset: {
+            "supported_tasks": list(seen_spec.supported_tasks(dataset)),
+            "task_totals": dict(seen_spec.DATASET_TASK_TOTALS[dataset]),
+            "minimum_turn_first_fraction":
+                seen_spec.MINIMUM_TURN_FIRST_FRACTION,
+        }
+        for dataset in background_collection.DATASETS
     }
     assert manifest["authorities"]["b1k_catalog_audit"]["sha256"] == \
         "2" * 64
@@ -410,9 +365,11 @@ def test_manifest_binds_dataset_quota_audit_capacity_and_lpt(tmp_path):
         "sha256": "3" * 64, "accepted_scene_ids": manifest["scene_catalog"]["b1k"]}
     assert manifest["rounds"][0]["jobs"]
     assert {job["dataset"] for job in manifest["rounds"][0]["jobs"]} == {
-        "b1k"}
+        "r2r", "gs", "b1k"}
+    gpu_by_dataset = {"gs": 0, "b1k": 1, "r2r": 2}
     for round_value in manifest["rounds"]:
         for job in round_value["jobs"]:
+            assert job["gpu_id"] == gpu_by_dataset[job["dataset"]]
             capacity = manifest["capacity_profile"]["datasets"][job["dataset"]]
             assert job["weight"] == capacity["scene_wallclock_s"]
             assert job["scene_wallclock_s"] == capacity["scene_wallclock_s"]
@@ -434,6 +391,7 @@ def test_manifest_binds_dataset_quota_audit_capacity_and_lpt(tmp_path):
                     capacity["scene_wallclock_s"] +
                     background_collection.config.
                     BACKGROUND_CAPACITY_HANDOFF_GRACE_S +
+                    300.0 +
                     background_collection.config.
                     BACKGROUND_FINALIZATION_GRACE_S))
             assert job["transaction_binding"]["scene_id"] == job["scenes"][0]
@@ -549,7 +507,7 @@ def test_manifest_validation_rejects_a_rehashed_weakened_quota(tmp_path):
 
 def test_catalog_state_counts_partial_valid_as_reusable_terminal(tmp_path):
     manifest = _manifest(tmp_path)
-    state = background_collection.initial_state(manifest)
+    state = {"jobs": {}}
     jobs = [
         job for round_value in manifest["rounds"]
         for job in round_value["jobs"]
@@ -585,46 +543,72 @@ def test_catalog_state_counts_partial_valid_as_reusable_terminal(tmp_path):
         "failed": 1,
         "unresolved": 0,
     }
-    assert coverage["per_length_scene_shortfall"]["L6"] == {
-        "scene_count": 1,
-        "rate": 0.1,
-        "scene_ids": [jobs[9]["scenes"][0]],
-    }
-    assert coverage["per_length_scene_shortfall"]["L1"] == {
-        "scene_count": 0, "rate": 0.0, "scene_ids": []}
     assert coverage["completed_scene_transactions"] == 9
     assert coverage["reusable_scene_transactions"] == 10
     assert coverage["complete"] is True
+    assert coverage["capacity_exhausted"] is False
     del state["jobs"][jobs[-1]["job_id"]]
-    assert background_collection.dataset_catalog_coverage(
-        manifest, state, "b1k")["complete"] is False
+    incomplete = background_collection.dataset_catalog_coverage(
+        manifest, state, "b1k")
+    assert incomplete["complete"] is False
+    assert incomplete["capacity_exhausted"] is None
 
 
-def test_quota_cannot_stop_a_dataset_before_the_first_catalog_pass(tmp_path):
+def test_frame_first_stop_uses_baseline_plus_authenticated_records(tmp_path):
     manifest = _manifest(tmp_path)
-    state = background_collection.initial_state(manifest)
-    state["datasets"]["r2r"] = {"quota": {"complete": True}}
-
-    assert background_collection.dataset_can_stop(
-        manifest, state, "r2r") is False
+    manifest["target_pose_diverse_frames"] = 10000
+    manifest["seed_pose_exclusions"] = {
+        "r2r": {"representative_count": 4000},
+        "gs": {"representative_count": 3000},
+        "b1k": {"representative_count": 2500},
+    }
+    state = {"jobs": {}}
     for round_value in manifest["rounds"]:
         for job in round_value["jobs"]:
-            if job["dataset"] == "r2r" and job["catalog_pass"] == 0:
+            if job["catalog_pass"] == 0:
                 state["jobs"][job["job_id"]] = {
-                    "catalog_status": "completed"}
+                    "catalog_status": "completed",
+                    "source_validation": {
+                        "source_validated_records": (
+                            500 if job["dataset"] == "b1k" else 10),
+                    },
+                }
+
+    progress = background_collection.frame_progress(manifest, state)
+
+    assert progress["datasets"]["b1k"]["pose_diverse_frames"] == 8500
+    assert progress["global_pose_diverse_frames"] > 10000
     assert background_collection.dataset_can_stop(
-        manifest, state, "r2r") is False
+        manifest, state, "b1k") is True
+    assert background_collection.dataset_can_stop(
+        manifest, state, "r2r") is True
+
+
+def test_continuous_frame_progress_counts_derived_jobs(tmp_path):
+    manifest = _manifest(tmp_path, rounds=0)
+    job = background_collection.continuous_job(
+        manifest, "gs", catalog_pass=1, scene_index=0)
+    state = {"jobs": {job["job_id"]: {
+        "dataset": "gs", "scene_id": job["scenes"][0],
+        "catalog_pass": 1, "scene_index": 0,
+        "catalog_status": "completed",
+        "source_validation": {"source_validated_records": 7},
+    }}}
+
+    progress = background_collection.frame_progress(manifest, state)
+
+    assert progress["datasets"]["gs"]["pose_diverse_frames"] == 7
 
 
 def test_dataset_stop_is_a_pure_in_memory_decision(monkeypatch):
-    state = {
-        "compile_checkpoints": ["checkpoint"],
-        "datasets": {"r2r": {
-            "quota": {"complete": True},
-            "checkpoint": "checkpoint",
-            "checkpoint_summary": {"content_sha256": "1" * 64},
-        }},
+    manifest = {
+        "target_pose_diverse_frames": 3,
+        "seed_pose_exclusions": {
+            dataset: {"representative_count": 1}
+            for dataset in background_collection.DATASETS},
+        "rounds": [],
     }
+    state = {"jobs": {}}
     monkeypatch.setattr(
         background_collection, "validate_state",
         lambda *_args: pytest.fail("dataset stop reopened controller state"))
@@ -632,20 +616,22 @@ def test_dataset_stop_is_a_pure_in_memory_decision(monkeypatch):
         background_collection.background_checkpoint, "load",
         lambda *_args, **_kwargs: pytest.fail(
             "dataset stop reopened a compiled artifact"))
-    monkeypatch.setattr(
-        background_collection, "dataset_catalog_coverage",
-        lambda *_args, **_kwargs: {"complete": True})
-    monkeypatch.setattr(
-        background_collection.candidate_quota, "allows_dataset_stop",
-        lambda dataset, *, own_complete, state:
-            dataset == "r2r" and own_complete and bool(state))
+    monkeypatch.setattr(background_collection, "dataset_catalog_coverage",
+                        lambda *_args, **_kwargs: {"complete": True})
 
     assert background_collection.dataset_can_stop(
-        {"rounds": []}, state, "r2r") is True
+        manifest, state, "r2r") is False
 
 
 def test_status_scans_only_live_jobs(monkeypatch):
-    manifest = {"rounds": [{"jobs": [
+    manifest = {
+        "collection": {"saturated_datasets": ["gs"]},
+        "seed_pose_exclusions": {
+            "r2r": {"representative_count": 10, "record_count": 12},
+            "gs": {"representative_count": 20, "record_count": 23},
+            "b1k": {"representative_count": 30, "record_count": 34},
+        },
+        "rounds": [{"jobs": [
         {"job_id": "done", "dataset": "r2r", "scenes": ["a"]},
         {"job_id": "live", "dataset": "gs", "scenes": ["b"]},
     ]}]}
@@ -656,6 +642,7 @@ def test_status_scans_only_live_jobs(monkeypatch):
             "live": {"status": "running", "durable_records": 1},
         },
         "datasets": {}, "compile_checkpoints": [],
+        "exhausted_datasets": ["gs"],
         "updated_time_unix": 1.0,
     }
     calls = []
@@ -671,6 +658,50 @@ def test_status_scans_only_live_jobs(monkeypatch):
     assert calls == ["live"]
     assert value["jobs"]["done"]["durable_records"] == 7
     assert value["jobs"]["live"]["durable_records"] == 2
+    assert value["progress"]["r2r"] == {
+        "baseline_records": 12,
+        "baseline_pose_diverse_frames": 10,
+        "incremental_records": 7,
+        "total_records": 19,
+        "saturated": False,
+        "exhausted": False,
+    }
+    assert value["progress"]["gs"] == {
+        "baseline_records": 23,
+        "baseline_pose_diverse_frames": 20,
+        "incremental_records": 2,
+        "total_records": 25,
+        "saturated": True,
+        "exhausted": True,
+    }
+
+
+def test_status_derives_a_live_continuous_job(tmp_path, monkeypatch):
+    manifest = _manifest(tmp_path, rounds=0)
+    job = background_collection.continuous_job(
+        manifest, "gs", catalog_pass=1, scene_index=0)
+    state = background_collection.initial_state(manifest)
+    state["status"] = "running"
+    state["jobs"][job["job_id"]] = {
+        "job_id": job["job_id"], "dataset": "gs",
+        "scene_id": job["scenes"][0], "catalog_pass": 1,
+        "scene_index": 0, "round_index": job["round_index"],
+        "status": "running", "durable_records": 1,
+    }
+    calls = []
+    monkeypatch.setattr(
+        background_collection, "job_progress",
+        lambda value: calls.append(value["job_id"]) or {
+            "durable_records": 3})
+    monkeypatch.setattr(
+        background_collection, "dataset_catalog_coverage",
+        lambda _manifest, _state, dataset: {"dataset": dataset})
+
+    value = run_background_collection._status_value(manifest, state)
+
+    assert calls == [job["job_id"]]
+    assert value["jobs"][job["job_id"]]["durable_records"] == 3
+    assert value["dataset_cursors"] == state["dataset_cursors"]
 
 
 def test_status_uses_lightweight_control_loaders(
@@ -701,7 +732,40 @@ def test_status_uses_lightweight_control_loaders(
         manifest=tmp_path / "manifest.json"))
 
     assert result == 0
-    assert json.loads(capsys.readouterr().out)["status"] == "running"
+    assert json.loads(capsys.readouterr().out)["status"] == "stale"
+
+
+def test_status_marks_a_dead_running_controller_stale(
+        tmp_path, monkeypatch, capsys):
+    controller = tmp_path / "controller"
+    controller.mkdir()
+    (controller / "controller.pid").write_text("123\n")
+    manifest = {"output_root": str(tmp_path), "rounds": []}
+    state = {
+        "schema": "state", "status": "running", "current_round": 0,
+        "jobs": {}, "datasets": {}, "compile_checkpoints": [],
+        "updated_time_unix": 1.0,
+    }
+    monkeypatch.setattr(
+        run_background_collection, "_load_control_manifest",
+        lambda _path: manifest)
+    monkeypatch.setattr(
+        run_background_collection, "_load_control_state",
+        lambda _manifest: state)
+    monkeypatch.setattr(
+        background_recovery, "pid_alive", lambda _pid: False)
+    monkeypatch.setattr(
+        background_collection, "dataset_catalog_coverage",
+        lambda _manifest, _state, dataset: {"dataset": dataset})
+
+    assert run_background_collection._status(SimpleNamespace(
+        manifest=tmp_path / "manifest.json")) == 0
+
+    value = json.loads(capsys.readouterr().out)
+    assert value["status"] == "stale"
+    assert value["state_status"] == "running"
+    assert value["controller_pid"] == 123
+    assert value["controller_alive"] is False
 
 
 def test_stop_signals_only_the_controller(tmp_path, monkeypatch, capsys):
@@ -774,13 +838,13 @@ def test_controller_interrupt_reaps_children_then_writes_state(
 
 
 def test_capacity_terminal_name_requires_a_valid_scene_transaction():
-    assert run_background_collection._settled_runtime_status(
+    assert background_recovery.settled_runtime_status(
         returncode=-2, durable_records=8, catalog_status="failed",
         stopped_for_capacity=True) == "failed_partial"
-    assert run_background_collection._settled_runtime_status(
+    assert background_recovery.settled_runtime_status(
         returncode=1, durable_records=8, catalog_status="partial_valid",
         stopped_for_capacity=True) == "completed_capacity_shortfall"
-    assert run_background_collection._settled_runtime_status(
+    assert background_recovery.settled_runtime_status(
         returncode=0, durable_records=8, catalog_status="completed",
         stopped_for_capacity=False) == "completed"
 
@@ -794,6 +858,11 @@ def test_run_catches_keyboard_interrupt_and_removes_controller_pid(
     monkeypatch.setattr(
         run_background_collection, "_load_control_manifest",
         lambda _path: manifest)
+    installed_handlers = []
+    monkeypatch.setattr(
+        run_background_collection.signal, "signal",
+        lambda requested, handler:
+            installed_handlers.append((requested, handler)))
 
     def interrupt(_args, control):
         control.update({
@@ -813,111 +882,175 @@ def test_run_catches_keyboard_interrupt_and_removes_controller_pid(
         manifest=tmp_path / "manifest.json"))
 
     assert result == 130
+    assert installed_handlers == [
+        (signal.SIGINT, signal.default_int_handler),
+        (signal.SIGTERM, signal.default_int_handler),
+    ]
     assert handled == [(manifest, state, {})]
     assert not (controller / "controller.pid").exists()
 
 
-def test_r2r_is_the_only_global_headline_overflow_dataset():
-    state = {
-        "datasets": {
-            "r2r": {"quota": {"total_supported_items": 60000}},
-            "gs": {"quota": {"total_supported_items": 50000}},
-            "b1k": {"quota": {"total_supported_items": 49999}},
-        },
-    }
-
-    assert background_collection.candidate_quota.allows_dataset_stop(
-        "gs", own_complete=True, state=state) is True
-    assert background_collection.candidate_quota.allows_dataset_stop(
-        "b1k", own_complete=True, state=state) is True
-    assert background_collection.candidate_quota.allows_dataset_stop(
-        "r2r", own_complete=True, state=state) is False
-    state["datasets"]["b1k"]["quota"]["total_supported_items"] += 1
-    assert background_collection.candidate_quota.allows_dataset_stop(
-        "r2r", own_complete=True, state=state) is True
-
-
-def test_global_compile_is_only_early_pass_zero_or_final_pass(tmp_path):
-    manifest = _manifest(tmp_path, rounds=3)
+def test_dead_running_job_resumes_without_advancing_its_cursor(
+        tmp_path, monkeypatch):
+    manifest = _manifest(tmp_path, rounds=0)
+    job = background_collection.continuous_job(
+        manifest, "gs", catalog_pass=0, scene_index=0)
     state = background_collection.initial_state(manifest)
-    selected = {dataset: 0 for dataset in ("r2r", "gs", "b1k")}
-    latest_round = 0
-    for round_value in manifest["rounds"]:
-        for job in round_value["jobs"]:
-            dataset = job["dataset"]
-            if job["catalog_pass"] == 0 and selected[dataset] < 2:
-                selected[dataset] += 1
-                latest_round = max(latest_round, round_value["round_index"])
-                state["jobs"][job["job_id"]] = {
-                    "catalog_status": "completed"}
+    state["status"] = "running"
+    state["jobs"][job["job_id"]] = {
+        "job_id": job["job_id"], "dataset": "gs",
+        "scene_id": job["scenes"][0], "gpu_id": job["gpu_id"],
+        "round_index": job["round_index"], "catalog_pass": 0,
+        "scene_index": 0, "pid": 999, "status": "running",
+        "attempt": 1, "started_time_unix": 10.0,
+        "finished_time_unix": None, "durable_records": 4,
+    }
+    original_cursor = dict(state["dataset_cursors"]["gs"])
+    launched = []
+    process = SimpleNamespace(pid=321)
+    monkeypatch.setattr(
+        background_recovery, "pid_alive", lambda _pid: False)
 
-    assert background_collection.compilation_checkpoints_due(
-        manifest, state, round_index=latest_round) == ["early-two-scenes"]
-    state["compile_checkpoints"] = ["early-two-scenes"]
-    assert background_collection.compilation_checkpoints_due(
-        manifest, state, round_index=latest_round) == []
-    pass_zero_last = max(
-        row["round_index"] for row in manifest["rounds"]
-        if row["catalog_pass"] == 0)
-    last_round_job = next(
-        job for row in manifest["rounds"]
-        if row["round_index"] == pass_zero_last
-        for job in row["jobs"])
-    state["jobs"][last_round_job["job_id"]] = {
-        "catalog_status": "completed"}
-    assert background_collection.compilation_checkpoints_due(
-        manifest, state, round_index=pass_zero_last) == []
-    for row in manifest["rounds"]:
-        if row["catalog_pass"] != 0:
-            continue
-        for job in row["jobs"]:
-            state["jobs"][job["job_id"]] = {
-                "catalog_status": "completed"}
-    assert background_collection.compilation_checkpoints_due(
-        manifest, state, round_index=pass_zero_last) == ["catalog-pass-00"]
-    state["compile_checkpoints"].append("catalog-pass-00")
-    pass_one_last = max(
-        row["round_index"] for row in manifest["rounds"]
-        if row["catalog_pass"] == 1)
-    for row in manifest["rounds"]:
-        if row["catalog_pass"] != 1:
-            continue
-        for job in row["jobs"]:
-            state["jobs"][job["job_id"]] = {
-                "catalog_status": "completed"}
-    assert background_collection.compilation_checkpoints_due(
-        manifest, state, round_index=pass_one_last) == []
-    final_pass = max(row["catalog_pass"] for row in manifest["rounds"])
-    final_last = max(
-        row["round_index"] for row in manifest["rounds"]
-        if row["catalog_pass"] == final_pass)
-    for row in manifest["rounds"]:
-        if row["catalog_pass"] != final_pass:
-            continue
-        for job in row["jobs"]:
-            state["jobs"][job["job_id"]] = {
-                "catalog_status": "completed"}
-    assert background_collection.compilation_checkpoints_due(
-        manifest, state, round_index=final_last) == [
-            f"catalog-pass-{final_pass:02d}"]
+    terminal, changed = background_recovery.restore_running_processes(
+        state, {job["job_id"]: job}, {}, now=20.0,
+        launcher=lambda value, environment, log_path: (
+            launched.append((value, environment, log_path)) or process))
+
+    runtime = state["jobs"][job["job_id"]]
+    assert terminal == []
+    assert changed is True
+    assert launched == [(job, job["environment"], job["log_path"])]
+    assert state["dataset_cursors"]["gs"] == original_cursor
+    assert runtime["pid"] == 321
+    assert runtime["started_time_unix"] == 20.0
+    assert runtime["durable_records"] == 4
+
+
+def test_dead_running_job_adopts_valid_terminal_finalization(
+        tmp_path, monkeypatch):
+    manifest = _manifest(tmp_path, rounds=0)
+    job = background_collection.continuous_job(
+        manifest, "r2r", catalog_pass=0, scene_index=0)
+    output = Path(job["output_dir"])
+    output.mkdir(parents=True)
+    (output / "collection_finalization.json").write_text(json.dumps({
+        "status": "completed",
+    }))
+    state = background_collection.initial_state(manifest)
+    state["status"] = "running"
+    state["jobs"][job["job_id"]] = {
+        "job_id": job["job_id"], "dataset": "r2r",
+        "scene_id": job["scenes"][0], "gpu_id": job["gpu_id"],
+        "round_index": job["round_index"], "catalog_pass": 0,
+        "scene_index": 0, "pid": 999, "status": "running",
+        "attempt": 1, "started_time_unix": 10.0,
+        "finished_time_unix": None, "durable_records": 4,
+    }
+    monkeypatch.setattr(
+        background_recovery, "pid_alive", lambda _pid: False)
+    monkeypatch.setattr(
+        background_collection, "validate_scene_transaction",
+        lambda *_args, **_kwargs: {
+            "catalog_status": "completed",
+            "terminal_status": "recovered_valid",
+            "source_validated_records": 7,
+            "length_shortfall": [],
+            "record_paths": ["records.jsonl"],
+            "sources": [{"path": "records.jsonl"}],
+        })
+
+    terminal, changed = background_recovery.restore_running_processes(
+        state, {job["job_id"]: job}, {}, now=20.0,
+        launcher=lambda *_args: pytest.fail(
+            "a valid terminal transaction must not relaunch"))
+
+    runtime = state["jobs"][job["job_id"]]
+    assert terminal == [job]
+    assert changed is True
+    assert runtime["status"] == "recovered_valid"
+    assert runtime["catalog_status"] == "completed"
+    assert runtime["returncode"] == \
+        background_collection.RECOVERED_UNKNOWN_RETURNCODE
+    assert runtime["durable_records"] == 7
+
+
+def test_process_poll_waits_lightly_until_exit_or_heartbeat(monkeypatch):
+    sleeps = []
+    monkeypatch.setattr(
+        background_recovery.time, "sleep", sleeps.append)
+    monkeypatch.setattr(
+        background_recovery.time, "time", lambda: 10.0)
+
+    now, due = background_recovery.wait_for_process_event(
+        {"live": SimpleNamespace(poll=lambda: None)},
+        poll_s=1.0, heartbeat_deadline=30.0)
+    assert (now, due, sleeps) == (10.0, False, [1.0])
+
+    now, due = background_recovery.wait_for_process_event(
+        {"done": SimpleNamespace(poll=lambda: 0)},
+        poll_s=1.0, heartbeat_deadline=30.0)
+    assert (now, due, sleeps) == (10.0, True, [1.0, 1.0])
+
+
+def test_continuous_controller_launches_independent_dataset_cursors(
+        tmp_path, monkeypatch):
+    manifest = _manifest(tmp_path, rounds=0)
+    state = background_collection.initial_state(manifest)
+    state["status"] = "running"
+    state["dataset_cursors"]["gs"] = {
+        "catalog_pass": 1, "scene_index": 0}
+    launched = []
+    monkeypatch.setattr(
+        run_background_collection, "_load_manifest", lambda _path: manifest)
+    monkeypatch.setattr(
+        run_background_collection, "_load_state", lambda _manifest: state)
+    monkeypatch.setattr(
+        run_background_collection, "_clean_revision",
+        lambda: manifest["revision"])
+    monkeypatch.setattr(
+        background_collection, "validate_external_authorities",
+        lambda _manifest: None)
+    monkeypatch.setattr(
+        background_collection, "validate_launch_resources",
+        lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        background_collection, "dataset_can_stop",
+        lambda *_args, **_kwargs: True)
+
+    def stop_after_launch(_manifest, _state, jobs, **_kwargs):
+        launched.extend(jobs)
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(
+        run_background_collection.background_scheduler,
+        "launch_jobs", stop_after_launch)
+    monkeypatch.setattr(
+        run_background_collection, "_record_compile_result",
+        lambda *_args, **_kwargs: pytest.fail(
+            "continuous collection must not stop on capacity"))
+
+    with pytest.raises(KeyboardInterrupt):
+        run_background_collection._run_controller(
+            SimpleNamespace(
+                manifest=tmp_path / "manifest.json", poll_interval_s=0.01),
+            {"processes": {}})
+
+    assert {(job["dataset"], job["catalog_pass"])
+            for job in launched} == {
+        ("gs", 1), ("b1k", 0), ("r2r", 0)}
 
 
 def test_record_compile_result_trusts_the_just_published_identity(
         tmp_path, monkeypatch):
     manifest = _manifest(tmp_path)
     state = background_collection.initial_state(manifest)
-    macro = background_collection.six_task_macro_report({
-        task: 1.0 for task in TASKS})
     compiled = {
-        "artifact": "candidate_qa",
+        "artifact": "supply.json",
         "coverage": {},
-        "gt_as_pred": 1.0,
-        "six_task_macro": macro,
+        "gt_as_pred": None,
+        "six_task_macro": None,
         "datasets": {
-            dataset: {
-                "quota": {"complete": False},
-                "six_task_macro": macro,
-            }
+            dataset: {"quota": {"complete": False}}
             for dataset in background_collection.DATASETS
         },
         "checkpoint_summary": {
@@ -935,104 +1068,6 @@ def test_record_compile_result_trusts_the_just_published_identity(
         manifest, state, round_index=0, checkpoint="catalog-pass-00",
         compile_fn=lambda *_args, **_kwargs: compiled) is True
     assert state["compile_checkpoints"] == ["catalog-pass-00"]
-
-
-@pytest.mark.parametrize("protocols", [
-    [], ["label-blind-independent-v3", "depth-conditioned-pair-v2"],
-])
-def test_compile_global_rejects_missing_or_mixed_ordinary_protocols(
-        tmp_path, protocols):
-    manifest = _manifest(tmp_path)
-    state = background_collection.initial_state(manifest)
-    for index, protocol in enumerate(protocols or [None]):
-        job = next(
-            job for row in manifest["rounds"] for job in row["jobs"]
-            if job["dataset"] == ("r2r", "gs")[index])
-        output = Path(job["output_dir"])
-        output.mkdir(parents=True)
-        record = {"selection": {"proposal_provenance": {}}}
-        if protocol is not None:
-            record["selection"]["proposal_provenance"]["ordinary"] = {
-                "protocol": protocol, "variant": "natural_dynamic"}
-        records = output / "records.jsonl"
-        records.write_text(json.dumps(record) + "\n")
-        state["jobs"][job["job_id"]] = {
-            "catalog_status": "completed",
-            "source_validation": {"sources": [{
-                "path": str(records), "records_sha256": "1" * 64,
-                "run_meta_sha256": "2" * 64,
-            }]},
-        }
-
-    with pytest.raises(ValueError, match="uniform proposal-v3"):
-        background_collection.compile_global(
-            manifest, "early-two-scenes", state=state)
-
-
-def test_compile_global_rejects_a_v3_artifact_without_declared_policy(
-        tmp_path, monkeypatch):
-    manifest = _manifest(tmp_path)
-    state = background_collection.initial_state(manifest)
-    job = next(job for row in manifest["rounds"] for job in row["jobs"]
-               if job["dataset"] == "r2r")
-    output = Path(job["output_dir"])
-    output.mkdir(parents=True)
-    records = output / "records.jsonl"
-    records.write_text(json.dumps({"selection": {"proposal_provenance": {
-        "ordinary": {
-            "protocol": "depth-conditioned-action-bank-v3",
-            "variant": "natural_dynamic",
-        },
-    }}}) + "\n")
-    (output / "run_meta.json").write_text('{}\n')
-    state["jobs"][job["job_id"]] = {
-        "catalog_status": "completed",
-        "source_validation": {"sources": [{
-            "path": str(records), "records_sha256": "1" * 64,
-            "run_meta_sha256": "2" * 64,
-        }]},
-    }
-    monkeypatch.setattr(
-        background_collection.gate_authority,
-        "resolve_preview_source_authority", lambda **kwargs: object())
-
-    def build(_records, artifact, report_root, **kwargs):
-        del _records, report_root, kwargs
-        (artifact / "private").mkdir(parents=True)
-        (artifact / "report.json").write_text(json.dumps({
-            "publication_selection": {}}))
-        (artifact / "private" / "source_map.json").write_text(json.dumps({
-            "publication_selection": {}}))
-        return {"coverage": {}}
-
-    monkeypatch.setattr(
-        background_collection.candidate_preview, "build_main_preview", build)
-    monkeypatch.setattr(
-        background_collection.candidate_preview, "validate_preview_artifact",
-        lambda *args, **kwargs: {"coverage": {}})
-
-    with pytest.raises(ValueError, match="lacks proposal-v3"):
-        background_collection.compile_global(
-            manifest, "early-two-scenes", state=state)
-
-
-def test_six_task_macro_is_reported_separately_from_head_aggregation():
-    scores = dict(zip(TASKS, (1.0, 0.0, 0.5, 1.0, 0.5, 0.0)))
-
-    report = background_collection.six_task_macro_report(scores)
-
-    assert report == {
-        "schema": "egoconseq.six-task-macro.v1",
-        "tasks": scores,
-        "macro": 0.5,
-    }
-    incomplete = copy.deepcopy(scores)
-    incomplete.pop("C1_future_view_selection")
-    with pytest.raises(ValueError, match="six task"):
-        background_collection.six_task_macro_report(incomplete)
-    partial = dict(scores)
-    partial["C1_future_view_selection"] = None
-    assert background_collection.six_task_macro_report(partial)["macro"] is None
 
 
 def test_scene_transaction_reuses_the_collectors_validated_partial_seal(
@@ -1062,10 +1097,6 @@ def test_scene_transaction_reuses_the_collectors_validated_partial_seal(
             "manifest_sha256": ["4" * 64]},
         "resolved_scenes": [{"scene_id": "scene-a"}],
         "run_contract_sha256": run_contract_sha256,
-        "formal_action_length_coverage": {
-            "complete": False,
-            "shortfall": {"L6": 1},
-        },
     }
     metadata.write_text(json.dumps(run_meta))
     (output / "collection_funnel.json").write_text('{}\n')
@@ -1089,7 +1120,7 @@ def test_scene_transaction_reuses_the_collectors_validated_partial_seal(
 
     assert result["catalog_status"] == "partial_valid"
     assert result["source_validated_records"] == 1
-    assert result["length_shortfall"] == ["L6"]
+    assert result["length_shortfall"] == []
 
 
 def test_scene_transaction_uses_the_authenticated_spool_run_contract(
@@ -1441,7 +1472,7 @@ def test_capacity_profile_identity_and_catalog_membership_are_required(tmp_path)
     profile = background_collection.derive_capacity_profile(raw)
     Path(raw["datasets"]["r2r"]["canary_scenes"][0][
         "records_path"]).write_text("{}\n")
-    with pytest.raises(ValueError, match="capacity evidence"):
+    with pytest.raises(ValueError, match="capacity profile"):
         background_collection.build_manifest(
             revision="a" * 40, output_root=tmp_path / "digest-run",
             r2r_scenes=[f"r2r-{i}" for i in range(8)],
@@ -1537,7 +1568,7 @@ def test_state_validation_rejects_mismatched_jobs_and_fake_recovery_success(
     state["status"] = "running"
     job = manifest["rounds"][0]["jobs"][0]
     state["jobs"][job["job_id"]] = {
-        "job_id": job["job_id"], "dataset": "gs",
+        "job_id": job["job_id"], "dataset": "r2r",
         "scene_id": job["scenes"][0], "round_index": 0,
         "catalog_status": "failed", "source_validation": {"sources": []},
         "status": "failed_zero_yield", "pid": 1,
@@ -1557,9 +1588,9 @@ def test_state_validation_rejects_mismatched_jobs_and_fake_recovery_success(
     with pytest.raises(ValueError, match="nonreusable state claims sources"):
         background_collection.validate_state(manifest, state)
 
-    monkeypatch.setattr(run_background_collection.os, "kill",
+    monkeypatch.setattr(background_recovery.os, "kill",
                         lambda pid, sig: (_ for _ in ()).throw(ProcessLookupError()))
-    assert run_background_collection._RecoveredProcess(123).poll() != 0
+    assert background_recovery.RecoveredProcess(123).poll() != 0
 
 
 def test_wallclock_escalation_is_durable_and_reaches_sigkill():
@@ -1603,11 +1634,7 @@ def test_controller_emits_digest_bound_capacity_timing_events(tmp_path):
     assert controller["parent_manifest_sha256"] == manifest["sha256"]
 
 
-def test_compile_checkpoint_failure_is_retryable_without_relaunch(
-        tmp_path, monkeypatch):
-    monkeypatch.setattr(
-        background_collection.background_checkpoint, "_validate_candidate",
-        lambda *_args, **_kwargs: {"coverage": {}})
+def test_compile_checkpoint_failure_is_retryable_without_relaunch(tmp_path):
     manifest = _manifest(tmp_path)
     state = background_collection.initial_state(manifest)
     round_index = 0
@@ -1646,44 +1673,22 @@ def test_compile_checkpoint_failure_is_retryable_without_relaunch(
 
     def compile_success(manifest_value, checkpoint_value, *, state):
         retried.append(checkpoint_value)
-        macro = background_collection.six_task_macro_report({
-            task: 1.0 for task in TASKS})
         final, staging = background_collection.background_checkpoint.prepare(
             manifest_value, checkpoint_value)
-        artifact_files = (
-            "candidate_qa/benchmark.json",
-            "candidate_qa/report.json",
-            "candidate_qa/public/manifest.json",
-            "candidate_qa/private/manifest.json",
-            "candidate_qa/private/source_map.json",
-        )
-        for relative in artifact_files:
-            path = staging / relative
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text("{}\n")
+        (staging / "records").mkdir()
+        (staging / "records" / "manifest.json").write_text("{}\n")
+        (staging / "supply.json").write_text("{}\n")
         compiled = {
-            "artifact": str(final / "candidate_qa"),
-            "coverage": {}, "gt_as_pred": 1.0,
-            "six_task_macro": macro,
+            "artifact": str(final / "supply.json"),
+            "coverage": {}, "gt_as_pred": None,
+            "six_task_macro": None,
             "datasets": {
-                dataset: {"quota": {"complete": False},
-                          "six_task_macro": macro}
+                dataset: {"quota": {"complete": False}}
                 for dataset in background_collection.DATASETS},
         }
-        result_files = []
-        for dataset in background_collection.DATASETS:
-            quota_name = f"quota-{dataset}.json"
-            macro_name = f"six_task_macro-{dataset}.json"
-            (staging / quota_name).write_text(json.dumps(
-                compiled["datasets"][dataset]["quota"]))
-            (staging / macro_name).write_text(json.dumps(macro))
-            result_files.extend((quota_name, macro_name))
-        (staging / "gt_replay.json").write_text(json.dumps({"overall": 1.0}))
-        (staging / "six_task_macro.json").write_text(json.dumps(macro))
-        result_files.extend(("gt_replay.json", "six_task_macro.json"))
         identity = background_collection.background_checkpoint.publish(
             manifest_value, checkpoint_value, staging, result=compiled,
-            result_files=result_files,
+            result_files=["supply.json", "records/manifest.json"],
             sources=next(iter(state["jobs"].values()))[
                 "source_validation"]["sources"])
         return {**compiled, "checkpoint_summary": identity}
@@ -1694,12 +1699,12 @@ def test_compile_checkpoint_failure_is_retryable_without_relaunch(
     assert retried == [checkpoint]
     assert state["compile_checkpoints"] == [checkpoint]
     background_collection.validate_state(manifest, state)
-    quota_path = Path(manifest["output_root"]) / \
-        f"artifacts/global/{checkpoint}/quota-r2r.json"
-    quota_path.write_text('{"complete":true}\n')
+    supply_path = Path(manifest["output_root"]) / \
+        f"artifacts/global/{checkpoint}/supply.json"
+    supply_path.write_text('{"changed":true}\n')
     assert background_collection.dataset_can_stop(
         manifest, state, "r2r") is False
-    with pytest.raises(ValueError, match="file identity"):
+    with pytest.raises(ValueError, match="checkpoint file changed"):
         background_collection.validate_state(manifest, state)
 
 
@@ -1712,14 +1717,10 @@ def test_compile_global_recreates_only_staging_after_partial_failure(
     output = Path(job["output_dir"])
     output.mkdir(parents=True)
     records = output / "records.jsonl"
-    records.write_text(json.dumps({"selection": {"proposal_provenance": {
-        "ordinary": {
-            "protocol": "depth-conditioned-action-bank-v3",
-            "variant": "natural_dynamic",
-        },
-    }}}) + "\n")
+    records.write_text('{}\n')
     run_meta = output / "run_meta.json"
-    run_meta.write_text("{}\n")
+    run_meta.write_text(json.dumps({
+        "dataset": "r2r", "record_count": 1}) + "\n")
     state["jobs"][job["job_id"]] = {
         "catalog_status": "completed",
         "source_validation": {"sources": [{
@@ -1728,76 +1729,33 @@ def test_compile_global_recreates_only_staging_after_partial_failure(
             "run_meta_sha256": hashlib.sha256(run_meta.read_bytes()).hexdigest(),
         }]},
     }
-    monkeypatch.setattr(
-        background_collection.gate_authority,
-        "resolve_preview_source_authority", lambda **kwargs: object())
-    builds = []
+    calls = []
 
-    def build(_records, artifact, report_root, **kwargs):
-        del _records, report_root, kwargs
-        builds.append(artifact)
-        artifact.mkdir(parents=True)
-        (artifact / "partial").write_text("incomplete")
-        if len(builds) == 1:
+    def enumerate_candidates(records_root, **_kwargs):
+        calls.append(records_root)
+        if len(calls) == 1:
+            (records_root.parent / "partial").write_text("incomplete")
             raise ValueError("interrupted compile")
-        (artifact / "private").mkdir()
-        (artifact / "public").mkdir()
-        policy = {"A1_collision": background_collection.a1_common_support.
-                  V3_POLICY}
-        (artifact / "report.json").write_text(json.dumps({
-            "publication_selection": policy}))
-        (artifact / "benchmark.json").write_text(json.dumps({
-            "coverage": {}}))
-        (artifact / "private/source_map.json").write_text(json.dumps({
-            "publication_selection": policy}))
-        for relative in (
-                "public/manifest.json", "private/manifest.json",
-                "public/items.jsonl", "private/answers.jsonl",
-                "private/atoms.jsonl", "private/record_contexts.jsonl"):
-            path = artifact / relative
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text("{}\n")
-        return {"coverage": {}}
+        return []
 
     monkeypatch.setattr(
-        background_collection.candidate_preview, "build_main_preview", build)
-    monkeypatch.setattr(
-        background_collection.candidate_preview, "validate_preview_artifact",
-        lambda *args, **kwargs: {"coverage": {}})
-    monkeypatch.setattr(
-        background_collection.candidate_preview, "evaluate_preview_artifact",
-        lambda *args, **kwargs: {
-            "item_scores": {}, "by_task": {task: None for task in TASKS},
-            "six_task_macro": None, "overall": None,
-        })
-    monkeypatch.setattr(
-        background_collection.candidate_quota, "summarize_artifact",
-        lambda *args, **kwargs: {"complete": False})
-    monkeypatch.setattr(
-        background_collection.candidate_quota, "load_artifact_index",
-        lambda *args: background_collection.candidate_quota.ArtifactIndex(
-            {}, {}, {}, {}))
-    monkeypatch.setattr(
-        background_collection, "dataset_macro_reports",
-        lambda *args, **kwargs: {
-            dataset: background_collection.six_task_macro_report({
-                task: None for task in TASKS})
-            for dataset in background_collection.DATASETS})
+        background_collection.seen_selection, "enumerate_candidates",
+        enumerate_candidates)
 
     with pytest.raises(ValueError, match="interrupted compile"):
         background_collection.compile_global(
             manifest, "catalog-pass-00", state=state)
     root = Path(manifest["output_root"]) / "artifacts/global"
     assert not (root / "catalog-pass-00").exists()
-    assert (root / ".catalog-pass-00.staging/candidate_qa/partial").is_file()
+    assert (root / ".catalog-pass-00.staging/partial").is_file()
 
     result = background_collection.compile_global(
         manifest, "catalog-pass-00", state=state)
 
-    assert len(builds) == 2
+    assert len(calls) == 2
     assert not (root / ".catalog-pass-00.staging").exists()
     assert result["artifact"] == str(
-        root / "catalog-pass-00/candidate_qa")
+        root / "catalog-pass-00/supply.json")
     assert Path(result["checkpoint_summary"]["path"]).is_file()
 
 
@@ -1810,40 +1768,6 @@ def test_bare_quota_complete_has_no_authenticated_stop_provenance(tmp_path):
         manifest, state, "r2r") is False
     with pytest.raises(ValueError, match="dataset.*provenance"):
         background_collection.validate_state(manifest, state)
-
-
-def test_per_dataset_macro_uses_dataset_bound_item_scores(tmp_path):
-    artifact = tmp_path / "candidate_qa"
-    (artifact / "public").mkdir(parents=True)
-    (artifact / "private").mkdir()
-    items = []
-    answers = []
-    atoms = []
-    contexts = []
-    scores = {}
-    for dataset, score in (("r2r", 1.0), ("gs", 0.0)):
-        digest = f"record-{dataset}"
-        contexts.append({"record_sha256": digest, "context": {
-            "source": {"source_dataset": dataset},
-            "collection_contract": {"source_dataset": dataset}}})
-        for task in TASKS:
-            item_id = f"{dataset}-{task}"
-            items.append({"id": item_id, "task_id": task})
-            answers.append({"id": item_id, "task_id": task,
-                            "atom_ref": f"atom-{item_id}"})
-            atoms.append({"id": f"atom-{item_id}",
-                          "record_sha256": digest})
-            scores[item_id] = score
-    for path, rows in (
-            (artifact / "public" / "items.jsonl", items),
-            (artifact / "private" / "answers.jsonl", answers),
-            (artifact / "private" / "atoms.jsonl", atoms),
-            (artifact / "private" / "record_contexts.jsonl", contexts)):
-        path.write_text("".join(json.dumps(row) + "\n" for row in rows))
-
-    reports = background_collection.dataset_macro_reports(artifact, scores)
-    assert reports["r2r"]["macro"] == 1.0
-    assert reports["gs"]["macro"] == 0.0
 
 
 def test_capacity_profile_cli_derives_and_writes_digest(tmp_path):
@@ -1912,6 +1836,36 @@ def test_global_record_discovery_reuses_only_source_valid_terminals(tmp_path):
 
     assert background_collection.discover_dataset_records(
         manifest, "r2r", state=state) == paths[:2]
+
+
+def test_continuous_record_discovery_includes_derived_passes(tmp_path):
+    manifest = _manifest(tmp_path, rounds=0)
+    state = background_collection.initial_state(manifest)
+    jobs = [
+        background_collection.continuous_job(
+            manifest, "gs", catalog_pass=catalog_pass, scene_index=0)
+        for catalog_pass in (0, 1)]
+    expected = []
+    for job in jobs:
+        output = Path(job["output_dir"])
+        output.mkdir(parents=True)
+        records = output / "records.jsonl"
+        records.write_text('{}\n')
+        expected.append(records)
+        state["jobs"][job["job_id"]] = {
+            "dataset": "gs", "scene_id": job["scenes"][0],
+            "catalog_pass": job["catalog_pass"],
+            "scene_index": job["scene_index"],
+            "catalog_status": "completed",
+            "source_validation": {"sources": [{
+                "path": str(records),
+                "records_sha256": "1" * 64,
+                "run_meta_sha256": "2" * 64,
+            }]},
+        }
+
+    assert background_collection.discover_dataset_records(
+        manifest, "gs", state=state) == expected
 
 
 def test_global_record_discovery_spans_all_datasets_in_stable_order(tmp_path):

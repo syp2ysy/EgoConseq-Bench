@@ -459,17 +459,8 @@ def build_record_selection_index(
         pixels=pixels)
 
 
-def counterfactual_choices(
-        rec: dict, primary: dict, *, asset_root,
-        selection_index: RecordSelectionIndex | None = None) -> dict:
-    """Select one query plus three counterfactual siblings from a record.
-
-    Selection is by action digest, never by image similarity: the neighbour bank
-    is rebuilt from the query's own program and matched against whatever the
-    collector managed to certify.  A pose that lost some neighbours to the
-    oracle still produces an item as long as three survived, which is the point
-    of reserving more slots than the item needs.
-    """
+def _counterfactual_members(rec: dict, primary: dict, *, asset_root,
+                            selection_index: RecordSelectionIndex | None):
     record_outcomes = {
         str(value.get("outcome_id") or ""): value
         for value in rec.get("outcomes") or []
@@ -488,8 +479,8 @@ def counterfactual_choices(
     descriptors = record_index.descriptors
     query_sha = action_sha256(query_actions)
     query_descriptor = descriptors.get(query_sha)
-    if query_descriptor is None or \
-            query_descriptor["outcome_id"] != primary_id:
+    if (query_descriptor is None or
+            query_descriptor["outcome_id"] != primary_id):
         raise ValueError("counterfactual_query_not_eligible")
     bank = counterfactual_neighbors(query_actions)
     chosen = []
@@ -512,6 +503,39 @@ def counterfactual_choices(
     members = [(None, query_descriptor)] + chosen
     if len({value["action_sha256"] for _n, value in members}) != len(members):
         raise ValueError("counterfactual options repeat an action program")
+    return record_index, primary_id, query_sha, bank, chosen, members
+
+
+def metadata_candidate_eligible(
+        rec: dict, primary: dict, *, asset_root,
+        selection_index: RecordSelectionIndex | None = None) -> bool:
+    """Check C1 option availability without opening terminal PNGs."""
+    try:
+        _counterfactual_members(
+            rec, primary, asset_root=asset_root,
+            selection_index=selection_index)
+    except (KeyError, TypeError, ValueError):
+        return False
+    return True
+
+
+def counterfactual_choices(
+        rec: dict, primary: dict, *, asset_root,
+        selection_index: RecordSelectionIndex | None = None) -> dict:
+    """Select one query plus three counterfactual siblings from a record.
+
+    Selection is by action digest, never by image similarity: the neighbour bank
+    is rebuilt from the query's own program and matched against whatever the
+    collector managed to certify.  A pose that lost some neighbours to the
+    oracle still produces an item as long as three survived, which is the point
+    of reserving more slots than the item needs.
+    """
+    record_index, primary_id, query_sha, bank, chosen, members = \
+        _counterfactual_members(
+            rec, primary, asset_root=asset_root,
+            selection_index=selection_index)
+    descriptors = record_index.descriptors
+    query_actions = _parsed(primary.get("actions") or [])
     pixel_cache = record_index.pixels
     for _neighbor, descriptor in members:
         descriptor_sha256 = descriptor["sha256"]

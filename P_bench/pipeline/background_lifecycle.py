@@ -17,6 +17,7 @@ def b1k_supervisor_timeout_s(scene_wallclock_s: float) -> int:
         config.BACKGROUND_INITIALIZATION_DEADLINE_S +
         float(scene_wallclock_s) +
         config.BACKGROUND_CAPACITY_HANDOFF_GRACE_S +
+        config.BACKGROUND_FINALIZING_TIMEOUT_S +
         config.BACKGROUND_FINALIZATION_GRACE_S)
 
 
@@ -67,7 +68,7 @@ def capacity_watchdog_action(
                 return None
             return _force_kill(runtime, timestamp, "sealed_exit_timeout")
         if timestamp - float(marker["started_time_unix"]) < \
-                config.BACKGROUND_FINALIZATION_GRACE_S:
+                config.BACKGROUND_FINALIZING_TIMEOUT_S:
             return None
         return _force_kill(runtime, timestamp, "finalization_timeout")
     if str(health_status) in {"first_record_slow", "inter_record_slow"}:

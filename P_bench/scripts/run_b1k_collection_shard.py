@@ -13,7 +13,6 @@ import os
 from pathlib import Path
 import subprocess
 import sys
-from types import SimpleNamespace
 from typing import Mapping, Sequence
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -21,7 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from pipeline import (
     b1k_process, b1k_source_builder, collection_cli, collection_funnel,
     collection_closeout, collection_runtime, collection_support,
-    formal_output_coverage, io_utils,
+    io_utils,
 )
 from pipeline.scene_pool import B1K_SOURCE_MANIFEST_VERSION
 
@@ -29,8 +28,6 @@ from pipeline.scene_pool import B1K_SOURCE_MANIFEST_VERSION
 ROOT = Path(__file__).resolve().parents[1]
 _FUNNEL_SCHEMA = "egoconseq.collection-funnel.v3"
 _PROGRESS_SCHEMA = "b1k-collection-shard-progress.v2"
-_FORMAL_SHORTFALL = "formal_action_length_coverage_shortfall"
-_COMPLETED_FORMAL_SCOPES = frozenset({"general_ab"})
 _SUPERVISOR_CONTRACT_SCHEMA = "b1k-supervised-collection-contract.v1"
 _WORKER_HEARTBEAT_INTERVAL_S = 30.0
 _PROTECTED_COLLECT_OPTIONS = frozenset({
@@ -42,7 +39,6 @@ _PROTECTED_COLLECT_OPTIONS = frozenset({
     "--b1k-supervisor-contract-sha256",
     "--code-revision",
     "--collection-shard-id",
-    "--no-validate",
     "--out",
     "--overwrite",
     "--resume",
@@ -50,7 +46,7 @@ _PROTECTED_COLLECT_OPTIONS = frozenset({
 })
 _SUPERVISOR_POLICY_EXCLUDED = frozenset({
     "allow_dirty_code", "b1k_supervisor_contract_sha256", "code_revision",
-    "debug_images", "debug_outcomes_per_frame", "no_validate", "out",
+    "debug_images", "debug_outcomes_per_frame", "out",
     "overwrite", "resume", "semantic_query_workers",
 })
 
@@ -221,7 +217,6 @@ def _validate_terminal_output(
     if (funnel.get("schema_version") != _FUNNEL_SCHEMA or
             funnel.get("backend") != "b1k" or
             funnel.get("status") != funnel_status or
-            (partial and funnel.get("failure_reason") != _FORMAL_SHORTFALL) or
             not isinstance(rows, list) or len(rows) != 1 or
             rows[0].get("scene_id") != scene_id or
             rows[0].get("status") != "completed"):
@@ -240,32 +235,22 @@ def _validate_terminal_output(
     if finalization["run_contract_sha256"] != run_contract_sha256:
         raise ValueError("B1K finalization run contract differs")
     source_validated_records = int(finalization["record_count"])
-    if source_validated_records < 1:
+    if partial and source_validated_records < 1:
         raise ValueError(
             f"B1K {label} scene has no source-valid records")
+    if not partial and source_validated_records == 0:
+        terminal_status = "zero_yield"
     stored_coverage = run_meta.get("formal_action_length_coverage")
-    coverage_valid = (
-        isinstance(stored_coverage, Mapping) and
-        ((stored_coverage.get("scope") == "general_ab" and
-          stored_coverage.get("complete") is False)
-         if partial else
-         (stored_coverage.get("scope") in _COMPLETED_FORMAL_SCOPES and
-          stored_coverage.get("complete") is True)))
-    if not coverage_valid:
-        if partial:
-            raise ValueError(
-                "B1K partial formal coverage is not an authenticated general "
-                "action-length shortfall")
-        raise ValueError(
-            f"B1K completed formal coverage scope is invalid: {output}")
-    return {
+    if partial and (not isinstance(stored_coverage, Mapping) or
+                    stored_coverage.get("complete") is not False):
+        raise ValueError("B1K historical partial coverage is invalid")
+    result = {
         "scene_id": scene_id,
         "terminal_status": terminal_status,
         "output_dir": str(output),
         "source_validated_records": source_validated_records,
         "expected_child_contract": dict(expected),
         "run_contract_sha256": run_contract_sha256,
-        "formal_action_length_coverage": dict(stored_coverage),
         "artifacts": [
             _sealed_artifact_identity(path, output, sha256=digest)
             for path, digest in (
@@ -275,6 +260,9 @@ def _validate_terminal_output(
             )
         ],
     }
+    if isinstance(stored_coverage, Mapping):
+        result["formal_action_length_coverage"] = dict(stored_coverage)
+    return result
 
 
 def _validate_completed_output(
@@ -289,57 +277,6 @@ def _validate_partial_output(
     """Accept a source-valid general shard with action-length shortfall."""
     return _validate_terminal_output(
         output, scene_id, expected=expected, partial=True)
-
-
-def _aggregate_formal_coverage(
-        output_dir: Path, scene_ids: Sequence[str], reusable: Mapping) -> dict:
-    """Apply the collector's general A/B unit semantics across scene shards."""
-    if not reusable:
-        return {
-            "schema": "egoconseq.formal-action-length-coverage.v1",
-            "scope": "general_ab",
-            "exempt_reason": None,
-            "required_lengths": [],
-            "requested_keep_per_length": None,
-            "counts_by_length": {},
-            "shortfall": {},
-            "complete": False,
-        }
-    run_metas = [
-        _json(output_dir / scene_id / "run_meta.json")
-        for scene_id in scene_ids if scene_id in reusable
-    ]
-    coverages = [
-        metadata.get("formal_action_length_coverage") or {}
-        for metadata in run_metas
-    ]
-    if not all(coverage.get("scope") == "general_ab"
-               for coverage in coverages):
-        return {
-            "schema": "egoconseq.formal-action-length-coverage.v1",
-            "scope": "per_scene_non_general",
-            "exempt_reason": None,
-            "required_lengths": [],
-            "requested_keep_per_length": None,
-            "counts_by_length": {},
-            "shortfall": {},
-            "complete": False,
-        }
-    policies = [
-        {
-            "keep_per_length": (metadata.get("params") or {}).get(
-                "keep_per_length"),
-        }
-        for metadata in run_metas
-    ]
-    if any(policy != policies[0] for policy in policies[1:]):
-        raise ValueError("B1K scene formal coverage policies differ")
-    records_paths = [
-        output_dir / scene_id / "records.jsonl"
-        for scene_id in scene_ids if scene_id in reusable
-    ]
-    return formal_output_coverage.summarize_paths(
-        records_paths, SimpleNamespace(**policies[0]))
 
 
 def _run_isolated_collection(
@@ -545,11 +482,7 @@ def _run_shard(args) -> int:
             if scene_id not in reusable and
             latest.get(scene_id, {}).get("status") == "failed"
         ]
-        aggregate_coverage = _aggregate_formal_coverage(
-            output_dir, scene_ids, reusable)
-        complete = (
-            len(reusable) == len(scene_ids) and
-            aggregate_coverage.get("complete") is True)
+        complete = len(reusable) == len(scene_ids)
         _write(progress_path, {
             "schema": _PROGRESS_SCHEMA,
             **contract,
@@ -568,7 +501,6 @@ def _run_shard(args) -> int:
                 scene_id for scene_id in scene_ids if scene_id in reusable],
             "failed_scenes": failed,
             "attempts": attempts,
-            "aggregate_formal_action_length_coverage": aggregate_coverage,
             "complete": complete,
         })
 
@@ -622,35 +554,15 @@ def _run_shard(args) -> int:
                   file=sys.stderr, flush=True)
             continue
         if returncode != 0:
-            try:
-                partial_valid[scene_id] = _validate_partial_output(
-                    scene_output, scene_id,
-                    expected=expected_for(scene_id))
-            except (OSError, ValueError, json.JSONDecodeError) as error:
-                attempts.append({
-                    "scene_id": scene_id,
-                    "status": "failed",
-                    "returncode": int(returncode),
-                    "error": "collect.py returned nonzero",
-                    "partial_validation_error":
-                        f"{type(error).__name__}: {error}",
-                })
-                write_progress()
-                print(json.dumps(attempts[-1], sort_keys=True),
-                      file=sys.stderr, flush=True)
-                continue
             attempts.append({
                 "scene_id": scene_id,
-                "status": "partial_valid",
+                "status": "failed",
                 "returncode": int(returncode),
-                "error": _FORMAL_SHORTFALL,
+                "error": "collect.py returned nonzero",
             })
             write_progress()
-            print(json.dumps({
-                **attempts[-1],
-                "records_sha256": partial_valid[scene_id][
-                    "artifacts"][1]["sha256"],
-            }, sort_keys=True), flush=True)
+            print(json.dumps(attempts[-1], sort_keys=True),
+                  file=sys.stderr, flush=True)
             continue
         try:
             completed[scene_id] = _validate_completed_output(

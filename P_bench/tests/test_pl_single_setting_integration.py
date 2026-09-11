@@ -44,6 +44,9 @@ def _persist(monkeypatch, tmp_path, *, setting, intervention_type,
     monkeypatch.setattr(
         collection_runtime, "append_record_group",
         lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        collection_runtime.abc1_record, "from_collected",
+        lambda record, **_kwargs: record)
 
     def build_record(*_args, **kwargs):
         built.update(kwargs)
@@ -59,7 +62,7 @@ def _persist(monkeypatch, tmp_path, *, setting, intervention_type,
         "selected_ids": [], "group_labels": {}, "selected": [],
         "diagnostics": [], "accepted_outcomes": {},
         "variants": [(object(), frame)], "render_caches": {"frame": {}},
-        "pools": {}, "selection_seed": 1,
+        "pools": {}, "shortlist_size": 1, "selection_seed": 1,
         "required_siblings": 1,
         "calibration": SimpleNamespace(canonical_floor_fit=LEVEL_FLOOR_FIT),
         "position": np.array([0.0, 0.0, 0.0]), "yaw": 0.0,

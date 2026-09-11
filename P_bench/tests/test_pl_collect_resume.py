@@ -7,25 +7,134 @@ import numpy as np
 import dataclasses
 import json
 import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 from pipeline import (
-    action_control_catalog, action_sampling, collection_cli, collection_funnel,
+    abc1_record, action_control_catalog, action_sampling, collection_cli, collection_funnel,
     collection_runtime,
     collection_support, config, record, consequence,
-    formal_output_coverage, pose_setting, semantic, source_manifest, validate,
+    pose_setting, rollout, semantic, source_manifest, validate,
 )
 from pipeline import sim as sim_module
 from pipeline.actions import Forward, Turn
 from pipeline.scene_pool import SceneSpec, SourceAssetIdentity
 from tests import _collection_api as collect
 from pipeline.collection_cli import append_record_group, prepare_records_output
+from pipeline.pose_calibration import load_pose_exclusions, pose_is_diverse
 from tests._synthetic import (
     LEVEL_FLOOR,
     LEVEL_FLOOR_FIT,
     make_frame,
     source_provenance,
 )
+
+
+def test_pose_exclusions_read_compact_records_without_a_checkpoint(tmp_path):
+    path = tmp_path / "records.jsonl"
+    path.write_text(json.dumps({
+        "dataset": "b1k", "scene_id": "room", "record_uid": "old",
+        "pose": {"position": [1.0, 0.0, 2.0], "yaw_rad": 0.0},
+    }) + "\n")
+    poses = load_pose_exclusions(path)["room"]
+    assert not pose_is_diverse([1.1, 0.0, 2.0], 0.1, poses)
+    assert pose_is_diverse([2.0, 0.0, 2.0], 0.0, poses)
+
+
+def _append_expansion_rows(path, worker, progress=None):
+    for index in range(5):
+        value = {"record_uid": f"{worker}-{index}", "padding": "x" * 10000}
+        collection_cli.append_compact_records(path, [value], progress_path=progress)
+
+
+def test_shared_append_preserves_old_bytes_and_concurrent_records(tmp_path):
+    import multiprocessing
+
+    path = tmp_path / "records.jsonl"
+    original = b'{"record_uid": "old", "unmodified": true}\n'
+    path.write_bytes(original)
+    # Call once locally so a missing implementation fails at its actual API.
+    collection_cli.append_compact_records(path, [{"record_uid": "first"}])
+    workers = [multiprocessing.get_context("fork").Process(
+        target=_append_expansion_rows, args=(path, index)) for index in range(4)]
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join(timeout=10)
+        assert worker.exitcode == 0
+    assert path.read_bytes().startswith(original)
+    rows = [json.loads(line) for line in path.read_text().splitlines()]
+    assert len(rows) == len({row["record_uid"] for row in rows}) == 22
+    assert list(tmp_path.iterdir()) == [path]
+
+
+def test_shared_append_recovers_only_an_uncommitted_partial_tail(tmp_path):
+    path = tmp_path / "records.jsonl"
+    original = b'{"record_uid":"old"}\n'
+    path.write_bytes(original + b'{"record_uid":"interrupted')
+    collection_cli.append_compact_records(path, [{"record_uid": "new"}])
+    assert path.read_bytes().startswith(original)
+    assert [json.loads(line)["record_uid"] for line in
+            path.read_text().splitlines()] == ["old", "new"]
+
+
+def test_shared_append_enforces_one_total_across_workers(tmp_path):
+    import multiprocessing
+
+    path = tmp_path / "records.jsonl"
+    original = b'{"record_uid":"old"}\n'
+    path.write_bytes(original)
+    progress = tmp_path / "expansion.json"
+    progress.write_text(json.dumps({"record_count": 1, "target_records": 7,
+                                    "byte_offset": len(original)}))
+    collection_cli.append_compact_records(path, [], progress_path=progress)
+    workers = [multiprocessing.get_context("fork").Process(
+        target=_append_expansion_rows, args=(path, i, progress)) for i in range(4)]
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join(timeout=10)
+        assert worker.exitcode == 0
+    assert len(path.read_text().splitlines()) == 7
+    state = json.loads(progress.read_text())
+    assert state["record_count"] == 7
+    assert state["byte_offset"] == path.stat().st_size
+
+
+def test_append_collection_keeps_the_shared_dataset_and_metadata(tmp_path, monkeypatch):
+    root = tmp_path / "b1k"
+    root.mkdir()
+    records = root / "records.jsonl"
+    original = json.dumps({"record_uid": "old", "scene_id": "room",
+                           "pose": {"position": [0, 0, 0], "yaw_rad": 0.0}}) + "\n"
+    records.write_text(original)
+    (root / "run_meta.json").write_text('{"record_count":1}')
+    (root / "expansion.json").write_text(json.dumps({
+        "record_count": 1, "target_records": 2,
+        "byte_offset": records.stat().st_size}))
+    parser = collection_cli.build_parser()
+    args = parser.parse_args([
+        "--scenes", "room", "--out", str(tmp_path / "progress"),
+        "--append-records", str(records), "--collection-shard-id", "new-run"])
+    monkeypatch.setattr(collection_runtime, "discover_collection_scenes",
+                        lambda _args: ["room"])
+
+    def scene(**kwargs):
+        assert not pose_is_diverse([0, 0, 0], 0, kwargs["pose_exclusions"]["room"])
+        image = Path(kwargs["image_dir"]) / "new.png"
+        image.write_bytes(b"image")
+        collection_cli.append_compact_records(kwargs["records_path"], [{
+            "record_uid": "new", "scene_id": "room", "image_path": "img/new.png",
+            "pose": {"position": [2, 0, 0], "yaw_rad": 0.0},
+        }], progress_path=root / "expansion.json")
+
+    monkeypatch.setattr(collection_runtime, "_collect_scene", scene)
+    assert collection_runtime._run_collection(args, parser) == 0
+    assert records.read_text().startswith(original)
+    assert len(records.read_text().splitlines()) == 2
+    assert (root / "img/new.png").exists()
+    assert json.loads((root / "run_meta.json").read_text()) == {"record_count": 1}
+    assert list(tmp_path.rglob("records.jsonl")) == [records]
 
 
 def _source_scene_spec(scene_id="scene/example"):
@@ -197,7 +306,7 @@ def test_new_collection_defaults_pin_the_v4_action_policy():
     collection_runtime._resolve_collection_mode_defaults(args, object())
 
     assert args.action_sampling_policy == \
-        collection_runtime.action_proposal.DEPTH_CONDITIONED_POLICY_V4
+        collection_runtime.action_proposal.DEPTH_CONDITIONED_POLICY_V5
 
 
 def test_capacity_stop_cli_is_opt_in_and_frozen_into_run_contract():
@@ -239,8 +348,6 @@ def test_ordinary_action_budget_cli_accepts_only_canary_ladder_values():
          "formal collection requires --lengths 1 2 3 4 5 6 exactly"),
         (["--keep-per-length", "0"],
          "--keep-per-length must be positive"),
-        (["--min-pose-position-m", "-1"],
-         "pose diversity margins must be non-negative"),
         (["--collection-shard-id", "bad id"],
          "--collection-shard-id must contain only letters"),
         (["--pose-exclusions", "{tmp}/missing.json"],
@@ -331,7 +438,7 @@ def test_semantic_query_workers_do_not_change_collection_contract():
     common = {
         "out": "ignored", "overwrite": False, "resume": True,
         "debug_images": False, "debug_outcomes_per_frame": 4,
-        "no_validate": False, "action_file": None,
+        "action_file": None,
     }
     serial = collect.collection_run_contract(
         SimpleNamespace(**common, semantic_query_workers=1),
@@ -500,6 +607,12 @@ def test_structured_evaluator_factory_preserves_main_outcome_annotations(
             "nominal_pose": {"x": 0.0, "z": 1.0, "heading_deg": 0.0},
         },
     }
+    path_trace = object()
+    seen_path_traces = []
+    monkeypatch.setattr(
+        collect.rollout, "physical_rollout",
+        lambda *_args, **kwargs: (
+            seen_path_traces.append(kwargs.get("path_trace")) or physical))
     assert not hasattr(collect.rollout, "terminal_options")
     monkeypatch.setattr(
         collect._runtime, "judge",
@@ -519,10 +632,10 @@ def test_structured_evaluator_factory_preserves_main_outcome_annotations(
     evaluate = collect._make_structured_spec_evaluator(
         args=SimpleNamespace(collection_mode="main"),
         variants=[(Sim(), frame)],
-        target_ids_by_frame={"frame": []},
         group_labels={"action": "safe"},
-        precheck_cache={},
-        render_caches=collections.defaultdict(dict),
+        precheck_cache={"action": {
+            ("frame", 0.2): {"physical_path_trace": path_trace},
+        }},
         stats=stats,
         skipped=skipped,
         pending_a_certificates=[],
@@ -544,6 +657,7 @@ def test_structured_evaluator_factory_preserves_main_outcome_annotations(
         "evaluated_outcomes": 1,
     }
     assert skipped == {}
+    assert seen_path_traces == [path_trace]
 
 
 def _outcome():
@@ -628,27 +742,6 @@ def test_pre_spool_guard_rejects_invalid_current_record():
             source_manifest.LEGACY_RECORD_VALIDATION_CONTEXT)
 
 
-
-
-def test_per_frame_target_cache_calls_authoritative_selector_once(monkeypatch):
-    first = SimpleNamespace(frame_id="first")
-    second = SimpleNamespace(frame_id="second")
-    calls = collections.Counter()
-
-    def eligible(frame):
-        calls[frame.frame_id] += 1
-        return [7, 8] if frame.frame_id == "first" else [7]
-
-    monkeypatch.setattr(collect.OBJ, "eligible_target_ids", eligible)
-
-    result = collect.eligible_target_ids_by_frame([
-        (object(), first),
-        (object(), first),
-        (object(), second),
-    ])
-
-    assert result == {"first": [7], "second": [7]}
-    assert calls == {"first": 1, "second": 1}
 
 
 def test_existing_output_requires_resume_or_overwrite(tmp_path):
@@ -897,15 +990,16 @@ def test_pose_diversity_rejects_only_spatially_and_angularly_near_duplicates():
         "yaw_rad": 0.0,
     }]
 
+    assert config.POSE_DIVERSITY_POSITION_M == 0.75
+    assert config.POSE_DIVERSITY_YAW_DEG == 45.0
     assert not collect._pose_is_diverse(
-        [0.5, 0.0, 0.0], np.deg2rad(20.0), exclusions,
-        min_position_m=1.5, min_yaw_deg=45.0)
+        [0.74, 0.0, 0.0], np.deg2rad(44.0), exclusions)
     assert collect._pose_is_diverse(
-        [2.0, 0.0, 0.0], np.deg2rad(20.0), exclusions,
-        min_position_m=1.5, min_yaw_deg=45.0)
+        [0.75, 0.0, 0.0], np.deg2rad(44.0), exclusions)
     assert collect._pose_is_diverse(
-        [0.5, 0.0, 0.0], np.deg2rad(90.0), exclusions,
-        min_position_m=1.5, min_yaw_deg=45.0)
+        [0.0, 0.0, 0.0], np.deg2rad(45.0), exclusions)
+    assert collect._pose_is_diverse(
+        [0.74, 0.0, 0.0], np.deg2rad(90.0), exclusions)
 
 
 def test_pose_publication_clearance_matches_safe_action_margin():
@@ -967,41 +1061,27 @@ def _coverage_record(
     }
 
 
-def test_formal_ab_coverage_deduplicates_sensor_and_body_siblings(tmp_path):
-    records = []
-    for length in config.GEN_LENGTHS:
-        row = _coverage_record(
-            intervention_id=f"pose-L{length}", group_id=f"g-L{length}",
-            length=length)
-        records.extend([copy.deepcopy(row), copy.deepcopy(row)])
-    records_path = tmp_path / "records.jsonl"
-    records_path.write_text("".join(json.dumps(row) + "\n" for row in records))
-
-    summary = formal_output_coverage.summarize(
-        records_path, SimpleNamespace(
-            keep_per_length=1))
-
-    assert summary["scope"] == "general_ab"
-    assert summary["counts_by_length"] == {
-        f"L{length}": 1 for length in config.GEN_LENGTHS}
-    assert summary["complete"] is True
-
-
-def test_finalize_marks_formal_action_length_shortfall_failed(
-        tmp_path, monkeypatch):
-    row = _coverage_record(
-        intervention_id="pose-L1", group_id="g-L1", length=1)
+def test_finalize_accepts_a_source_valid_record_without_length_coverage(
+        tmp_path):
+    row = {
+        "schema_version": abc1_record.SCHEMA_VERSION,
+        "record_uid": "r2r-partial", "dataset": "r2r",
+        "cases": [{
+            "case_id": "safe", "group_id": "safe",
+            "actions": [{"type": "forward", "m": 0.5}],
+            "starts_with": "forward", "collision": False,
+        }],
+    }
     records_path = tmp_path / "records.jsonl"
     records_path.write_text(json.dumps(row) + "\n")
     args = SimpleNamespace(
         out=str(tmp_path), code_revision="abc123", allow_dirty_code=False,
-        no_validate=True, keep_per_length=1)
+        keep_per_length=1)
 
     class Funnel:
         value = {"run_contract_sha256": "unused"}
 
         def __init__(self):
-            self.failed_reason = None
             self.completed = False
 
         def complete(self):
@@ -1011,14 +1091,6 @@ def test_finalize_marks_formal_action_length_shortfall_failed(
     funnel.path = tmp_path / "funnel.json"
     funnel.path.write_text(json.dumps({"status": "running"}))
 
-    def mark_failed(_path, *, reason):
-        funnel.failed_reason = reason
-        funnel.path.write_text(json.dumps({
-            "status": "failed", "failure_reason": reason}))
-
-    monkeypatch.setattr(
-        collection_funnel.CollectionFunnel, "mark_failed",
-        mark_failed)
     result = collection_runtime._finalize_collection_run(
         args=args, scenes=[], started=0.0,
         stats=collections.Counter(), skipped=collections.Counter(),
@@ -1026,45 +1098,13 @@ def test_finalize_marks_formal_action_length_shortfall_failed(
         existing_records=0, completed_groups=set(),
         run_contract={"sampling_provenance": {}})
 
-    assert result == 1
-    assert funnel.failed_reason == "formal_action_length_coverage_shortfall"
-    assert funnel.completed is False
+    assert result == 0
+    assert funnel.completed is True
     metadata = json.loads((tmp_path / "run_meta.json").read_text())
-    assert metadata["formal_action_length_coverage"]["complete"] is False
-    assert metadata["formal_action_length_coverage"]["shortfall"] == {
-        "L2": 1, "L3": 1, "L4": 1, "L5": 1, "L6": 1}
+    assert "formal_action_length_coverage" not in metadata
 
 
-def test_collector_natural_selector_varies_count_without_label_balance():
-    pools = {
-        length: [
-            (f"L{length}-safe", [Forward(0.5)] * length),
-            (f"L{length}-collision", [Forward(1.0)] * length),
-        ]
-        for length in config.GEN_LENGTHS
-    }
-    labels = {
-        tag: label
-        for length, candidates in pools.items()
-        for tag, _actions in candidates
-        for label in [("safe" if tag.endswith("safe") else "collision")]
-    }
-
-    selected = action_sampling.select_natural_action_groups(
-        pools, labels, pose_seed=0)
-    flipped = {
-        group_id: ("collision" if label == "safe" else "safe")
-        for group_id, label in labels.items()
-    }
-    selected_after_flip = action_sampling.select_natural_action_groups(
-        pools, flipped, pose_seed=0)
-
-    assert len(selected) == len(config.GEN_LENGTHS)
-    assert [group_id for group_id, _actions in selected] == [
-        group_id for group_id, _actions in selected_after_flip]
-
-
-def test_v4_pose_selection_retains_all_certified_candidates():
+def test_pose_selection_retains_all_certified_candidates():
     pools = {1: [
         (f"tag-{index}", [Forward(0.5 + 0.5 * index)])
         for index in range(4)
@@ -1074,7 +1114,6 @@ def test_v4_pose_selection_retains_all_certified_candidates():
         "pools": pools,
         "group_labels": {tag: "safe" for tag, _actions in pools[1]},
         "precheck_cache": {},
-        "target_ids_by_frame": {},
         "proposal_provenance": {},
         "required_siblings": 0,
         "calibration": None,
@@ -1094,7 +1133,90 @@ def test_v4_pose_selection_retains_all_certified_candidates():
         "tag-0", "tag-1", "tag-2", "tag-3"]
 
 
-def test_rejected_action_does_not_discard_later_candidate_at_same_pose(
+@pytest.mark.parametrize("evaluation", ["perturbed", "nominal", "rejected"])
+def test_pose_evaluation_keeps_a_stable_partial_action_bank(monkeypatch, evaluation):
+    outcome = {"shared_oracle_stability": {"summary": {
+        "collision_label_stable": evaluation == "perturbed",
+    }}}
+    state = {
+        "variants": [],
+        "pools": {1: [("safe", [Forward(0.5)])]},
+        "group_labels": {"safe": "safe"},
+        "precheck_cache": {},
+        "proposal_provenance": {"safe": {"variant": "natural_dynamic"}},
+        "active_radii": [0.2],
+        "selection_seed": 1,
+        "selected": [("safe", [Forward(0.5)])],
+        "c1_families": (),
+    }
+    monkeypatch.setattr(
+        collection_runtime, "_make_structured_spec_evaluator",
+        lambda **_kwargs: (lambda _spec: {"frame": [outcome]}))
+    monkeypatch.setattr(
+        collection_runtime, "finalize_a_stability_certificates",
+        lambda _pending: None)
+
+    selected = collection_runtime._evaluate_pose_candidates(
+        state, args=SimpleNamespace(ordinary_actions_per_pose=1,
+                                   oracle_evaluation=evaluation),
+        stats=collections.Counter(), skipped=collections.Counter())
+
+    if evaluation == "rejected":
+        assert selected is None
+        return
+    assert selected is not None
+    assert selected["selected_ids"] == ["safe"]
+
+
+def test_nominal_collection_reuses_dual_oracles_without_pose_rerollouts(monkeypatch):
+    physical = {"collision": False, "contact_action_index": None}
+    outcome = {"physical": physical, "depth_physical": dict(physical),
+               "oracle_consensus": {"accepted": True},
+               "evidence": {"physical": {"coverage": 1.0}}}
+    sim = SimpleNamespace(source_dataset="b1k", nav=lambda *_args: None,
+                          recompute_navmesh=lambda *_args, **_kwargs: None)
+    frame = SimpleNamespace(frame_id="frame", position=[0, 0, 0], yaw_rad=0)
+    monkeypatch.setattr(collection_runtime.rollout, "physical_rollout",
+                        lambda *_args, **_kwargs: physical)
+    monkeypatch.setattr(collection_runtime, "judge", lambda *_args, **_kwargs: outcome)
+
+    def perturb(*_args, **_kwargs):
+        raise AssertionError("nominal collection must not perturb the saved pose")
+
+    monkeypatch.setattr(collection_runtime, "collect_a_stability_rows", perturb)
+    evaluator = collection_runtime._make_structured_spec_evaluator(
+        args=SimpleNamespace(collection_mode="main", oracle_evaluation="nominal"),
+        variants=[(sim, frame)], group_labels={"safe": "safe"},
+        precheck_cache={}, stats=collections.Counter(), skipped=collections.Counter(),
+        pending_a_certificates=[])
+    program = [Forward(1.0)]
+    result = evaluator({"action_tag": "safe", "actions": program, "radii": [0.2]})
+    published = result["frame"][0]
+    assert published["shared_oracle_stability"]["version"] == "nominal-oracle.v1"
+    assert validate._a_stability_validation_errors(published, program, "test") == []
+
+
+def test_full_geometry_exclusion_reports_its_source():
+    stats = collections.Counter()
+    skipped = collections.Counter()
+
+    label = collection_runtime._precheck_action_candidate(
+        "action", [Forward(0.5)],
+        {0.2: {
+            "collision": None,
+            "collision_source": "unsupported_floor",
+            "minimum_clearance_m": None,
+        }},
+        variants=[], active_radii=[0.2], required_siblings=1,
+        proposal_provenance={"action": {"variant": "natural_dynamic"}},
+        stats=stats, skipped=skipped, group_labels={}, precheck_cache={})
+
+    assert label is None
+    assert skipped == collections.Counter({
+        "full_geometry_excluded.unsupported_floor": 1})
+
+
+def test_partial_frame_evidence_keeps_later_valid_action_at_same_pose(
         monkeypatch):
     calibration = SimpleNamespace(
         position=np.array([0.0, 0.0, 0.0]),
@@ -1107,17 +1229,14 @@ def test_rejected_action_does_not_discard_later_candidate_at_same_pose(
     )
     frame = SimpleNamespace(
         frame_id="frame", objects=[],
+        quality={"valid_depth_ratio": 0.1, "visible_floor_ratio": 0.0},
+        camera_height_above_visible_floor_m=1.0,
         sensor=SimpleNamespace(to_dict=lambda: {"resolution": [2, 2]}))
     monkeypatch.setattr(
         collection_runtime, "_prepare_pose_sampling",
         lambda *_args, **_kwargs: object())
     monkeypatch.setattr(
         collection_runtime, "build_frame", lambda *_args, **_kwargs: frame)
-    monkeypatch.setattr(
-        collection_runtime, "frame_quality_rejections", lambda _frame: [])
-    monkeypatch.setattr(
-        collection_runtime, "eligible_target_ids_by_frame",
-        lambda _variants: {"frame": []})
     monkeypatch.setattr(
         collection_runtime, "precompute_full_geometry_candidates",
         lambda *_args, **_kwargs: {
@@ -1156,10 +1275,7 @@ def test_rejected_action_does_not_discard_later_candidate_at_same_pose(
     state = collection_runtime._prepare_pose_candidates(
         args=SimpleNamespace(
             seed=1,
-            min_pose_position_m=0.0,
-            min_pose_yaw_deg=0.0,
             collection_shard_id="main",
-            min_objects=0,
             collection_mode="main",
             radii=(0.15,),
             # File mode passes its programs through untouched, which is how
@@ -1220,6 +1336,9 @@ def test_persist_pose_group_drops_generic_target_metadata(monkeypatch, tmp_path)
     monkeypatch.setattr(
         collection_runtime, "append_record_group",
         lambda *_args, **_kwargs: publication_events.append("commit"))
+    monkeypatch.setattr(
+        collection_runtime.abc1_record, "from_collected",
+        lambda record_value, **_kwargs: record_value)
     def build_record(*_args, **kwargs):
         captured.update(kwargs)
         return {"outcomes": []}
@@ -1239,8 +1358,8 @@ def test_persist_pose_group_drops_generic_target_metadata(monkeypatch, tmp_path)
         "accepted_outcomes": {},
         "variants": [(SimpleNamespace(
             scene_id="scene", scene_authority_sha256="a" * 64), frame)],
-        "render_caches": {"frame": {}},
-        "pools": {},
+            "render_caches": {"frame": {}},
+            "pools": {}, "shortlist_size": 1,
         "selection_seed": 1,
         "required_siblings": 1,
         "calibration": SimpleNamespace(canonical_floor_fit=LEVEL_FLOOR_FIT),
@@ -1309,6 +1428,9 @@ def test_gs_persist_uses_v18_without_a_legacy_collection_contract(
             "validation_context", kwargs["validation_context"]))
     monkeypatch.setattr(
         collection_runtime, "append_record_group", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        collection_runtime.abc1_record, "from_collected",
+        lambda record_value, **_kwargs: record_value)
     def attach_terminal(*_args, **kwargs):
         terminal_calls.append(kwargs)
         return {"materialized": 0, "withheld": 0}
@@ -1327,7 +1449,8 @@ def test_gs_persist_uses_v18_without_a_legacy_collection_contract(
         "selected_ids": [], "group_labels": {}, "selected": [],
         "diagnostics": [], "accepted_outcomes": {},
         "variants": [(SimpleNamespace(scene_id="scene"), frame)],
-        "render_caches": {"frame": {}}, "pools": {}, "selection_seed": 1,
+            "render_caches": {"frame": {}}, "pools": {},
+            "shortlist_size": 1, "selection_seed": 1,
         "required_siblings": 1,
         "calibration": SimpleNamespace(canonical_floor_fit=LEVEL_FLOOR_FIT),
         "position": np.zeros(3), "yaw": 0.0,
@@ -1356,34 +1479,6 @@ def test_gs_persist_uses_v18_without_a_legacy_collection_contract(
     assert terminal_calls[0]["collection_contract"] is None
     assert terminal_calls[0]["eligible_outcome_ids"] == set()
 
-
-def test_b_target_probe_records_pose_evidence_without_rejecting(monkeypatch):
-    frames = [
-        SimpleNamespace(
-            frame_id="eligible", objects=[{"instance_id": 1}],
-            sensor=SimpleNamespace(to_dict=lambda: {"resolution": [2, 2]})),
-        SimpleNamespace(
-            frame_id="missing", objects=[],
-            sensor=SimpleNamespace(to_dict=lambda: {"resolution": [2, 2]})),
-    ]
-
-    def select(record):
-        if record["objects"]:
-            return {"eligible": True, "instance_id": 1}
-        return {"eligible": False, "reason": "no_visible_target"}
-
-    monkeypatch.setattr(collection_runtime.OBJ, "select_b_target", select)
-    stats = collections.Counter()
-
-    result = collection_runtime._probe_b_targets(
-        [(object(), frame) for frame in frames], stats=stats)
-
-    assert result == {
-        "eligible": {"eligible": True, "instance_id": 1},
-        "missing": {"eligible": False, "reason": "no_visible_target"},
-    }
-    assert stats["b_target_probe.eligible"] == 1
-    assert stats["b_target_probe.withheld.no_visible_target"] == 1
 
 
 @pytest.mark.parametrize(
@@ -1556,7 +1651,7 @@ def test_capacity_stop_is_bound_into_run_meta_and_sealed_marker(
         "".join(json.dumps(row) + "\n" for row in records))
     args = SimpleNamespace(
         out=str(tmp_path), code_revision="abc123", allow_dirty_code=False,
-        no_validate=True, keep_per_length=1)
+        keep_per_length=1)
     funnel_path = tmp_path / "collection_funnel.json"
     funnel_path.write_text(json.dumps({"status": "running"}))
 
@@ -1588,7 +1683,7 @@ def test_capacity_stop_is_bound_into_run_meta_and_sealed_marker(
         (tmp_path / "collection_finalization.json").read_text())
     assert marker["schema"] == "egoconseq.collection-finalization.v2"
     assert marker["status"] == "completed"
-    assert marker["source_validation"] == "skipped"
+    assert marker["source_validation"] == "passed"
     assert marker["record_count"] == 6
     assert marker["capacity_stop_reason"] == "inter_record_idle"
     assert marker["records_sha256"] == collection_runtime.io_utils.sha256_file(
@@ -1659,44 +1754,30 @@ def test_successful_pose_becomes_a_same_shard_diversity_exclusion(
     }
 
 
-def test_one_disagreeing_action_no_longer_takes_the_natural_pose_with_it():
-    """The whole point of the change.
+def test_resume_preloads_existing_record_poses_into_same_shard_exclusions(
+        tmp_path):
+    records = tmp_path / "records.jsonl"
+    records.write_text("".join(json.dumps(row) + "\n" for row in [
+        {"scene_id": "scene-a", "pose": {
+            "position": [1.0, 0.0, 2.0], "yaw_rad": 0.5}},
+        {"scene_id": "scene-b", "pose": {
+            "position": [3.0, 0.0, 4.0], "yaw_rad": -0.5}},
+    ]))
+    exclusions = {"scene-a": [
+        {"position": [1.0, 0.0, 2.0], "yaw_rad": 0.5},
+    ]}
 
-    A depth/mesh disagreement says something about one program.  The natural
-    route publishes every outcome independently, so the survivors are still a
-    valid candidate set and used to be thrown away to punish the one failure --
-    most expensively at the lengths that are hardest to fill in the first place.
-    """
-    selected = [(tag, [Forward(1.0)]) for tag in ("keep-a", "bad", "keep-b")]
-    skipped = collections.Counter()
+    collection_runtime._preload_resumed_pose_exclusions(
+        records, exclusions)
 
-    def evaluate(spec):
-        return None if spec["action_tag"] == "bad" else {
-            "tag": spec["action_tag"]}
-
-    surviving, accepted = collect.evaluate_selected_action_groups(
-        selected, evaluate, radii=(0.15,), skipped=skipped)
-
-    assert [tag for tag, _actions in surviving] == ["keep-a", "keep-b"]
-    assert set(accepted) == {"keep-a", "keep-b"}
-    assert skipped == {"structured_main_group_dropped": 1}
-
-
-def test_a_pose_below_the_candidate_floor_is_still_rejected():
-    """Dropping actions individually is not permission to publish a pose with
-    fewer certified outcomes than a candidate set requires."""
-    selected = [(tag, [Forward(1.0)]) for tag in ("keep", "bad-a", "bad-b")]
-    skipped = collections.Counter()
-
-    result = collect.evaluate_selected_action_groups(
-        selected,
-        lambda spec: None if spec["action_tag"].startswith("bad") else {},
-        radii=(0.15,), skipped=skipped)
-
-    assert result is None
-    assert skipped["structured_main_group_dropped"] == 2
-    assert skipped["structured_main_survivor_shortfall"] == 1
-    assert config.ACTION_CANDIDATE_MIN_PER_POSE == 2
+    assert exclusions == {
+        "scene-a": [
+            {"position": [1.0, 0.0, 2.0], "yaw_rad": 0.5},
+        ],
+        "scene-b": [
+            {"position": [3.0, 0.0, 4.0], "yaw_rad": -0.5},
+        ],
+    }
 
 
 def test_safe_candidate_requires_publication_clearance_for_every_radius():
@@ -1755,7 +1836,7 @@ def test_full_geometry_publication_label_filters_before_depth_rollout():
 def test_run_contract_records_pose_independent_action_bank_hash():
     args = SimpleNamespace(
         out="ignored", overwrite=False, resume=True, debug_images=False,
-        debug_outcomes_per_frame=4, no_validate=False, action_file=None,
+        debug_outcomes_per_frame=4, action_file=None,
     )
 
     contract = collect.collection_run_contract(
@@ -1775,7 +1856,6 @@ def test_run_contract_carries_each_resolved_scene_asset_identity():
         resume=True,
         debug_images=False,
         debug_outcomes_per_frame=4,
-        no_validate=False,
         action_file=None,
     )
 
@@ -1801,7 +1881,6 @@ def test_run_contract_records_inline_pose_sampling_provenance():
         resume=True,
         debug_images=False,
         debug_outcomes_per_frame=4,
-        no_validate=False,
         action_file=None,
     )
 
@@ -1817,7 +1896,7 @@ def test_run_contract_records_inline_pose_sampling_provenance():
     assert contract["main_action_proposal"] == {
         "cap_per_length": config.MAIN_ACTION_PROPOSAL_PER_LENGTH,
         "ranking": "label-blind-stratified-shortlist.v4",
-        "retention": "stable-ordinary-reserve.v1",
+        "retention": "progressive-stability-fill.v1",
         "ordinary_attempts_per_pose": 48,
         "ordinary_actions_per_pose": 36,
         "c1_queries_per_pose": 2,
@@ -1834,7 +1913,6 @@ def test_run_meta_copies_sampling_provenance_from_run_contract(tmp_path):
         out=str(tmp_path),
         code_revision="abc123",
         allow_dirty_code=False,
-        no_validate=True,
     )
 
     class Funnel:
@@ -1874,7 +1952,8 @@ def test_run_meta_copies_sampling_provenance_from_run_contract(tmp_path):
 
     assert result == 0
     metadata = json.loads((tmp_path / "run_meta.json").read_text())
-    assert metadata["record_schema_version"] == record.SCHEMA_VERSION
+    assert metadata["record_schema_version"] == \
+        collection_runtime.abc1_record.SCHEMA_VERSION
     assert metadata["oracle_contract_version"] == record.ORACLE_CONTRACT_VERSION
     assert metadata["run_contract_sha256"] == \
         collection_funnel.canonical_sha256(run_contract)
@@ -1884,13 +1963,7 @@ def test_run_meta_copies_sampling_provenance_from_run_contract(tmp_path):
     assert metadata["action_sampler_contract_sha256"] == "c" * 64
     assert metadata["main_action_proposal"] == run_contract[
         "main_action_proposal"]
-    report = json.loads((tmp_path / "a3_prune_report.json").read_text())
-    assert report["schema"] == "egoconseq.a3-prune-report.v1"
-    assert report["record_payload_affected"] is False
-    assert report["semantic_query_diagnostics"] == \
-        semantic._mp3d_query_diagnostics()
-    assert report["certificate_batch_diagnostics"] == \
-        consequence._a_stability_batch_diagnostics()
+    assert not (tmp_path / "a3_prune_report.json").exists()
 
 
 def test_run_contract_pins_revision_outside_params():
@@ -1898,7 +1971,7 @@ def test_run_contract_pins_revision_outside_params():
     # contract as top-level keys, never as resume-sensitive params.
     args = SimpleNamespace(
         out="ignored", overwrite=False, resume=True, debug_images=False,
-        debug_outcomes_per_frame=4, no_validate=False, action_file=None,
+        debug_outcomes_per_frame=4, action_file=None,
         code_revision="sha-one", allow_dirty_code=True,
     )
 
@@ -1960,6 +2033,16 @@ def test_full_geometry_candidate_precheck_rebuilds_once_per_radius():
 
         def __init__(self, radius):
             self.radius = float(radius)
+            self.batch_calls = 0
+
+        def query_many(self, poses):
+            self.batch_calls += 1
+            return [SimpleNamespace(
+                navigable=True,
+                clearance_m=1.0 - self.radius,
+                obstacle_index=None,
+                geometry_source=None,
+            ) for _pose in poses]
 
         def is_navigable(self, _pose):
             return True
@@ -1968,9 +2051,12 @@ def test_full_geometry_candidate_precheck_rebuilds_once_per_radius():
             return 1.0 - self.radius
 
     class FakeSim:
+        source_dataset = "b1k"
+
         def __init__(self):
             self.radius = None
             self.recomputed = []
+            self.navs = []
 
         def recompute_navmesh(self, radius, *, height):
             assert height == config.GROUND_ORACLE_HEIGHT_M
@@ -1978,7 +2064,9 @@ def test_full_geometry_candidate_precheck_rebuilds_once_per_radius():
             self.recomputed.append(float(radius))
 
         def nav(self, _position, _yaw):
-            return FakeNav(self.radius)
+            nav = FakeNav(self.radius)
+            self.navs.append(nav)
+            return nav
 
     frame = SimpleNamespace(position=[0.0, 0.0, 0.0], yaw_rad=0.0)
     pools = {
@@ -1992,67 +2080,16 @@ def test_full_geometry_candidate_precheck_rebuilds_once_per_radius():
         sim, frame, pools, [0.15, 0.25, 0.35], stats)
 
     assert sim.recomputed == [0.15, 0.25, 0.35]
+    assert [nav.batch_calls for nav in sim.navs] == [1, 1, 1]
     assert stats["physical_prechecks"] == 9
     assert set(result) == {"L1-a", "L1-b", "L2-a"}
     assert set(result["L1-a"]) == {0.15, 0.25, 0.35}
     assert all(not value["collision"]
                for by_radius in result.values()
                for value in by_radius.values())
-
-
-def test_full_geometry_cost_is_exactly_the_shortlist_times_the_radii():
-    """The equality the funnel reordering exists to produce.
-
-    This used to run over the whole materialised bank -- a few hundred programs
-    -- and a hash cut afterwards threw most of the result away.  Certification
-    now sees only what the shortlist admitted, so the cost is an exact product
-    and not a number that drifts with how wide the bank happened to be.
-    """
-    bank = {
-        length: [(f"v{variant}-L{length}-{index}",
-                  [Turn(15.0), Forward(0.5)][:1] * 0 + [Forward(0.5)] * length)
-                 for variant in range(3) for index in range(20)]
-        for length in (1, 2, 3, 4, 5, 6)
-    }
-    provenance = {
-        tag: {"variant": ("safe", "collision", "natural")[int(tag[1])]}
-        for candidates in bank.values() for tag, _actions in candidates
-    }
-    radii = [0.15, 0.25, 0.35]
-    budget = config.ACTION_CANDIDATE_ORDINARY_ATTEMPTS_PER_POSE
-
-    shortlist = action_sampling.shortlist_action_bank(
-        bank, provenance, pose_seed=17, budget=budget)
-    admitted = sum(len(candidates) for candidates in shortlist.values())
-
-    class FreeNav:
-        authority = "test"
-
-        def __init__(self, radius):
-            self.radius = float(radius)
-
-        def is_navigable(self, _pose):
-            return True
-
-        def clearance(self, _pose):
-            return 1.0 - self.radius
-
-    class FreeSim:
-        def recompute_navmesh(self, radius, *, height):
-            self.radius = float(radius)
-
-        def nav(self, _position, _yaw):
-            return FreeNav(self.radius)
-
-    stats = collections.Counter()
-    collect.precompute_full_geometry_candidates(
-        FreeSim(), SimpleNamespace(position=[0.0, 0.0, 0.0], yaw_rad=0.0),
-        shortlist, radii, stats)
-
-    assert admitted == budget
-    assert stats["physical_prechecks"] == admitted * len(radii)
-    banked = sum(len(candidates) for candidates in bank.values())
-    assert stats["physical_prechecks"] <= 0.2 * banked * len(radii)
+    assert all(isinstance(value, rollout.PhysicalPathTrace)
+               for by_radius in result.values()
+               for value in by_radius.values())
 
 
 @pytest.mark.parametrize("candidate_budget,valid", [(48, True), (49, False)])
@@ -2103,36 +2140,3 @@ def test_candidate_stage_diagnostics_preserve_label_length_and_reason():
         "candidate.depth_reject.collision.L4."
         "insufficient_depth_coverage": 2,
     }
-
-
-def test_frame_quality_gate_uses_depth_and_floor_not_texture():
-    clear = make_frame()
-    assert collect.frame_quality_rejections(clear) == []
-
-    invalid_depth = dataclasses.replace(
-        clear, quality={**clear.quality, "valid_depth_ratio": 0.8})
-    no_floor = dataclasses.replace(
-        clear, quality={**clear.quality, "visible_floor_ratio": 0.01})
-    assert collect.frame_quality_rejections(invalid_depth) == [
-        "low_valid_depth_ratio"]
-    assert collect.frame_quality_rejections(no_floor) == [
-        "low_visible_floor_ratio"]
-
-
-def test_frame_quality_floor_gate_scales_with_camera_height():
-    clear = make_frame()
-    raised = dataclasses.replace(
-        clear,
-        sensor=clear.sensor.__class__.from_values(
-            1.5, clear.sensor.hfov_deg, clear.sensor.vfov_deg),
-        quality={**clear.quality, "visible_floor_ratio": 0.05},
-    )
-    base_height = dataclasses.replace(
-        clear,
-        sensor=clear.sensor.__class__.from_values(
-            0.8, clear.sensor.hfov_deg, clear.sensor.vfov_deg),
-        quality={**clear.quality, "visible_floor_ratio": 0.05})
-
-    assert collect.frame_quality_rejections(raised) == []
-    assert collect.frame_quality_rejections(base_height) == [
-        "low_visible_floor_ratio"]

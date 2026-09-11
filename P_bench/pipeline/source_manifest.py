@@ -166,11 +166,15 @@ def b1k_v16_registered_validation_context(
         scene_id = str(source.get("scene_id") or "")
         if not scene_id:
             raise ValueError("registered source is missing scene_id")
-        contract = REC.collection_contract(
-            source, collection_mode,
-            record_schema_version=expected_schema_version)
-        previous = contracts.setdefault(scene_id, contract)
-        if previous != contract:
+        by_version = {
+            version: REC.collection_contract(
+                source, collection_mode,
+                record_schema_version=expected_schema_version,
+                contract_version=version)
+            for version in REC.B1K_C1_RENDER_MODE_BY_CONTRACT
+        }
+        previous = contracts.setdefault(scene_id, by_version)
+        if previous != by_version:
             raise ValueError(f"conflicting provenance for scene {scene_id!r}")
     return RecordValidationContext(
         route="b1k_v16_registered",
@@ -398,8 +402,9 @@ def gs_v18_context_from_run_meta(
             or len(requested_scene_ids) != len(set(requested_scene_ids))):
         raise ValueError("registered GS v18 run has invalid scene identities")
     try:
-        catalog = scene_pool.discover_gs_train_scenes(
-            data_root, manifest_path, requested=requested_scene_ids)
+        catalog = scene_pool.discover_gs_scenes(
+            data_root, manifest_path, requested=requested_scene_ids,
+            source_split=str(params.get("source_split") or "train"))
     except scene_pool.SceneCatalogError as error:
         raise ValueError(f"trusted GS catalog is unavailable: {error}") \
             from error
@@ -441,7 +446,7 @@ def gs_v18_context_from_run_meta(
 
 
 def _r2r_roots_from_params(params: dict) -> tuple[str, str]:
-    episodes = params.get("r2r_train_episodes")
+    episodes = params.get("r2r_episodes") or params.get("r2r_train_episodes")
     mp3d_root = params.get("mp3d_root")
     if (not isinstance(episodes, str) or not episodes.strip() or
             not isinstance(mp3d_root, str) or not mp3d_root.strip()):

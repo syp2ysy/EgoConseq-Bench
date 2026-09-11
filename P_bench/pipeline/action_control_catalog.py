@@ -46,7 +46,7 @@ def catalog_sha256() -> str:
 
 @lru_cache(maxsize=1)
 def load_catalog() -> Tuple[ControlAnchor, ...]:
-    """Load and validate the committed thirteen-action catalog."""
+    """Load the authenticated action-control catalog."""
     value = json.loads(ASSET_PATH.read_text(encoding="utf-8"))
     if value.get("schema") != CONTRACT:
         raise ValueError("A1 control catalog schema is invalid")
@@ -64,8 +64,8 @@ def load_catalog() -> Tuple[ControlAnchor, ...]:
                 A.total_forward_m(actions) > 6.0 + 1e-9:
             raise ValueError("A1 control catalog entry is invalid")
         anchors.append(ControlAnchor(tag=tag, actions=actions))
-    if len(anchors) != 13 or len({anchor.tag for anchor in anchors}) != 13:
-        raise ValueError("A1 control catalog must contain thirteen unique tags")
+    if not anchors or len({anchor.tag for anchor in anchors}) != len(anchors):
+        raise ValueError("A1 control catalog tags must be unique")
     if {anchor.length for anchor in anchors} != {1, 2, 3, 4, 5, 6}:
         raise ValueError("A1 control catalog must cover L1-L6")
     return tuple(anchors)
@@ -73,7 +73,7 @@ def load_catalog() -> Tuple[ControlAnchor, ...]:
 
 def anchors_for_pose(*, dataset: str, scene_id: str,
                      pose_index: int) -> Tuple[ControlAnchor, ...]:
-    """Select five anchors; a 13-pose cycle attempts each anchor five times."""
+    """Rotate five anchors through the authenticated catalog."""
     anchors = load_catalog()
     digest = hashlib.sha256(
         f"{dataset}:{scene_id}:a1-control-rotation-v1".encode("utf-8")

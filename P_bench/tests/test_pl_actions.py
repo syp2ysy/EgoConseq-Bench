@@ -24,6 +24,42 @@ def _close(a, b, tol=1e-9):
     return abs(a - b) <= tol
 
 
+@pytest.mark.parametrize(("bearing", "expected"), (
+    (0.0, "front"),
+    (7.5, "front"),
+    (7.5001, "front-right"),
+    (45.0, "front-right"),
+    (82.5, "right"),
+    (90.0, "right"),
+    (97.5001, "rear-right"),
+    (172.5, "rear"),
+    (180.0, "rear"),
+    (-135.0, "rear-left"),
+    (-90.0, "left"),
+    (-45.0, "front-left"),
+    (-7.5, "front"),
+))
+def test_horizontal_direction_uses_narrow_axes_and_wide_diagonals(
+        bearing, expected):
+    """Catches reverting to four quadrants or treating 15 degrees as +/-15."""
+    direction = action_geometry.horizontal_direction(bearing)
+
+    assert direction == expected
+
+
+@pytest.mark.parametrize(("elevation", "expected"), (
+    (7.5001, "above"),
+    (7.5, "level"),
+    (0.0, "level"),
+    (-7.5, "level"),
+    (-7.5001, "below"),
+))
+def test_vertical_direction_uses_a_fifteen_degree_level_band(
+        elevation, expected):
+    """Catches interpreting 7.5 degrees as a full rather than half width."""
+    assert action_geometry.vertical_direction(elevation) == expected
+
+
 def test_contact_action_index_multi_forward():
     acts = [Turn(15), Forward(1.5), Forward(1.5)]     # arc spans: F0=[0,1.5], F1=[1.5,3]
     idx, local = contact_action_index(acts, 1.78)
@@ -229,6 +265,18 @@ def test_balanced_action_pool_contains_both_start_types_without_equal_neighbors(
     assert all(any(isinstance(action, Forward) for action in seq) for seq in pool)
 
 
+def test_balanced_action_pool_uses_shared_initial_turn_vocabulary():
+    pool = balanced_action_pool(
+        np.random.default_rng(23), lengths=(4,), pool_per_length=200,
+        half_fov_deg=89.0,
+    )[4]
+
+    first_turns = [sequence[0].deg for sequence in pool
+                   if isinstance(sequence[0], Turn)]
+    assert first_turns
+    assert set(first_turns) <= set(config.INITIAL_TURNS_DEG)
+
+
 def test_main_length_one_pool_contains_forward_actions_only():
     pool = balanced_action_pool(
         np.random.default_rng(13), lengths=(1,), pool_per_length=10,
@@ -418,57 +466,7 @@ def test_matched_same_label_units_pair_safe_actions_without_label_transition():
         units[0]["match_key"], "safe-a", "safe-b", label="safe")
 
 
-def test_natural_candidate_selection_varies_count_without_reading_labels():
-    sampling = _action_sampling()
-    pools = {
-        1: [(f"a-{index}", [Forward(0.5 + index * 0.25)])
-            for index in range(6)],
-    }
-    labels = {
-        group_id: ("safe" if index < 5 else "collision")
-        for index, (group_id, _actions) in enumerate(pools[1])
-    }
-
-    two = sampling.select_natural_action_groups(
-        pools, labels, pose_seed=0, min_actions=2, max_actions=5)
-    five = sampling.select_natural_action_groups(
-        pools, labels, pose_seed=3, min_actions=2, max_actions=5)
-    flipped_labels = {
-        group_id: ("collision" if label == "safe" else "safe")
-        for group_id, label in labels.items()
-    }
-    two_after_label_flip = sampling.select_natural_action_groups(
-        pools, flipped_labels, pose_seed=0, min_actions=2, max_actions=5)
-
-    assert len(two) == 2
-    assert len(five) == 5
-    assert [group_id for group_id, _actions in two] == [
-        group_id for group_id, _actions in two_after_label_flip]
-
-
-def test_final_selection_keeps_every_certified_length_despite_c1_reservations():
-    sampling = _action_sampling()
-    pools = {
-        length: [(f"L{length}-{index}", [Forward(0.5)] * length)
-                 for index in range(3)]
-        for length in config.GEN_LENGTHS
-    }
-    labels = {
-        tag: ("safe" if index % 2 else "collision")
-        for candidates in pools.values()
-        for index, (tag, _actions) in enumerate(candidates)
-    }
-    reserved = ["L1-0", "L1-1", "L2-0", "L2-1"]
-
-    selected = sampling.select_natural_action_groups(
-        pools, labels, pose_seed=0, reserved_tags=reserved)
-
-    assert set(reserved) <= {tag for tag, _actions in selected}
-    assert {len(actions) for _tag, actions in selected} == \
-        set(config.GEN_LENGTHS)
-
-
-def test_v4_retention_keeps_every_certified_candidate_in_bank_order():
+def test_retention_keeps_every_certified_candidate_in_bank_order():
     """Dropping one certified ordinary tag would recreate the v3 final crop."""
     sampling = _action_sampling()
     pools = {
@@ -484,7 +482,7 @@ def test_v4_retention_keeps_every_certified_candidate_in_bank_order():
     assert [tag for tag, _actions in selected] == ["L1-a", "L1-b", "L2-b"]
 
 
-def test_v4_retention_fails_closed_above_its_hard_limit():
+def test_retention_fails_closed_above_its_hard_limit():
     sampling = _action_sampling()
     pools = {1: [(f"tag-{index}", [Forward(0.5)]) for index in range(4)]}
 
@@ -496,7 +494,7 @@ def test_v4_retention_fails_closed_above_its_hard_limit():
 # --- the pre-certification shortlist ------------------------------------
 
 def _shortlist_bank(per_cell=6, lengths=(1, 2, 3),
-                    variants=("safe", "collision", "natural")):
+                    variants=("safe", "collision", "natural_dynamic")):
     """A bank shaped like a real pose's: several lengths, all three variants."""
     pools, provenance = {}, {}
     for length in lengths:
@@ -505,7 +503,11 @@ def _shortlist_bank(per_cell=6, lengths=(1, 2, 3),
             for index in range(per_cell):
                 tag = f"{variant}-L{length}-{index}"
                 pools[length].append((tag, [Forward(0.5)] * length))
-                provenance[tag] = {"variant": variant}
+                provenance[tag] = {
+                    "variant": variant,
+                    **({"natural_distance_stratum": "mid"}
+                       if variant == "natural_dynamic" else {}),
+                }
     return pools, provenance
 
 
@@ -514,46 +516,25 @@ def _flat(shortlist):
             for tag, _actions in shortlist[length]]
 
 
-def test_shortlist_gives_every_populated_cell_a_seat_before_seconds():
-    """The failure this replaces: a flat hash order over an uneven bank left
-    whole lengths with nothing certified, so L5/L6 published nothing.
-
-    Round-robin makes the first pass over the cells *be* the floor, so the
-    guarantee needs no separate pass to enforce it.
-    """
+def test_shortlist_uses_one_stratified_order_and_keeps_forced_tags():
     sampling = _action_sampling()
-    pools, provenance = _shortlist_bank()
+    pools, provenance = _shortlist_bank(
+        per_cell=3, lengths=(1, 2),
+        variants=("safe", "collision", "natural_dynamic"))
+    forced = "natural_dynamic-L2-2"
+    stats = collections.Counter()
+
     shortlist = sampling.shortlist_action_bank(
-        pools, provenance, pose_seed=7, budget=12)
+        pools, provenance, pose_seed=7, budget=5,
+        forced_tags=(forced,), stats=stats)
 
-    tags = _flat(shortlist)
-    assert len(tags) == 12
-    cells = {(tag.split("-")[0], tag.split("-")[1]) for tag in tags}
-    assert len(cells) == 9          # 3 lengths x 3 variants, all present
-    assert all(sum(1 for tag in tags
-                   if tag.startswith(f"{variant}-L{length}-")) >= 1
-               for length in (1, 2, 3)
-               for variant in ("safe", "collision", "natural"))
-
-
-def test_shortlist_treats_natural_distance_strata_as_distinct_cells():
-    sampling = _action_sampling()
-    pools = {3: []}
-    provenance = {}
-    for stratum in ("short", "mid", "near"):
-        for index in range(2):
-            tag = f"natural-{stratum}-{index}"
-            pools[3].append((tag, [Forward(0.5), Turn(15), Forward(0.5)]))
-            provenance[tag] = {
-                "variant": "natural_dynamic",
-                "natural_distance_stratum": stratum,
-            }
-
-    tags = _flat(sampling.shortlist_action_bank(
-        pools, provenance, pose_seed=0, budget=3))
-
-    assert {provenance[tag]["natural_distance_stratum"] for tag in tags} == {
-        "short", "mid", "near"}
+    ordered = sampling.stratified_action_order(
+        pools, provenance, pose_seed=7, forced_tags=(forced,))
+    tags = set(_flat(shortlist))
+    assert tags == set(ordered[:5])
+    assert forced in tags
+    assert sum(value for key, value in stats.items()
+               if key.startswith("shortlist_offered.")) == 18
 
 
 def test_k18_first_covers_each_length_and_natural_distance_stratum():
@@ -616,10 +597,10 @@ def test_post_stability_retention_reuses_stratified_order_and_forces_query():
     sampling = _action_sampling()
     pools, provenance = _shortlist_bank(
         per_cell=2, lengths=(1, 2, 3),
-        variants=("safe", "collision", "natural"))
+        variants=("safe", "collision", "natural_dynamic"))
     stable = {
         tag for candidates in pools.values() for tag, _actions in candidates}
-    forced = "natural-L3-1"
+    forced = "natural_dynamic-L3-1"
 
     retained = sampling.retain_stratified_action_groups(
         pools, provenance, stable_tags=stable, pose_seed=13,
@@ -629,66 +610,6 @@ def test_post_stability_retention_reuses_stratified_order_and_forces_query():
     assert tags[0] == forced
     assert {len(actions) for _tag, actions in retained} == {1, 2, 3}
     assert len(tags) == 10
-
-
-def test_shortlist_cannot_read_a_label_because_none_exists_yet():
-    """Label-blindness here is structural, not a rule to be obeyed.
-
-    ``group_labels`` is the product of the certification this shortlist runs
-    *before*, so the only way to prove independence is that the function has
-    nowhere to be told a label -- passing one is a TypeError.
-    """
-    import inspect
-    sampling = _action_sampling()
-    parameters = inspect.signature(sampling.shortlist_action_bank).parameters
-    assert "group_labels" not in parameters
-    assert not any("label" in name for name in parameters)
-    pools, provenance = _shortlist_bank()
-    with pytest.raises(TypeError):
-        sampling.shortlist_action_bank(
-            pools, provenance, pose_seed=1, budget=8,
-            group_labels={"safe-L1-0": "safe"})
-
-
-def test_shortlist_is_deterministic_for_a_pose_and_moves_with_the_seed():
-    sampling = _action_sampling()
-    pools, provenance = _shortlist_bank()
-    first = _flat(sampling.shortlist_action_bank(
-        pools, provenance, pose_seed=11, budget=15))
-    again = _flat(sampling.shortlist_action_bank(
-        pools, provenance, pose_seed=11, budget=15))
-    other = _flat(sampling.shortlist_action_bank(
-        pools, provenance, pose_seed=12, budget=15))
-    assert first == again
-    assert first != other
-
-
-def test_frozen_family_members_are_admitted_before_the_round_robin():
-    """A family member that misses the shortlist never gets a certificate, and
-    an incomplete family is discarded whole -- so it cannot compete for a seat.
-    """
-    sampling = _action_sampling()
-    pools, provenance = _shortlist_bank()
-    forced = ["natural-L3-5", "collision-L2-4"]
-    tags = _flat(sampling.shortlist_action_bank(
-        pools, provenance, pose_seed=3, budget=10, forced_tags=forced))
-    assert set(forced) <= set(tags)
-    assert len(tags) == 10
-    with pytest.raises(ValueError):
-        sampling.shortlist_action_bank(
-            pools, provenance, pose_seed=3, budget=10,
-            forced_tags=["not-in-the-bank"])
-
-
-def test_shortlist_never_grows_a_bank_and_keeps_its_shape():
-    sampling = _action_sampling()
-    pools, provenance = _shortlist_bank(per_cell=1, lengths=(1, 2))
-    shortlist = sampling.shortlist_action_bank(
-        pools, provenance, pose_seed=2, budget=40)
-    assert {length: [tag for tag, _actions in candidates]
-            for length, candidates in shortlist.items()} == \
-        {length: [tag for tag, _actions in candidates]
-         for length, candidates in pools.items()}
 
 
 def test_shortlist_reports_which_cells_it_starved():

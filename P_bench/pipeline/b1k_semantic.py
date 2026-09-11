@@ -17,7 +17,7 @@ from typing import Iterable, Mapping
 
 import numpy as np
 
-from pipeline import b1k_geometry, config, record, semantic
+from pipeline import b1k_geometry, config, record
 
 
 SCENE_AUTHORITY_SCHEMA = "b1k-derived-scene-authority.v1"
@@ -569,6 +569,15 @@ class B1KSemanticAuthority:
             raise KeyError(
                 f"B1K runtime prim {prim_identity!r} is unknown") from None
 
+    def instance_id_for_component(self, prim_path: str) -> int:
+        """Resolve a collision or visual mesh through its owning object prim."""
+        parent = str(prim_path)
+        while parent:
+            if parent in self._prim_to_id:
+                return self._prim_to_id[parent]
+            parent = parent.rpartition("/")[0]
+        raise KeyError(f"B1K mesh has no source object: {prim_path}")
+
     def instance_triangles(self, instance_id: int) -> np.ndarray:
         instance_id = _positive_instance_id(instance_id)
         if instance_id not in self._triangles_by_id:
@@ -583,8 +592,8 @@ class B1KSemanticAuthority:
         """Return canonical exact surface samples, shape ``(N, 3)`` metres.
 
         Samples are the lexicographically sorted unique union of runtime
-        triangle vertices and centroids.  They remain bound to the same exact
-        triangles as B1/B2 and never fall back to proxy bbox corners.
+        triangle vertices and centroids. They remain bound to the runtime
+        semantic authority and never fall back to proxy bbox corners.
         """
         triangles = self.instance_triangles(instance_id)
         points = np.concatenate([
@@ -744,52 +753,6 @@ class B1KSemanticAuthority:
                     **common,
                 })
         return results
-
-    def target_geometry_atom(
-            self, instance_id: int, floor_plane, *,
-            expected_scene_authority_sha256: str,
-            pose: dict | None = None) -> dict:
-        instance_id = _positive_instance_id(instance_id)
-        expected = str(expected_scene_authority_sha256)
-        if expected != self._scene_authority_sha256:
-            raise ValueError(
-                "scene authority digest does not match B1K runtime authority")
-        triangles = self.instance_triangles(instance_id)
-        support = semantic.clip_target_ground_support(
-            triangles, floor_plane, pose=pose)
-        centroid = semantic.area_weighted_surface_centroid(triangles)
-        support_value = {
-            "protocol": semantic.B_GROUND_SUPPORT_PROTOCOL,
-            "frame": "pbench_world_xz",
-            "ground_band_m": [
-                float(config.GROUND_OBSTACLE_BAND_M[0]),
-                float(config.GROUND_OBSTACLE_BAND_M[1]),
-            ],
-            **support,
-        }
-        support_value["sha256"] = record.canonical_atom_sha256(support_value)
-        centroid_value = {
-            "protocol": semantic.B_REFERENCE_CENTROID_PROTOCOL,
-            "frame": B1K_TRIANGLE_FRAME,
-            "world_xyz_m": centroid.tolist(),
-            "world_xz_m": centroid[[0, 2]].tolist(),
-        }
-        centroid_value["sha256"] = record.canonical_atom_sha256(
-            centroid_value)
-        value = {
-            "schema": record.B1K_B_TARGET_GEOMETRY_SCHEMA,
-            "instance_id": instance_id,
-            "category": self.id_to_cat[instance_id],
-            "scene_authority_sha256": expected,
-            "full_triangle_protocol": record.B1K_INSTANCE_TRIANGLES_SCHEMA,
-            "full_triangle_count": int(len(triangles)),
-            "full_triangles_sha256":
-                self.instance_triangles_sha256(instance_id),
-            "ground_support": support_value,
-            "reference_centroid": centroid_value,
-        }
-        return {**value, "sha256": record.canonical_atom_sha256(value)}
-
 
 def build_b1k_authorities(
         *, floor_components, collision_components, instances,

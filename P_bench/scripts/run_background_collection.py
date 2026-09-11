@@ -19,32 +19,14 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from pipeline import (  # noqa: E402
-    background_canary, background_collection, background_scheduler,
-    b1k_source_builder, candidate_preview, config, gate_authority, gs_semantic,
+    background_canary, background_collection, background_pose_exclusions,
+    background_recovery, background_scheduler, collection_closeout,
+    b1k_source_builder, config, gate_authority, gs_semantic,
     io_utils, scene_partitions, scene_pool,
 )
-
-
-class _RecoveredProcess:
-    """Minimal poll handle for a child surviving a controller restart."""
-
-    def __init__(self, pid: int):
-        self.pid = int(pid)
-
-    def poll(self):
-        try:
-            os.kill(self.pid, 0)
-        except ProcessLookupError:
-            return background_collection.RECOVERED_UNKNOWN_RETURNCODE
-        return None
-
-    def wait(self, timeout=None):
-        deadline = None if timeout is None else time.time() + float(timeout)
-        while self.poll() is None:
-            if deadline is not None and time.time() >= deadline:
-                raise subprocess.TimeoutExpired("recovered-process", timeout)
-            time.sleep(0.1)
-        return background_collection.RECOVERED_UNKNOWN_RETURNCODE
+from post_QA.seen_build import catalog as record_catalog  # noqa: E402
+from post_QA.seen_build import selection as seen_selection  # noqa: E402
+from post_QA.seen_build import supply as seen_supply  # noqa: E402
 
 
 def _manifest_path(args) -> Path:
@@ -117,6 +99,13 @@ def _controller_pid_path(manifest: dict) -> Path:
     return Path(manifest["output_root"]) / "controller" / "controller.pid"
 
 
+def _controller_pid(manifest: dict) -> int | None:
+    try:
+        return int(_controller_pid_path(manifest).read_text().strip())
+    except (OSError, TypeError, ValueError):
+        return None
+
+
 def _interrupt_controller(
         manifest: dict, state: dict, processes: dict, *, now: float) -> None:
     """Reap live collectors before publishing one interrupted state."""
@@ -139,7 +128,7 @@ def _write_state(manifest: dict, state: dict) -> None:
 
 
 def reconcile_recovery_state(manifest: dict, state: dict) -> tuple[dict, dict]:
-    """Reauthenticate binding-failed shards in a sidecar state copy."""
+    """Reauthenticate recoverable shards in a sidecar state copy."""
     sidecar = copy.deepcopy(state)
     recovered_shards = {
         dataset: 0 for dataset in background_collection.DATASETS}
@@ -151,39 +140,60 @@ def reconcile_recovery_state(manifest: dict, state: dict) -> tuple[dict, dict]:
         "recovered_records": recovered_records,
         "rejected": [],
     }
-    for round_value in manifest.get("rounds") or []:
-        for job in round_value.get("jobs") or []:
-            job_id = str(job.get("job_id") or "")
-            runtime = sidecar.get("jobs", {}).get(job_id)
-            if not isinstance(runtime, dict) or \
-                    runtime.get("catalog_status") != "failed" or \
-                    int(runtime.get("durable_records") or 0) < 1 or \
-                    "transaction binding differs" not in str(
-                        runtime.get("source_validation_error") or ""):
+    definitions = {
+        job["job_id"]: job for round_value in manifest.get("rounds") or []
+        for job in round_value.get("jobs") or []}
+    if background_collection.is_continuous(manifest):
+        for job_id, runtime in sidecar.get("jobs", {}).items():
+            if job_id in definitions or not isinstance(runtime, dict):
                 continue
-            report["attempted_shards"] += 1
-            try:
-                transaction = background_collection.validate_scene_transaction(
-                    job, returncode=int(runtime.get("returncode") or 0))
-            except (OSError, TypeError, ValueError) as error:
-                report["rejected"].append({
-                    "job_id": job_id, "error": str(error)})
-                continue
-            catalog_status = transaction.pop("catalog_status")
-            transaction.pop("terminal_status", None)
-            if catalog_status not in {"completed", "partial_valid"}:
-                report["rejected"].append({
-                    "job_id": job_id,
-                    "error": f"revalidated as {catalog_status}",
-                })
-                continue
-            dataset = str(job["dataset"])
-            count = int(transaction["source_validated_records"])
-            runtime["catalog_status"] = catalog_status
-            runtime["source_validation"] = transaction
-            runtime.pop("source_validation_error", None)
-            recovered_shards[dataset] += 1
-            recovered_records[dataset] += count
+            definitions[job_id] = background_collection.continuous_job(
+                manifest, runtime["dataset"],
+                catalog_pass=int(runtime["catalog_pass"]),
+                scene_index=int(runtime["scene_index"]))
+    for job_id, job in definitions.items():
+        runtime = sidecar.get("jobs", {}).get(job_id)
+        if not isinstance(runtime, dict):
+            continue
+        binding_failure = (
+            runtime.get("catalog_status") == "failed" and
+            int(runtime.get("durable_records") or 0) >= 1 and
+            "transaction binding differs" in str(
+                runtime.get("source_validation_error") or ""))
+        dead_running = (
+            runtime.get("status") in background_scheduler.RUNNING_STATUSES and
+            not background_recovery.pid_alive(int(runtime["pid"])))
+        if not binding_failure and not dead_running:
+            continue
+        if dead_running and background_recovery.finalization_status(job) not in \
+                collection_closeout.TERMINAL_STATUSES:
+            continue
+        report["attempted_shards"] += 1
+        try:
+            if dead_running:
+                background_recovery.settle_recovered_runtime(
+                    job, runtime, now=time.time())
+            else:
+                transaction = \
+                    background_collection.validate_scene_transaction(
+                        job, returncode=int(runtime.get("returncode") or 0))
+                catalog_status = transaction.pop("catalog_status")
+                transaction.pop("terminal_status", None)
+                if catalog_status not in {"completed", "partial_valid"}:
+                    raise ValueError(f"revalidated as {catalog_status}")
+                runtime["catalog_status"] = catalog_status
+                runtime["source_validation"] = transaction
+                runtime["durable_records"] = int(
+                    transaction["source_validated_records"])
+                runtime.pop("source_validation_error", None)
+        except (OSError, TypeError, ValueError) as error:
+            report["rejected"].append({
+                "job_id": job_id, "error": str(error)})
+            continue
+        dataset = str(job["dataset"])
+        count = int(runtime["durable_records"])
+        recovered_shards[dataset] += 1
+        recovered_records[dataset] += count
     return sidecar, report
 
 
@@ -375,29 +385,34 @@ def _compile_canary_source(parent: dict, job: dict, source: dict) -> Path:
             raise ValueError("capacity canary staging path is invalid")
         shutil.rmtree(staging)
     staging.mkdir(parents=True)
-    records = Path(source["path"])
-    authority = gate_authority.resolve_preview_source_authority(
-        records_paths=[records],
-        expected_records_sha256=[source["records_sha256"]],
-        expected_run_meta_sha256=[source["run_meta_sha256"]],
-        authority_kind=gate_authority.CLI_EXTERNAL_AUTHORITY_KIND,
-        authority_id=(
-            f"capacity-canary:{parent['sha256']}:{job['job_id']}"))
-    artifact = staging / "candidate_qa"
-    report = staging / "candidate_qa_report"
+    catalog_root = staging / "records"
+    catalog_root.mkdir()
     try:
-        candidate_preview.build_main_preview(
-            [records], artifact, report, expected_source_authority=authority,
-            run_meta_sha256=[source["run_meta_sha256"]])
-        if not (report / "index.html").is_file():
-            raise ValueError("capacity canary report is incomplete")
+        record_catalog.write(
+            [{**source, "dataset": job["dataset"]}],
+            catalog_root / "manifest.json")
+        candidates = seen_selection.enumerate_candidates(
+            catalog_root, seed=int(parent.get("seed") or 0))
+        supply = {
+            "schema": "egoconseq.abc1-canary-supply.v1",
+            **seen_supply.analyze_candidates(
+                candidates, seed=int(parent.get("seed") or 0)),
+            "measurements": {
+                "candidate_records": len({row.record_id for row in candidates}),
+                "task_counts": {
+                    task: sum(row.task_id == task for row in candidates)
+                    for task in background_collection.SUPPORTED_TASKS
+                },
+            },
+        }
+        io_utils.atomic_write_json(
+            staging / "supply.json", supply, allow_nan=False, durable=True)
         body = {
             "schema": _CANARY_PUBLICATION_SCHEMA,
             "parent_manifest_sha256": parent["sha256"],
             "job_id": job["job_id"],
             "source": dict(source),
-            "artifact": "candidate_qa",
-            "report": "candidate_qa_report",
+            "artifact": "supply.json",
             "files": _canary_publication_files(staging),
         }
         publication = {**body, "sha256": _canonical_sha256(body)}
@@ -410,10 +425,7 @@ def _compile_canary_source(parent: dict, job: dict, source: dict) -> Path:
         # A partial staging tree is controller-owned and safely rebuilt on the
         # next invocation.  A renamed final is deliberately left for adoption.
         raise
-    # build_main_preview already source-validates, compiles, validates, and
-    # renders the production artifact.  Recompiling that same source here
-    # would only repeat work inside the trusted single-writer process.
-    return final / "candidate_qa"
+    return final / "supply.json"
 
 
 _CANARY_PUBLICATION_SCHEMA = \
@@ -449,7 +461,7 @@ def _load_canary_publication(
     final, _staging = _canary_publication_paths(job)
     return background_collection.background_capacity.\
         validate_canary_publication(
-            final / "candidate_qa",
+            final / "supply.json",
             parent_manifest_sha256=parent["sha256"],
             job_id=job["job_id"], source=source, identity=identity)
 
@@ -747,7 +759,7 @@ def _run_canary_wave(parent_path: Path, parent: dict,
 
 
 def run_canary_manifest(manifest_path: Path, *, execute_job=None) -> dict:
-    """Run six canaries in deterministic four-GPU waves and persist evidence."""
+    """Run six canaries in two fixed-dataset GPU waves."""
     path = Path(manifest_path).resolve()
     parent = background_canary.load(path)
     state = _load_canary_state(parent)
@@ -786,12 +798,12 @@ def run_canary_manifest(manifest_path: Path, *, execute_job=None) -> dict:
                     _fail_canary_state_job(
                         parent, state, job, phase=phase, error=error,
                         attempt=attempt, time_unix=failed_time)))
-            if state["failures"]:
-                raise ValueError(
-                    "capacity shortfall: " + "; ".join(
-                        f"{job_id} {row['phase']}: {row['error']}"
-                        for job_id, row in sorted(
-                            state["failures"].items())))
+                if state["failures"]:
+                    raise ValueError(
+                        "capacity shortfall: " + "; ".join(
+                            f"{job_id} {row['phase']}: {row['error']}"
+                            for job_id, row in sorted(
+                                state["failures"].items())))
         for job in parent["jobs"]:
             if job["job_id"] in real_results:
                 artifact, source = real_results[job["job_id"]]
@@ -895,7 +907,8 @@ def _build(args) -> int:
         raise ValueError("background collection output root is not empty")
     r2r_source_specs = scene_pool.deterministic_scene_order(
         scene_pool.discover_r2r_train_scenes(
-            config.R2R_TRAIN_EPISODES, config.MP3D_ROOT), seed=20260811)
+            config.R2R_TRAIN_EPISODES, config.MP3D_ROOT),
+        seed=args.collection_seed)
     gs_source_specs = _controller_gs_specs(
         Path(config.GS_ROOT), Path(config.GS_TRAIN_MANIFEST))
     b1k_source_specs = scene_pool.discover_b1k_train_scenes(
@@ -911,6 +924,28 @@ def _build(args) -> int:
         args.b1k_catalog_audit, args.b1k_catalog_audit_sha256)
     capacity_profile = _load_capacity_profile(
         args.capacity_profile, args.capacity_profile_sha256)
+    if bool(args.baseline_checkpoint) != bool(
+            args.baseline_checkpoint_sha256):
+        raise ValueError(
+            "baseline checkpoint path and SHA256 must be supplied together")
+    if bool(args.seed_checkpoint) != bool(args.seed_checkpoint_sha256):
+        raise ValueError(
+            "seed checkpoint path and SHA256 must be supplied together")
+    baseline_checkpoint = (
+        Path(args.baseline_checkpoint).resolve()
+        if args.baseline_checkpoint else None)
+    seed_checkpoint = (
+        Path(args.seed_checkpoint).resolve()
+        if args.seed_checkpoint else baseline_checkpoint)
+    seed_checkpoint_sha256 = (
+        args.seed_checkpoint_sha256
+        if args.seed_checkpoint else args.baseline_checkpoint_sha256)
+    seed_identities = (
+        background_pose_exclusions.build_seed_from_checkpoint(
+            seed_checkpoint,
+            expected_sha256=seed_checkpoint_sha256,
+            output_dir=controller_root / "seed_pose_exclusions")
+        if seed_checkpoint is not None else None)
     manifest = background_collection.build_manifest(
         revision=revision, output_root=output_root,
         r2r_scenes=[value.scene_id for value in r2r_specs],
@@ -945,6 +980,14 @@ def _build(args) -> int:
         b1k_source_scene_ids=[value.scene_id for value in b1k_source_specs],
         capacity_profile=capacity_profile,
         capacity_profile_sha256=args.capacity_profile_sha256,
+        seed_pose_exclusions=seed_identities,
+        baseline_checkpoint=(
+            {"path": str(baseline_checkpoint),
+             "sha256": args.baseline_checkpoint_sha256}
+            if baseline_checkpoint is not None else None),
+        target_pose_diverse_frames=args.target_pose_diverse_frames,
+        collection_seed=args.collection_seed,
+        saturated_datasets=args.saturated_dataset,
         rounds=args.rounds)
     controller_root.mkdir(parents=True, exist_ok=True)
     io_utils.atomic_write_json(
@@ -957,6 +1000,15 @@ def _build(args) -> int:
         "rounds": len(manifest["rounds"]),
         "jobs_per_round": 4,
         "quota": manifest["quota"],
+        "baseline_pose_diverse_frames": {
+            dataset: (
+                seed_identities[dataset]["representative_count"]
+                if seed_identities is not None else 0)
+            for dataset in background_collection.DATASETS
+        },
+        "target_pose_diverse_frames": args.target_pose_diverse_frames,
+        "collection_seed": args.collection_seed,
+        "saturated_datasets": sorted(args.saturated_dataset),
         "scheduled_scenes": {
             dataset: len({scene for round_value in manifest["rounds"]
                           for job in round_value["jobs"]
@@ -975,15 +1027,50 @@ def _status_value(manifest: dict, state: dict) -> dict:
     jobs = {}
     for job_id, value in state.get("jobs", {}).items():
         definition = job_by_id.get(job_id)
+        if definition is None and background_collection.is_continuous(
+                manifest):
+            try:
+                definition = background_collection.continuous_job(
+                    manifest, value["dataset"],
+                    catalog_pass=int(value["catalog_pass"]),
+                    scene_index=int(value["scene_index"]))
+            except (KeyError, TypeError, ValueError):
+                definition = None
         progress = (
             background_collection.job_progress(definition)
             if definition is not None and value.get("status") in
             background_scheduler.RUNNING_STATUSES else {})
         jobs[job_id] = {**value, **progress}
+    seeds = manifest.get("seed_pose_exclusions") or {}
+    saturated = set(
+        (manifest.get("collection") or {}).get("saturated_datasets") or [])
+    exhausted = set(state.get("exhausted_datasets") or [])
+    collection_progress = {}
+    for dataset in background_collection.DATASETS:
+        baseline = seeds.get(dataset) or {}
+        incremental = sum(
+            int(row.get("durable_records") or 0)
+            for job_id, row in jobs.items()
+            if str(row.get("dataset") or
+                   (job_by_id.get(job_id) or {}).get("dataset") or "") ==
+            dataset)
+        baseline_records = int(baseline.get("record_count") or 0)
+        collection_progress[dataset] = {
+            "baseline_records": baseline_records,
+            "baseline_pose_diverse_frames": int(
+                baseline.get("representative_count") or 0),
+            "incremental_records": incremental,
+            "total_records": baseline_records + incremental,
+            "saturated": dataset in saturated,
+            "exhausted": dataset in exhausted,
+        }
     return {
         "schema": state["schema"],
         "status": state["status"],
         "current_round": state["current_round"],
+        "dataset_cursors": state.get("dataset_cursors"),
+        "exhausted_datasets": state.get("exhausted_datasets") or [],
+        "progress": collection_progress,
         "jobs": jobs,
         "datasets": state.get("datasets") or {},
         "catalogs": {
@@ -999,16 +1086,25 @@ def _status_value(manifest: dict, state: dict) -> dict:
 def _status(args) -> int:
     manifest = _load_control_manifest(_manifest_path(args))
     state = _load_control_state(manifest)
-    print(json.dumps(_status_value(manifest, state), indent=2, sort_keys=True))
+    pid = _controller_pid(manifest)
+    alive = pid is not None and background_recovery.pid_alive(pid)
+    value = _status_value(manifest, state)
+    value.update({
+        "status": (
+            "stale" if value["status"] == "running" and not alive
+            else value["status"]),
+        "state_status": state["status"],
+        "controller_pid": pid,
+        "controller_alive": alive,
+    })
+    print(json.dumps(value, indent=2, sort_keys=True))
     return 0
 
 
 def _stop(args) -> int:
     manifest = _load_control_manifest(_manifest_path(args))
-    pid_path = _controller_pid_path(manifest)
-    try:
-        pid = int(pid_path.read_text().strip())
-    except (OSError, TypeError, ValueError):
+    pid = _controller_pid(manifest)
+    if pid is None:
         print(json.dumps({"status": "not_running"}, indent=2))
         return 0
     try:
@@ -1097,21 +1193,152 @@ def _record_compile_result(
     return True
 
 
-def _settled_runtime_status(
-        *, returncode: int, durable_records: int, catalog_status: str,
-        stopped_for_capacity: bool) -> str:
-    """Name a terminal runtime only after transaction validation."""
-    if catalog_status == "zero_yield":
-        return (
-            "completed_zero_yield"
-            if int(returncode) == 0 or stopped_for_capacity else
-            "failed_zero_yield")
-    if catalog_status in {"completed", "partial_valid"}:
-        if int(returncode) == 0:
-            return "completed"
-        if stopped_for_capacity:
-            return "completed_capacity_shortfall"
-    return "failed_partial" if int(durable_records) else "failed_zero_yield"
+def _poll_controller_processes(
+        manifest: dict, state: dict, processes: dict,
+        definitions: dict[str, dict], collection: dict, *,
+        now: float) -> list[dict]:
+    """Settle finished workers and return their validated job definitions."""
+    terminal = []
+    for job_id, process in list(processes.items()):
+        definition = definitions[job_id]
+        runtime = state["jobs"][job_id]
+        health = background_collection.job_health(
+            definition, now=now,
+            first_record_deadline_s=collection[
+                "first_record_deadline_s"],
+            initialization_deadline_s=collection[
+                "initialization_deadline_s"],
+            scene_wallclock_s=definition["scene_wallclock_s"],
+            started_time=runtime["started_time_unix"])
+        runtime["durable_records"] = health["durable_records"]
+        if (health.get("backend_ready_time") is not None and
+                not runtime.get("capacity_backend_ready_recorded")):
+            background_collection.record_capacity_event(
+                manifest, definition, "backend_ready",
+                time_unix=health["backend_ready_time"])
+            runtime["capacity_backend_ready_recorded"] = True
+        requested_signal = None
+        if process.poll() is None:
+            requested_signal = \
+                background_collection.controller_watchdog_action(
+                    definition, runtime,
+                    health_status=health["status"], now=now,
+                    scene_wallclock_s=definition["scene_wallclock_s"])
+        if requested_signal is not None:
+            try:
+                background_collection.terminate_process_group(
+                    process.pid, requested_signal)
+            except ProcessLookupError:
+                pass
+        returncode = process.poll()
+        print(json.dumps({
+            "event": "controller_heartbeat", "job_id": job_id,
+            "pid": process.pid,
+            "elapsed_s": round(
+                now - runtime["started_time_unix"], 3),
+            **health, "returncode": returncode,
+        }, sort_keys=True), flush=True)
+        if returncode is None:
+            continue
+        background_collection.record_capacity_event(
+            manifest, definition, "controller_scene_finished",
+            time_unix=now)
+        runtime["finished_time_unix"] = now
+        stopped_for_capacity = runtime.get(
+            "performance_violation") == "scene_wallclock_reached"
+        runtime["returncode"] = int(returncode)
+        retryable = (
+            not health["durable_records"] and returncode != 0 and
+            background_collection.retryable_failure(
+                definition["log_path"], failure_status=runtime.get(
+                    "performance_violation")))
+        if retryable and int(runtime.get("attempt") or 0) <= int(collection[
+                "retryable_initialization_attempts"]):
+            runtime["status"] = "failed_retryable"
+            processes[job_id] = background_collection.retry_job(
+                manifest, state, job_id, now=now)
+            continue
+        catalog_status = "failed"
+        recovered_status = None
+        try:
+            transaction = background_collection.validate_scene_transaction(
+                definition, returncode=int(returncode),
+                stopped_for_capacity=stopped_for_capacity)
+        except (OSError, TypeError, ValueError) as error:
+            runtime["source_validation_error"] = str(error)
+        else:
+            catalog_status = transaction.pop("catalog_status")
+            recovered_status = transaction.pop("terminal_status", None)
+            runtime["source_validation"] = transaction
+        runtime["catalog_status"] = catalog_status
+        runtime["status"] = background_recovery.settled_runtime_status(
+            returncode=int(returncode),
+            durable_records=int(health["durable_records"]),
+            catalog_status=catalog_status,
+            stopped_for_capacity=stopped_for_capacity)
+        if recovered_status is not None:
+            runtime["status"] = recovered_status
+        if runtime["status"] == "completed_capacity_shortfall":
+            runtime["capacity_shortfall"] = runtime["performance_violation"]
+        del processes[job_id]
+        terminal.append(definition)
+    return terminal
+
+
+def _run_continuous_controller(
+        manifest: dict, state: dict, args, processes: dict) -> int:
+    """Run three independent dataset cursors until operator interruption."""
+    collection = manifest["collection"]
+    poll_s = float(
+        args.poll_interval_s or config.BACKGROUND_PROCESS_POLL_INTERVAL_S)
+    heartbeat_s = float(collection["heartbeat_interval_s"])
+    heartbeat_deadline = time.time() + heartbeat_s
+    definitions = {}
+    for job_id, runtime in state.get("jobs", {}).items():
+        if runtime.get("status") not in background_scheduler.RUNNING_STATUSES:
+            continue
+        job = background_collection.continuous_job(
+            manifest, runtime["dataset"],
+            catalog_pass=int(runtime["catalog_pass"]),
+            scene_index=int(runtime["scene_index"]))
+        if job["job_id"] != job_id:
+            raise ValueError("continuous running job identity differs")
+        definitions[job_id] = job
+    terminal, changed = background_recovery.restore_running_processes(
+        state, definitions, processes, now=time.time())
+    for job in terminal:
+        background_scheduler.advance_dataset_cursor(manifest, state, job)
+    if changed:
+        _write_state(manifest, state)
+    while True:
+        ready = background_scheduler.next_continuous_jobs(
+            manifest, state, job_factory=background_collection.continuous_job)
+        if ready:
+            definitions.update({job["job_id"]: job for job in ready})
+            processes.update(background_scheduler.launch_jobs(
+                manifest, state, ready))
+            _write_state(manifest, state)
+        if not processes:
+            if set(state.get("exhausted_datasets") or []) == set(
+                    background_collection.DATASETS):
+                state["status"] = "capacity_shortfall"
+                _write_state(manifest, state)
+                return 2
+            raise RuntimeError(
+                "continuous background collection has no runnable job")
+        now, due = background_recovery.wait_for_process_event(
+            processes, poll_s=poll_s,
+            heartbeat_deadline=heartbeat_deadline)
+        if not due:
+            continue
+        terminal = _poll_controller_processes(
+            manifest, state, processes, definitions, collection,
+            now=now)
+        for job in terminal:
+            background_scheduler.advance_dataset_cursor(
+                manifest, state, job)
+        _write_state(manifest, state)
+        heartbeat_deadline = now + heartbeat_s
 
 
 def _run_controller(args, control: dict) -> int:
@@ -1128,8 +1355,13 @@ def _run_controller(args, control: dict) -> int:
             free_bytes=shutil.disk_usage(
                 Path(manifest["output_root"]).parent).free,
             capacity_profile=manifest["capacity_profile"])
+    if background_collection.is_continuous(manifest):
+        return _run_continuous_controller(
+            manifest, state, args, processes)
     collection = manifest["collection"]
-    poll_s = float(args.poll_interval_s or collection["heartbeat_interval_s"])
+    poll_s = float(
+        args.poll_interval_s or config.BACKGROUND_PROCESS_POLL_INTERVAL_S)
+    heartbeat_s = float(collection["heartbeat_interval_s"])
     completed_datasets = {
         dataset for dataset in background_collection.DATASETS
         if background_collection.dataset_can_stop(manifest, state, dataset)}
@@ -1146,44 +1378,29 @@ def _run_controller(args, control: dict) -> int:
             if int(job["catalog_pass"]) == catalog_pass]
         last_round = max(int(job["round_index"]) for job in pass_jobs)
         processes.clear()
-        processes.update({
-            job_id: _RecoveredProcess(value["pid"])
+        running_definitions = {
+            job_id: job_by_id[job_id]
             for job_id, value in state.get("jobs", {}).items()
             if job_id in job_by_id and
             int(job_by_id[job_id]["catalog_pass"]) == catalog_pass and
-            value.get("status") in
-            background_scheduler.RUNNING_STATUSES
-        })
+            value.get("status") in background_scheduler.RUNNING_STATUSES}
+        _, changed = background_recovery.restore_running_processes(
+            state, running_definitions, processes, now=time.time())
+        if changed:
+            _write_state(manifest, state)
+        heartbeat_deadline = time.time() + heartbeat_s
         while True:
-            checkpoints = background_collection.compilation_checkpoints_due(
-                manifest, state, round_index=last_round,
+            completed_datasets = {
+                dataset for dataset in background_collection.DATASETS
+                if background_collection.dataset_can_stop(
+                    manifest, state, dataset)}
+            ready = background_scheduler.next_jobs(
+                manifest, state, catalog_pass=catalog_pass,
                 completed_datasets=completed_datasets)
-            # Drain only for the one early global compile.  Ordinary scene
-            # transitions remain asynchronous across GPUs.
-            if checkpoints and not processes:
-                for checkpoint in checkpoints:
-                    if not _record_compile_result(
-                            manifest, state, round_index=last_round,
-                            checkpoint=checkpoint):
-                        _write_state(manifest, state)
-                        print(json.dumps(
-                            _status_value(manifest, state), indent=2,
-                            sort_keys=True))
-                        return 2
-                    completed_datasets = {
-                        dataset for dataset in background_collection.DATASETS
-                        if background_collection.dataset_can_stop(
-                            manifest, state, dataset)}
+            if ready:
+                processes.update(background_scheduler.launch_jobs(
+                    manifest, state, ready))
                 _write_state(manifest, state)
-                continue
-            if not checkpoints:
-                ready = background_scheduler.next_jobs(
-                    manifest, state, catalog_pass=catalog_pass,
-                    completed_datasets=completed_datasets)
-                if ready:
-                    processes.update(background_scheduler.launch_jobs(
-                        manifest, state, ready))
-                    _write_state(manifest, state)
             if not processes:
                 if background_scheduler.catalog_pass_complete(
                         manifest, state, catalog_pass=catalog_pass,
@@ -1191,100 +1408,35 @@ def _run_controller(args, control: dict) -> int:
                     break
                 raise RuntimeError(
                     "background collection catalog pass cannot advance")
-            time.sleep(poll_s)
-            now = time.time()
-            for job_id, process in list(processes.items()):
-                definition = job_by_id[job_id]
-                runtime = state["jobs"][job_id]
-                health = background_collection.job_health(
-                    definition, now=now,
-                    first_record_deadline_s=collection[
-                        "first_record_deadline_s"],
-                    initialization_deadline_s=collection[
-                        "initialization_deadline_s"],
-                    scene_wallclock_s=definition["scene_wallclock_s"],
-                    started_time=runtime["started_time_unix"])
-                runtime["durable_records"] = health["durable_records"]
-                if (health.get("backend_ready_time") is not None and
-                        not runtime.get("capacity_backend_ready_recorded")):
-                    background_collection.record_capacity_event(
-                        manifest, definition, "backend_ready",
-                        time_unix=health["backend_ready_time"])
-                    runtime["capacity_backend_ready_recorded"] = True
-                requested_signal = None
-                if process.poll() is None:
-                    requested_signal = \
-                        background_collection.controller_watchdog_action(
-                            definition, runtime,
-                            health_status=health["status"], now=now,
-                            scene_wallclock_s=definition[
-                                "scene_wallclock_s"])
-                if requested_signal is not None:
-                    try:
-                        background_collection.terminate_process_group(
-                            process.pid, requested_signal)
-                    except ProcessLookupError:
-                        pass
-                returncode = process.poll()
-                print(json.dumps({
-                    "event": "controller_heartbeat", "job_id": job_id,
-                    "pid": process.pid,
-                    "elapsed_s": round(
-                        now - runtime["started_time_unix"], 3),
-                    **health, "returncode": returncode,
-                }, sort_keys=True), flush=True)
-                if returncode is None:
-                    continue
-                background_collection.record_capacity_event(
-                    manifest, definition, "controller_scene_finished",
-                    time_unix=now)
-                runtime["finished_time_unix"] = now
-                stopped_for_capacity = runtime.get(
-                    "performance_violation") == "scene_wallclock_reached"
-                runtime["returncode"] = int(returncode)
-                retryable = (
-                    not health["durable_records"] and returncode != 0 and
-                    background_collection.retryable_failure(
-                        definition["log_path"], failure_status=runtime.get(
-                            "performance_violation")))
-                if retryable and \
-                        int(runtime.get("attempt") or 0) <= int(collection[
-                            "retryable_initialization_attempts"]):
-                    runtime["status"] = "failed_retryable"
-                    processes[job_id] = background_collection.retry_job(
-                        manifest, state, job_id, now=now)
-                    continue
-                catalog_status = "failed"
-                recovered_status = None
-                try:
-                    transaction = \
-                        background_collection.validate_scene_transaction(
-                            definition, returncode=int(returncode),
-                            stopped_for_capacity=stopped_for_capacity)
-                except (OSError, TypeError, ValueError) as error:
-                    runtime["source_validation_error"] = str(error)
-                else:
-                    catalog_status = transaction.pop("catalog_status")
-                    recovered_status = transaction.pop(
-                        "terminal_status", None)
-                    runtime["source_validation"] = transaction
-                runtime["catalog_status"] = catalog_status
-                runtime["status"] = _settled_runtime_status(
-                    returncode=int(returncode),
-                    durable_records=int(health["durable_records"]),
-                    catalog_status=catalog_status,
-                    stopped_for_capacity=stopped_for_capacity)
-                if recovered_status is not None:
-                    runtime["status"] = recovered_status
-                if runtime["status"] == "completed_capacity_shortfall":
-                    runtime["capacity_shortfall"] = \
-                        runtime["performance_violation"]
-                del processes[job_id]
+            now, due = background_recovery.wait_for_process_event(
+                processes, poll_s=poll_s,
+                heartbeat_deadline=heartbeat_deadline)
+            if not due:
+                continue
+            _poll_controller_processes(
+                manifest, state, processes, job_by_id, collection,
+                now=now)
             _write_state(manifest, state)
+            heartbeat_deadline = now + heartbeat_s
         state["current_round"] = last_round + 1
+        completed_datasets = {
+            dataset for dataset in background_collection.DATASETS
+            if background_collection.dataset_can_stop(
+                manifest, state, dataset)}
+        state["frame_progress"] = background_collection.frame_progress(
+            manifest, state)
         _write_state(manifest, state)
     complete = completed_datasets == set(background_collection.DATASETS)
+    final_checkpoint = "final-frame-target"
+    if final_checkpoint not in state.get("compile_checkpoints", []):
+        if not _record_compile_result(
+                manifest, state, round_index=len(manifest["rounds"]),
+                checkpoint=final_checkpoint):
+            _write_state(manifest, state)
+            return 2
     state["current_round"] = len(manifest["rounds"])
+    state["frame_progress"] = background_collection.frame_progress(
+        manifest, state)
     state["status"] = "complete" if complete else "capacity_shortfall"
     _write_state(manifest, state)
     print(json.dumps(_status_value(manifest, state), indent=2, sort_keys=True))
@@ -1292,6 +1444,8 @@ def _run_controller(args, control: dict) -> int:
 
 
 def _run(args) -> int:
+    signal.signal(signal.SIGINT, signal.default_int_handler)
+    signal.signal(signal.SIGTERM, signal.default_int_handler)
     light_manifest = _load_control_manifest(_manifest_path(args))
     pid_path = _controller_pid_path(light_manifest)
     pid_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1355,9 +1509,20 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--b1k-catalog-audit-sha256", required=True)
     build.add_argument("--capacity-profile", required=True, type=Path)
     build.add_argument("--capacity-profile-sha256", required=True)
+    build.add_argument("--baseline-checkpoint", type=Path)
+    build.add_argument("--baseline-checkpoint-sha256")
+    build.add_argument("--seed-checkpoint", type=Path)
+    build.add_argument("--seed-checkpoint-sha256")
+    build.add_argument("--collection-seed", required=True, type=int)
     build.add_argument(
-        "--rounds", type=int, default=1,
-        help="number of complete catalog passes")
+        "--saturated-dataset", action="append", default=[],
+        choices=background_collection.DATASETS)
+    build.add_argument(
+        "--target-pose-diverse-frames", type=int,
+        default=config.BACKGROUND_TARGET_POSE_DIVERSE_FRAMES)
+    build.add_argument(
+        "--rounds", type=int, default=0,
+        help="finite catalog passes; 0 runs continuously until stopped")
     build.set_defaults(run=_build)
     run = commands.add_parser("run")
     run.add_argument("--manifest", required=True, type=Path)

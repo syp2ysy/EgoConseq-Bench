@@ -82,7 +82,8 @@ def begin_finalization(
 
 def seal_finalization(
         output_dir, marker: dict, *, records_path, run_meta_path, funnel_path,
-        status: str, source_validation: str, record_count: int) -> None:
+        status: str, source_validation: str, record_count: int,
+        records_sha256: str | None = None) -> dict:
     """Bind one terminal verdict to the exact durable shard bytes."""
     terminal_status = str(status)
     validation_status = str(source_validation)
@@ -105,13 +106,14 @@ def seal_finalization(
         "source_validation": validation_status,
         "record_count": count,
         "finished_time_unix": float(time.time()),
-        "records_sha256": io_utils.sha256_file(records),
+        "records_sha256": (records_sha256 or io_utils.sha256_file(records)),
         "run_meta_sha256": io_utils.sha256_file(run_meta),
         "funnel_sha256": io_utils.sha256_file(funnel),
     }
     io_utils.atomic_write_json(
         Path(output_dir) / FINALIZATION_FILE, sealed,
         sort_keys=False, durable=True)
+    return sealed
 
 
 def load_finalization(

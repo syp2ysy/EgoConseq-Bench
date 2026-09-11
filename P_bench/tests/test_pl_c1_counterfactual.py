@@ -11,9 +11,8 @@ import pytest
 from PIL import Image
 
 from pipeline import (
-    action_proposal, action_sampling, actions as A, benchmark_tasks,
-    c1_counterfactual,
-    candidate_preview, collection_assets, collection_runtime,
+    action_proposal, actions as A, benchmark_tasks,
+    c1_counterfactual, collection_assets, collection_runtime,
     collection_support, config, consensus, dataset_contracts,
     future_view_selection, perception, record,
 )
@@ -292,45 +291,6 @@ def test_post_label_recalled_neighbor_is_not_published_as_natural_a1():
         c1_counterfactual.VARIANT
     stored = next(row for row in manifest if row["tag"] == recalled.tag)
     assert stored["variant"] == c1_counterfactual.VARIANT
-
-
-def test_certified_query_and_neighbours_survive_the_final_selection():
-    pools, provenance, manifest = _bank([TURN_15_FORWARD_1])
-    stats = collections.Counter()
-    families = c1_counterfactual.reserve_pose_slots(
-            pools, provenance, manifest, pose_seed=7, stats=stats,
-            variant_of=collection_runtime._variant_of,
-            group_labels={
-                c1_counterfactual.action_tag(TURN_15_FORWARD_1): "safe"})
-    query_tag = families[0].query_tag
-    neighbor_tags = families[0].neighbor_tags
-    # Crowd the bank. C1 neighbours are generated only after the broad bank
-    # has been shortlisted and the query passed the physical precheck.
-    filler = [
-        [{"type": "forward", "m": 0.5}, {"type": "turn", "deg": deg},
-         {"type": "forward", "m": 1.0}]
-        for deg in (-45, -30, -15, 15, 30, 45)
-    ]
-    for index, program in enumerate(filler):
-        parsed = A.parse_actions(program)
-        tag = c1_counterfactual.action_tag(parsed)
-        pools.setdefault(len(parsed), []).append((tag, parsed))
-        provenance[tag] = {
-            "protocol": "test", "template_id": f"f{index:02d}",
-            "variant": "safe",
-        }
-
-    # Certification is allowed to reject a neighbour, but the query and every
-    # surviving reserved neighbour must also survive the *final* hash cut.
-    lost = neighbor_tags[-1]
-    certified = {
-        tag: "safe" for tag in (query_tag, *neighbor_tags) if tag != lost
-    }
-    selected = action_sampling.select_natural_action_groups(
-        pools, certified, pose_seed=1,
-        reserved_tags=(query_tag, *neighbor_tags))
-
-    assert {tag for tag, _actions in selected} == set(certified)
 
 
 def test_two_safe_queries_each_reserve_six_globally_unique_neighbours():
@@ -818,30 +778,6 @@ def test_selection_index_decodes_only_the_four_selected_terminal_assets(
     assert len(feature_calls) == 4
 
 
-def test_compile_hashes_each_record_once_for_all_source_atoms(
-        tmp_path, monkeypatch):
-    programs = _query_and_neighbours(4)
-    rec, _outcomes, image, _sha = _record(tmp_path, programs)
-    rec["schema_version"] = record.SCHEMA_VERSION
-    rec["oracle_contract_version"] = record.ORACLE_CONTRACT_VERSION
-    rec["image_path"] = image.name
-    calls = 0
-    original = candidate_preview._canonical_sha256
-
-    def counted(value):
-        nonlocal calls
-        if value is rec:
-            calls += 1
-        return original(value)
-
-    monkeypatch.setattr(candidate_preview, "_canonical_sha256", counted)
-
-    candidate_preview.compile_main_records(
-        [rec], asset_root=tmp_path, build_root=tmp_path / "build")
-
-    assert calls == 1
-
-
 def test_one_lost_neighbour_costs_the_pose_a_distractor_not_the_item(
         tmp_path):
     # This is the whole reason the pose reserves more neighbours than an item
@@ -907,37 +843,3 @@ def test_counterfactual_is_the_only_c1_selector(tmp_path):
     with pytest.raises(TypeError):
         benchmark_tasks.c_candidate_selection(
             rec, outcomes[0], asset_root=image.parent, gate={})
-
-
-def _counterfactual_projection(tmp_path):
-    """One compiled record whose only C1 item came from the neighbour bank."""
-    import json
-
-    programs = _query_and_neighbours(4)
-    rec, _outcomes, image, _sha = _record(tmp_path, programs)
-    rec["schema_version"] = record.SCHEMA_VERSION
-    rec["oracle_contract_version"] = record.ORACLE_CONTRACT_VERSION
-    rec["image_path"] = image.name
-    (tmp_path / "records.jsonl").write_text(
-        json.dumps(record.json_value(rec), sort_keys=True) + "\n")
-    return candidate_preview.compile_main_records(
-        [rec], asset_root=tmp_path, build_root=tmp_path / "build")
-
-
-def test_a_counterfactual_c1_artifact_writes_without_an_appearance_gate(
-        tmp_path):
-    # The selection route already skips the uncalibrated appearance gate, but
-    # the artifact writer used to demand a gate authority for any C1 item at
-    # all -- which made every counterfactual run die at the last step.
-    from tests.test_pl_v16_candidate_preview import _write_preview_artifact
-
-    projection = _counterfactual_projection(tmp_path)
-    assert any(item["task_id"] == "C1_future_view_selection"
-               for item in projection["items"])
-
-    result = _write_preview_artifact(
-        projection, tmp_path / "candidate_qa",
-        source_records_path=tmp_path / "records.jsonl")
-
-    assert result["headline_eligible"] is False
-    assert result["coverage"]["C1_future_view_selection"] == 1

@@ -39,16 +39,12 @@ QA_REPORT_REASONS = frozenset({
     "strict_r2r_main_contract_required",
     "unknown_a_task",
     # B construction.
-    "b1_metric_choices_invalid",
-    "b_endpoint_relation_invalid",
-    "b_marker_resolution_missing",
-    "b_numbered_dot_unrenderable",
-    "b_target_invalid",
     "bearing_sector_boundary_margin_failed",
-    "centroid_anchor_range_too_small",
     "completed_clear_required",
     "endpoint_distance_change_too_small",
     "endpoint_distance_nontrivial_required",
+    "surface_point_relation_invalid",
+    "surface_target_invalid",
     "unknown_b_task",
     # C eligibility, terminal assets, and selector disposition.
     "counterfactual_distractor_shortfall",
