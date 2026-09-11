@@ -5,7 +5,8 @@
 The current code is in [EgoConseq-Bench/P_bench](https://github.com/syp2ysy/EgoConseq-Bench/tree/main/P_bench).
 The full `data/` snapshot is distributed separately through
 [syp115/EgoConseq-Bench](https://huggingface.co/datasets/syp115/EgoConseq-Bench).
-**Upload status:** the data upload is pending; use the commands below after all volumes are available.
+The public archive contains **17 volumes (164.93 GiB)**, with SHA-256 checksums
+and a verified source inventory.
 
 It includes Benchmark, SFT, source records, saved responses and evaluation artifacts;
 model weights and external simulator/source-dataset installations are not bundled.
@@ -14,9 +15,7 @@ The snapshot preserves internal symbolic links and hard links.
 From this `P_bench/` directory, download and restore the archive volumes:
 
 ```bash
-hf auth login  # required when accessing the private dataset repository
 hf download syp115/EgoConseq-Bench --repo-type dataset \
-  --include 'data.tar.zst.part-*' SHA256SUMS archive_manifest.json \
   --local-dir ../egoconseq-data-download
 (cd ../egoconseq-data-download && sha256sum -c SHA256SUMS)
 cat ../egoconseq-data-download/data.tar.zst.part-* | zstd -d | tar -xf -

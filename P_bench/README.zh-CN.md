@@ -4,18 +4,16 @@
 
 当前核心代码位于 [EgoConseq-Bench/P_bench](https://github.com/syp2ysy/EgoConseq-Bench/tree/main/P_bench)。
 完整 `data/` 快照单独存放在
-[syp115/EgoConseq-Bench](https://huggingface.co/datasets/syp115/EgoConseq-Bench)，
-**上传状态：** 数据尚未完成上传；所有分卷到齐后再执行下方恢复命令。
+[syp115/EgoConseq-Bench](https://huggingface.co/datasets/syp115/EgoConseq-Bench)。
+数据已公开上传，共 **17 个分卷（164.93 GiB）**，附 SHA-256 校验文件和已核验的源文件清单。
 
-包括 Benchmark、SFT、源记录、已保存的 response 和评测产物；不包含模型权重或外部模拟器、源数据集安装。
+归档包括 Benchmark、SFT、源记录、已保存的 response 和评测产物；不包含模型权重或外部模拟器、源数据集安装。
 归档保留内部软链接及硬链接，不改变题目、GT 或图像。
 
 在本项目 `P_bench/` 目录执行：
 
 ```bash
-hf auth login  # 访问私有数据仓库时需要登录
 hf download syp115/EgoConseq-Bench --repo-type dataset \
-  --include 'data.tar.zst.part-*' SHA256SUMS archive_manifest.json \
   --local-dir ../egoconseq-data-download
 (cd ../egoconseq-data-download && sha256sum -c SHA256SUMS)
 cat ../egoconseq-data-download/data.tar.zst.part-* | zstd -d | tar -xf -
