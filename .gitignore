@@ -1,0 +1,39 @@
+# Checkpoints
+checkpoint*/
+checkpoints/
+outputs/
+weights/
+*.ckpt
+*.pt
+*.bin
+*.safetensors
+
+# Logs
+*.log
+logs/
+results/
+wandb/
+
+# Local data / generated datasets
+data/
+scene_datasets/
+*.jsonl
+
+# Python
+__pycache__/
+.pytest_cache/
+*.pyc
+*.pyo
+.ipynb_checkpoints/
+
+# Environment
+.env
+*.env
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
