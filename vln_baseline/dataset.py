@@ -1,8 +1,11 @@
 import json
 import os
 import random
+from contextlib import nullcontext
+from io import BytesIO
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
+from zipfile import ZipFile
 
 from PIL import Image
 from torch.utils.data import Dataset
@@ -164,15 +167,25 @@ class StreamVLNImitationDataset(Dataset):
             video_path = video_path[len("images/") :]
         return Path(self.image_roots[ep_idx]) / video_path / "rgb"
 
-    def _frame_paths(self, episode: Dict[str, Any], ep_idx: int) -> List[str]:
+    def _frame_paths(
+        self, episode: Dict[str, Any], ep_idx: int, archive: Optional[ZipFile] = None
+    ) -> List[str]:
         rgb_dir = self._rgb_dir(episode, ep_idx)
+        if archive is not None:
+            # Keep logical frame paths and the original lexicographic frame order.
+            names = sorted(
+                name[len("rgb/") :] for name in archive.namelist()
+                if name.startswith("rgb/") and "/" not in name[len("rgb/") :] and not name.endswith("/")
+            )
+            return [str(rgb_dir / name) for name in names]
         if not rgb_dir.exists():
             raise FileNotFoundError(f"RGB directory not found: {rgb_dir}")
         return [str(rgb_dir / name) for name in sorted(os.listdir(rgb_dir))]
 
-    def _load_image(self, path: str) -> Image.Image:
-        image = Image.open(path).convert("RGB")
-        return image.resize(self.image_size)
+    def _load_image(self, path: str, archive: Optional[ZipFile] = None) -> Image.Image:
+        source = BytesIO(archive.read(f"rgb/{Path(path).name}")) if archive is not None else path
+        with Image.open(source) as image:
+            return image.convert("RGB").resize(self.image_size)
 
     def __getitem__(self, idx: int) -> Dict[str, Any]:
         ep_idx, ins_idx, step_idx = self.samples[idx]
@@ -182,15 +195,17 @@ class StreamVLNImitationDataset(Dataset):
             instructions = [instructions]
         instruction = instructions[ins_idx]
         actions = self._episode_actions(episode)
-        frame_paths = self._frame_paths(episode, ep_idx)
+        archive_path = Path(str(self._rgb_dir(episode, ep_idx).parent) + ".zip")
+        # One handle per sample, closed before returning; safe across DataLoader workers.
+        with (ZipFile(archive_path) if archive_path.is_file() else nullcontext()) as archive:
+            frame_paths = self._frame_paths(episode, ep_idx, archive)
+            current_frame_idx = min(step_idx, len(frame_paths) - 1)
+            history_indices = uniform_sample_indices(current_frame_idx, self.history_images)
+            history_frames = [frame_paths[i] for i in history_indices]
+            current_frame = frame_paths[current_frame_idx]
 
-        current_frame_idx = min(step_idx, len(frame_paths) - 1)
-        history_indices = uniform_sample_indices(current_frame_idx, self.history_images)
-        history_frames = [frame_paths[i] for i in history_indices]
-        current_frame = frame_paths[current_frame_idx]
-
-        history_pil = [self._load_image(path) for path in history_frames]
-        current_pil = self._load_image(current_frame)
+            history_pil = [self._load_image(path, archive) for path in history_frames]
+            current_pil = self._load_image(current_frame, archive)
         history_for_prompt = history_pil if history_pil else [current_pil]
 
         sample_key = (ep_idx, ins_idx, step_idx)

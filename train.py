@@ -24,6 +24,7 @@ CONFIG_KEYS = {
     "per_device_train_batch_size", "gradient_accumulation_steps", "bf16",
     "attn_implementation", "gradient_checkpointing", "dataloader_num_workers",
     "dataloader_pin_memory", "logging_steps", "save_strategy", "save_steps",
+    "eval_strategy", "eval_steps",
     "save_total_limit", "report_to", "deepspeed", "freeze_vision_encoder",
     "train_visual_merger", "resume_from_checkpoint", "max_grad_norm",
 }
@@ -48,12 +49,12 @@ def load_config(path: str) -> Dict[str, Any]:
     return config
 
 
-def validate_zero3_config(path: str) -> None:
+def validate_zero2_config(path: str) -> None:
     with open(path, "r") as f:
         config = json.load(f)
     stage = config.get("zero_optimization", {}).get("stage")
-    if stage != 3:
-        raise ValueError(f"Expected DeepSpeed ZeRO-3, got stage={stage} in {path}")
+    if stage != 2:
+        raise ValueError(f"Expected DeepSpeed ZeRO-2, got stage={stage} in {path}")
 
 
 def configure_model_for_training(model: torch.nn.Module, cfg: Dict[str, Any]) -> None:
@@ -82,7 +83,7 @@ def main() -> None:
 
     from transformers import Qwen3VLProcessor, Trainer, TrainingArguments, set_seed
 
-    seed = int(cfg.get("seed", 41))
+    seed = int(cfg.get("seed", 42))
     set_seed(seed)
     model_name = cfg.get("model_name", "Qwen/Qwen3-VL-4B-Instruct")
     dataset = StreamVLNImitationDataset(
@@ -108,11 +109,10 @@ def main() -> None:
     output_dir = cfg.get("output_dir", "outputs/qwen3vl_r2r")
     deepspeed_config = cfg.get("deepspeed")
     if deepspeed_config:
-        validate_zero3_config(deepspeed_config)
-    # Construct TrainingArguments before loading weights so ZeRO-3 can partition
-    # the model during from_pretrained, instead of loading a full copy per rank.
+        validate_zero2_config(deepspeed_config)
     training_args = TrainingArguments(
         output_dir=output_dir,
+        seed=seed,
         per_device_train_batch_size=int(cfg.get("per_device_train_batch_size", 4)),
         gradient_accumulation_steps=int(cfg.get("gradient_accumulation_steps", 4)),
         num_train_epochs=float(cfg.get("num_train_epochs", 1)),
@@ -121,12 +121,14 @@ def main() -> None:
         lr_scheduler_type=cfg.get("lr_scheduler_type", "cosine"),
         bf16=bool(cfg.get("bf16", True)),
         logging_steps=int(cfg.get("logging_steps", 5)),
-        save_strategy=cfg.get("save_strategy", "epoch"),
-        save_steps=int(cfg.get("save_steps", 500)),
-        save_total_limit=int(cfg.get("save_total_limit", 2)),
+        eval_strategy=cfg.get("eval_strategy", "no"),
+        eval_steps=int(cfg.get("eval_steps", 100)),
+        save_strategy=cfg.get("save_strategy", "no"),
+        save_steps=int(cfg.get("save_steps", 12000)),
+        save_total_limit=cfg.get("save_total_limit"),
         dataloader_num_workers=int(cfg.get("dataloader_num_workers", 4)),
         dataloader_pin_memory=bool(cfg.get("dataloader_pin_memory", True)),
-        report_to=cfg.get("report_to", "none"),
+        report_to=cfg.get("report_to", "tensorboard"),
         logging_nan_inf_filter=False,
         max_grad_norm=float(cfg.get("max_grad_norm", 1.0)),
         remove_unused_columns=False,

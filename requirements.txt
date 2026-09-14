@@ -12,8 +12,8 @@ numpy==2.1.2
 PyYAML==6.0.3
 ninja==1.13.0
 packaging==25.0
+tensorboard==2.21.0
 
 # Install after the packages above (requires compatible CUDA build tools):
 # python -m pip install flash-attn==2.8.3 --no-build-isolation
-# Optional tests: python -m pip install pytest==8.4.2
 # Habitat evaluation uses a separate environment; see README.md.

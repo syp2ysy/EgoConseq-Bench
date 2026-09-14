@@ -1,6 +1,6 @@
 """Load native Qwen3-VL and select parameters for navigation fine-tuning."""
 
-from typing import Any, List, Optional, Tuple
+from typing import Any, List, Tuple
 
 import torch
 
@@ -64,10 +64,3 @@ def count_parameters(model: Any) -> Tuple[int, int]:
     total = sum(getattr(param, "ds_numel", param.numel()) for param in model.parameters())
     trainable = sum(getattr(param, "ds_numel", param.numel()) for param in model.parameters() if param.requires_grad)
     return total, trainable
-
-
-def trainable_parameter_names(model: Any, max_names: Optional[int] = None) -> List[str]:
-    names = [name for name, param in model.named_parameters() if param.requires_grad]
-    if max_names is None:
-        return names
-    return names[:max_names]
