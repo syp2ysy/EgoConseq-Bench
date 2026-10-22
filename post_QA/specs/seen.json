@@ -1,0 +1,105 @@
+{
+  "schema": "egoconseq.seen-qa-spec.v2",
+  "seed": 20261011,
+  "datasets": [
+    "r2r",
+    "gs",
+    "b1k"
+  ],
+  "benchmark": {
+    "totals": {
+      "r2r": {
+        "A1": 180,
+        "A2": 250,
+        "A3": 300,
+        "A4": 180,
+        "B1": 300,
+        "B2": 180,
+        "B3": 300,
+        "C1": 300
+      },
+      "gs": {
+        "A1": 230,
+        "A2": 300,
+        "A4": 240,
+        "B2": 240
+      },
+      "b1k": {
+        "A1": 190,
+        "A2": 250,
+        "A3": 300,
+        "A4": 180,
+        "B1": 300,
+        "B2": 180,
+        "B3": 300,
+        "C1": 300
+      }
+    },
+    "direction_margin_deg": 2.0,
+    "distance_gate": {
+      "min_change_m": 0.3,
+      "min_change_ratio": 0.1,
+      "min_distance_m": 0.05
+    },
+    "representation": {
+      "atomic": 0.4,
+      "merged": 0.4,
+      "coarse": 0.2
+    },
+    "turn_first_min": 0.3,
+    "scene_cap_factor": 2.0,
+    "conflict": {
+      "distance_m": 0.5,
+      "yaw_deg": 45.0,
+      "floor_m": 0.5
+    },
+    "dino": {
+      "model": "vit_small_patch14_dinov2.lvd142m",
+      "threshold": 0.9,
+      "near_view": {
+        "distance_m": 2.0,
+        "yaw_deg": 45.0
+      }
+    },
+    "max_dark_fraction": 0.05
+  },
+  "radius_pairs": {
+    "pairs_per_dataset": 100,
+    "program_cap": 2
+  },
+  "a3_category_cap": 0.15,
+  "a3_broad_categories": [
+    "appliance",
+    "furniture",
+    "seating"
+  ],
+  "sft": {
+    "total": 300000,
+    "per_observation": 3,
+    "neighbourhood_cap": 6,
+    "exclusion_m": 0.5,
+    "representation": {
+      "atomic": 0.6,
+      "merged": 0.3,
+      "coarse": 0.1
+    },
+    "radius_pair_share_of_a1": 0.3,
+    "max_dark_fraction": 0.2,
+    "dir": "data/sft/seen"
+  },
+  "distance_bins_m": [
+    1.0,
+    2.0,
+    4.0,
+    8.0
+  ],
+  "distance_change_m": {
+    "unchanged": 0.05,
+    "small": 0.3
+  },
+  "name": "seen",
+  "split": "train_seen",
+  "meta": "data/seen_meta_gt3",
+  "output": "data/benchmark",
+  "image_reviews": "data/analysis/image_review/v11_calibrated/image_reviews.csv"
+}

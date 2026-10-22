@@ -1,0 +1,96 @@
+{
+  "a3_broad_categories": [
+    "appliance",
+    "furniture",
+    "seating"
+  ],
+  "a3_category_cap": 0.15,
+  "benchmark": {
+    "conflict": {
+      "distance_m": 0.5,
+      "floor_m": 0.5,
+      "yaw_deg": 45.0
+    },
+    "dino": {
+      "model": "vit_small_patch14_dinov2.lvd142m",
+      "near_view": {
+        "distance_m": 2.0,
+        "yaw_deg": 45.0
+      },
+      "threshold": 0.9
+    },
+    "direction_margin_deg": 2.0,
+    "distance_gate": {
+      "min_change_m": 0.3,
+      "min_change_ratio": 0.1,
+      "min_distance_m": 0.05
+    },
+    "max_dark_fraction": 0.05,
+    "representation": {
+      "atomic": 0.4,
+      "coarse": 0.2,
+      "merged": 0.4
+    },
+    "scene_cap_factor": 2.0,
+    "scene_min_items": {
+      "b1k": 26,
+      "gs": 6,
+      "r2r": 9
+    },
+    "totals": {
+      "b1k": {
+        "A1": 76,
+        "A2": 100,
+        "A3": 120,
+        "A4": 72,
+        "B1": 120,
+        "B2": 72,
+        "B3": 120,
+        "C1": 120
+      },
+      "gs": {
+        "A1": 92,
+        "A2": 120,
+        "A4": 96,
+        "B2": 96
+      },
+      "r2r": {
+        "A1": 72,
+        "A2": 100,
+        "A3": 120,
+        "A4": 72,
+        "B1": 120,
+        "B2": 72,
+        "B3": 120,
+        "C1": 120
+      }
+    },
+    "turn_first_min": 0.3
+  },
+  "datasets": [
+    "r2r",
+    "gs",
+    "b1k"
+  ],
+  "distance_bins_m": [
+    1.0,
+    2.0,
+    4.0,
+    8.0
+  ],
+  "distance_change_m": {
+    "small": 0.3,
+    "unchanged": 0.05
+  },
+  "image_reviews": "data/analysis/image_review/v11_unseen_final/image_reviews.csv",
+  "meta": "data/unseen_meta_gt3",
+  "name": "unseen",
+  "output": "data/benchmark",
+  "radius_pairs": {
+    "pairs_per_dataset": 50,
+    "program_cap": 2
+  },
+  "schema": "egoconseq.qa-spec.v3",
+  "seed": 20261016,
+  "split": "test_unseen"
+}

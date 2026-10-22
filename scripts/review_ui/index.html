@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%2323624d'/%3E%3Ctext x='8' y='24' font-family='sans-serif' font-size='23' fill='white'%3EP%3C/text%3E%3C/svg%3E">
+  <title>P-Bench · QA Explorer</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <a class="skip-link" href="#items">跳到题目</a>
+  <header class="topbar">
+    <a class="brand" href="./" aria-label="P-Bench 首页"><span class="brand-mark">P<span>↗</span></span><span>P-Bench<small>QA EXPLORER</small></span></a>
+    <nav class="tabs" aria-label="页面视图">
+      <button class="active" id="browse-tab" aria-pressed="true">题目浏览 <span>↗</span></button>
+      <button id="stats-tab" aria-pressed="false">统计分析</button>
+    </nav>
+    <div class="header-actions"><span class="saved-count" id="done"></span><button class="quiet-button" id="export">导出审阅</button><label class="quiet-button import-label">导入<input id="import" type="file" accept=".json" aria-label="导入审阅 JSON"></label></div>
+  </header>
+
+  <main>
+    <section class="intro">
+      <div><div class="eyebrow"><span class="live-dot"></span> PUBLISHED COLLECTION · <span id="version">已发布版本</span></div><h1>每一道题，完整看见<span>。</span></h1><p>并排查看图像、完整问题与标准答案，发现数据背后的细节。</p></div>
+      <div class="collection-stats" id="totals" aria-label="当前筛选统计"></div>
+    </section>
+
+    <section class="filter-panel" aria-label="题目筛选">
+      <div class="filter-primary"><div id="primary-facets" class="facet-row"></div><label class="search-box"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 5 5"/></svg><input id="q" type="search" placeholder="搜索场景、ID 或题干…" aria-label="搜索场景、ID 或题干"></label><button id="more-filters" class="quiet-button" aria-expanded="false" aria-controls="advanced">更多筛选 <span>＋</span></button></div>
+      <div id="advanced" class="advanced" hidden><div id="secondary-facets" class="facet-row"></div><label class="check-label"><input type="checkbox" id="sample">只看分层抽查样本</label></div>
+      <div class="filter-foot"><span id="scope"></span><button class="text-button" id="reset">重置筛选</button></div>
+    </section>
+
+    <section id="browse-view" aria-label="题目浏览">
+      <div class="view-toolbar"><div class="view-heading"><h2>Case gallery</h2><span id="count" aria-live="polite"></span></div><div class="view-controls"><button id="answers-toggle" class="quiet-button" aria-pressed="true">答案已显示</button><div class="column-control" aria-label="每行卡片数"><span>每行</span><button data-columns="2" aria-pressed="false">2</button><button data-columns="3" class="active" aria-pressed="true">3</button><button data-columns="4" aria-pressed="false">4</button></div><div class="pagination"><button id="prev" aria-label="上一页">←</button><span id="page-top"></span><button id="next" aria-label="下一页">→</button></div></div></div>
+      <div id="items" class="case-grid" tabindex="-1"></div>
+      <div id="empty" class="empty-state" hidden><span>⌕</span><h3>没有匹配的题目</h3><p>试着减少筛选条件，或更换搜索词。</p><button class="primary-button" id="empty-reset">查看全部题目</button></div>
+      <div class="bottom-bar"><span>原始题干与答案完整保留 · 点击图片可放大</span><div class="pagination"><button id="prev-bottom">← 上一页</button><span id="page-bottom"></span><button id="next-bottom">下一页 →</button></div></div>
+    </section>
+
+    <section id="stats-view" hidden aria-label="统计分析"><div id="stats-content"></div></section>
+    <footer><span>P-Bench / Dataset review</span><span>页面仅用于浏览与审阅，不修改发布数据。记录保存在当前浏览器，可导出备份。</span></footer>
+  </main>
+
+  <dialog id="lightbox" aria-label="图片放大查看"><div class="lightbox-top"><span id="lightbox-title"></span><button id="lightbox-close" class="quiet-button" aria-label="关闭图片">关闭 ×</button></div><div class="lightbox-body"><img id="lightbox-image" alt=""></div><div class="lightbox-bottom"><button id="image-prev" class="quiet-button">← 上一张</button><span id="image-counter"></span><a id="image-original" target="_blank" rel="noopener">打开原图 ↗</a><button id="image-next" class="quiet-button">下一张 →</button></div></dialog>
+  <div id="toast" class="toast" role="status" hidden></div>
+  <noscript><p class="empty-state">请启用 JavaScript 以浏览和筛选题目。</p></noscript>
+  <script src="items.js"></script>
+  <script src="stats.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
