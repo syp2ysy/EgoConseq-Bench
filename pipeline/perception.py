@@ -1,0 +1,166 @@
+"""Depth -> ground point cloud + occupancy field (pure numpy, no Habitat).
+
+Copied and cleaned from the validated egoconseq math. Single source of truth
+for all pixel<->3D geometry in the pipeline.
+
+Frames
+------
+Camera frame: +z forward (z == depth), +x right, +y up.
+Agent ground frame: origin at footprint centre ON THE FLOOR, +z forward,
+    +x right, +y up. Level camera at height h => y_ground = y_cam + h.
+
+Pixel convention: u = column, v = row (grows DOWN); pixel (u, v) covers [u, u+1) x [v, v+1) of a pinhole
+with principal point (cx, cy), so its ray passes (u+0.5, v+0.5). ``unproject`` uses
+    x = (u+0.5-cx)/fx*d ; y = (cy-v-0.5)/fy*d ; z = d
+and project_ground below is its exact inverse in pixel-index coordinates.
+"""
+
+from __future__ import annotations
+
+import math
+from typing import Optional, Tuple
+
+import numpy as np
+from scipy.ndimage import binary_dilation
+from scipy.spatial import cKDTree
+
+from pipeline import config
+
+
+def _valid_mask(depth: np.ndarray) -> np.ndarray:
+    d = np.asarray(depth, dtype=np.float64)
+    return np.isfinite(d) & (d > 0.0)
+
+
+def unproject(depth: np.ndarray, K: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    """Depth image -> (camera-frame points (N,3), pixel uv (N,2 int)).
+    Only pixels with finite depth > 0 are kept; uv[i] = (u, v) is the source
+    pixel of pts_cam[i], so callers can slice any per-pixel array (e.g.
+    semantic) with ``arr[uv[:,1], uv[:,0]]`` in matching order.
+    """
+    depth = np.asarray(depth, dtype=np.float64)
+    H, W = depth.shape
+    fx, fy, cx, cy = K[0, 0], K[1, 1], K[0, 2], K[1, 2]
+    us, vs = np.meshgrid(np.arange(W), np.arange(H))  # (H,W) int
+    valid = _valid_mask(depth)
+    u = us[valid].astype(np.float64)
+    v = vs[valid].astype(np.float64)
+    d = depth[valid]
+    x = (u + .5 - cx) / fx * d  # pixel u covers [u, u + 1): its ray passes the pixel centre
+    y = (cy - v - .5) / fy * d
+    z = d
+    pts_cam = np.stack([x, y, z], axis=1)
+    uv = np.stack([us[valid], vs[valid]], axis=1).astype(np.int64)
+    return pts_cam, uv
+
+
+def to_agent_ground(pts_cam: np.ndarray,
+                    camera_height: float = config.CAMERA_HEIGHT_M) -> np.ndarray:
+    """Camera-frame -> agent ground frame (level camera: y += camera_height)."""
+    pts = np.asarray(pts_cam, dtype=np.float64).copy()
+    pts[:, 1] += camera_height
+    return pts
+
+
+def bearing_dist(x: float, z: float) -> Tuple[float, float]:
+    """(bearing deg, horizontal distance) of a ground point; 0 = straight ahead."""
+    return math.degrees(math.atan2(x, z)), math.hypot(x, z)
+
+
+def project_ground(point_3d_ground, K: np.ndarray,
+                   camera_height: float
+                   ) -> Optional[Tuple[float, float]]:
+    """Ground-frame 3D point -> pixel (u, v); None if at/behind the camera.
+    Exact inverse of unproject + to_agent_ground for a level camera.
+    """
+    x_g, y_g, z_g = float(point_3d_ground[0]), float(point_3d_ground[1]), float(point_3d_ground[2])
+    z_cam = z_g
+    if z_cam <= 0:
+        return None
+    y_cam = y_g - camera_height
+    fx, fy, cx, cy = K[0, 0], K[1, 1], K[0, 2], K[1, 2]
+    u = fx * x_g / z_cam + cx - .5  # pixel-index coordinates: pixel centres are integers
+    v = cy - fy * y_cam / z_cam - .5
+    return (float(u), float(v))
+
+
+def world_from_local(pts_ground: np.ndarray, pos, yaw: float) -> np.ndarray:
+    """Agent-ground-frame points -> Habitat world frame.
+    Local axes: +x right, +y up (height above floor), +z forward. Agent root
+    `pos` is at floor level; yaw is rotation about +Y (yaw=0 faces world -Z).
+        right   = ( cos y, 0, -sin y)
+        up      = ( 0,     1,  0)
+        forward = (-sin y, 0, -cos y)
+    """
+    p = np.asarray(pts_ground, dtype=np.float64)
+    x, y, z = p[:, 0], p[:, 1], p[:, 2]
+    cy, sy = math.cos(yaw), math.sin(yaw)
+    wx = pos[0] + x * cy - z * sy
+    wy = pos[1] + y
+    wz = pos[2] - x * sy - z * cy
+    return np.stack([wx, wy, wz], axis=1)
+
+
+def local_from_world(pts_world: np.ndarray, pos, yaw: float) -> np.ndarray:
+    """Habitat world-frame points -> agent ground frame.
+    This is the exact inverse of :func:`world_from_local`. The yaw transform is
+    symmetric and self-inverse, but translation must be removed before applying
+    it. Inputs and outputs are ``(N, 3)`` arrays in metres.
+    """
+    points = np.asarray(pts_world, dtype=np.float64)
+    if points.ndim != 2 or points.shape[1] != 3:
+        raise ValueError(
+            f"expected an (N, 3) world-point array, got {points.shape}")
+    relative = points - np.asarray(pos, dtype=np.float64)[None, :]
+    wx, wy, wz = relative[:, 0], relative[:, 1], relative[:, 2]
+    cy, sy = math.cos(yaw), math.sin(yaw)
+    local_x = wx * cy - wz * sy
+    local_y = wy
+    local_z = -wx * sy - wz * cy
+    return np.stack([local_x, local_y, local_z], axis=1)
+
+
+def obstacle_mask(pts_ground: np.ndarray, floor_plane,
+                  band: Tuple[float, float] = config.GROUND_OBSTACLE_BAND_M) -> np.ndarray:
+    """Boolean mask selecting obstacle-band points (height above floor in band).
+    ``floor_plane`` is the pose's canonical ``FloorPlaneEstimate``. There is no
+    scalar overload: a scalar would be a per-image floor estimate, which is
+    exactly what the canonical plane replaces.
+    """
+    above = floor_plane.height_above_points(pts_ground)
+    low, high = band
+    # Half-open at the floor end so the band agrees with the navmesh, whose
+    # climb allowance treats a step of exactly ``low`` as traversable.
+    return (above > low) & (above <= high)
+
+
+class VoxelField:
+    """2-D (x, z) occupancy grid with binary dilation and radius support query.
+    Build from obstacle-band ground points (y ignored). ``support_count`` returns
+    the number of occupied dilated voxel centres within a footprint disk.
+    """
+    _MARGIN_VOXELS = 2
+    def __init__(self, pts_ground: np.ndarray,
+                 voxel: float = config.VOXEL_SIZE_M,
+                 dilation: int = config.VOXEL_DILATION) -> None:
+        pts = np.asarray(pts_ground, dtype=np.float64)
+        if pts.shape[0] == 0:
+            self._tree = None
+            return
+        xz = pts[:, [0, 2]]
+        margin = self._MARGIN_VOXELS * voxel
+        origin = xz.min(axis=0) - margin
+        extent = xz.max(axis=0) + margin - origin
+        n_cells = np.maximum(np.ceil(extent / voxel).astype(int), 1)
+        idx = np.clip(np.floor((xz - origin) / voxel).astype(int), 0, n_cells - 1)
+        grid = np.zeros(n_cells, dtype=bool)
+        grid[idx[:, 0], idx[:, 1]] = True
+        if dilation > 0:
+            grid = binary_dilation(grid, iterations=dilation)
+        occ_ix, occ_iz = np.nonzero(grid)
+        centers = (np.stack([occ_ix, occ_iz], axis=1).astype(np.float64) + 0.5) * voxel + origin
+        self._tree = cKDTree(centers) if centers.shape[0] else None
+    def support_count(self, center: Tuple[float, float], radius: float) -> int:
+        if self._tree is None:
+            return 0
+        return len(self._tree.query_ball_point([center[0], center[1]], radius))
